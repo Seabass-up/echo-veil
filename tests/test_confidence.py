@@ -28,4 +28,9 @@ def test_out_of_range_rejected():
     with pytest.raises(ValueError):
         classify(1.5)
     with pytest.raises(ValueError):
-        classify(-0.1)
+        classify(-1.1)
+
+
+def test_proximity_score_range_is_accepted():
+    assert classify(1.15).band == ConfidenceBand.SOLID
+    assert classify(-0.85).band == ConfidenceBand.OBSCURITY

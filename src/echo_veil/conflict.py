@@ -12,6 +12,7 @@ from the spec.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -57,6 +58,35 @@ class FossilizedEcho:
             {"t": time.time(), "event": event, "detail": detail}
         )
 
+    def approximate_size(self) -> int:
+        """Return the current serialized size in bytes without raising.
+
+        Useful for checking how close the fossil is to the 2KB cap before
+        calling ``serialize()``, allowing callers to budget timeline entries
+        or trim the summary proactively.
+        """
+        try:
+            return len(self.serialize())
+        except ValueError:
+            # Over cap — return the size anyway so the caller knows by how much
+            payload = json.dumps(
+                {
+                    "topic": self.topic,
+                    "summary": self.summary,
+                    "timeline": self.timeline,
+                    "created_at": self.created_at,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return len(payload)
+
+    def remaining_budget(self) -> int:
+        """Return the number of bytes remaining before the 2KB cap.
+
+        Returns a negative number if the fossil is already over cap.
+        """
+        return FOSSIL_MAX_BYTES - self.approximate_size()
+
     def serialize(self) -> bytes:
         payload = json.dumps(
             {
@@ -77,7 +107,10 @@ class FossilizedEcho:
 
 def in_peer_review_zone(strength_a: float, strength_b: float) -> bool:
     """True if two claims are close enough to warrant preserving the tension."""
-    return abs(strength_a - strength_b) <= PEER_REVIEW_DELTA
+    delta = abs(strength_a - strength_b)
+    if math.isclose(delta, PEER_REVIEW_DELTA, abs_tol=1e-9):
+        return True
+    return delta <= PEER_REVIEW_DELTA
 
 
 def open_conflict(topic, claim_a, claim_b, strength_a, strength_b) -> ConflictVine:

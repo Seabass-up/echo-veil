@@ -16,7 +16,9 @@ FAISS / a vector DB) and an object store. See docs/ARCHITECTURE_NOTES.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from .vectors import Vector, cosine_similarity
 
@@ -24,7 +26,7 @@ from .vectors import Vector, cosine_similarity
 @dataclass
 class IndexEntry:
     key: str
-    anchor: Vector
+    anchor: Any
     kind: str  # "anchor" | "fossil"
 
 
@@ -34,16 +36,21 @@ class MetadataIndex:
     def __init__(self) -> None:
         self._entries: dict[str, IndexEntry] = {}
 
-    def upsert(self, key: str, anchor: Vector, kind: str = "anchor") -> None:
+    def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None:
         self._entries[key] = IndexEntry(key=key, anchor=anchor, kind=kind)
 
     def remove(self, key: str) -> None:
         self._entries.pop(key, None)
 
-    def search(self, query: Vector, top_k: int = 5) -> list[tuple[str, float]]:
+    def search(
+        self,
+        query: Vector,
+        top_k: int = 5,
+        score_fn: Callable[[Vector, IndexEntry], float] | None = None,
+    ) -> list[tuple[str, float]]:
         """Return up to ``top_k`` (key, similarity) pairs, best first."""
         scored = [
-            (e.key, cosine_similarity(query, e.anchor))
+            (e.key, score_fn(query, e) if score_fn is not None else cosine_similarity(query, e.anchor))
             for e in self._entries.values()
         ]
         scored.sort(key=lambda kv: kv[1], reverse=True)

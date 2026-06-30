@@ -1,8 +1,8 @@
 """Confidence Spectrum Matrix (Section 3).
 
-Maps a retrieval confidence score in [0, 1] to a qualitative band and the
-UI/operational behavior the spec prescribes. Thresholds are taken verbatim
-from the spec table.
+Maps a retrieval confidence score to a qualitative band and the UI/operational
+behavior the spec prescribes. The public API accepts normalized confidence
+scores in [0, 1] and the system's own proximity scores in [-1, 1.15].
 """
 
 from __future__ import annotations
@@ -49,10 +49,17 @@ _POLICIES: tuple[BandPolicy, ...] = (
 
 
 def classify(score: float) -> BandPolicy:
-    """Return the policy for a confidence ``score`` in [0, 1]."""
-    if not 0.0 <= score <= 1.0:
+    """Return the policy for a confidence or proximity ``score``.
+
+    Proximity scores are cosine similarity plus recency, so legitimate system
+    scores can be negative or slightly above 1.0. Values in that documented
+    range are clamped into the confidence bands: anti-aligned memories become
+    OBSCURITY, and very fresh exact matches become SOLID.
+    """
+    if not -1.0 <= score <= 1.15:
         raise ValueError(f"confidence score out of range: {score}")
+    score = min(1.0, max(0.0, score))
     for policy in _POLICIES:
         if score >= policy.min_score:
             return policy
-    return _POLICIES[-1]  # unreachable; defensive
+    return _POLICIES[-1]

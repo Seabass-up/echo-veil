@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from collections import deque
 
-import numpy as np
-
 from .vectors import Vector, as_vector, centroid, cosine_similarity
 
 WINDOW = 3
@@ -63,3 +61,13 @@ class DriftDetector:
             if d > DRIFT_THRESHOLD + HYSTERESIS:
                 self._drifting = True
         return self._drifting
+
+    def reset(self) -> None:
+        """Clear all observed intents and the latched drift state.
+
+        Useful for session resets, test teardown, or when the conversation
+        context changes so radically that prior drift measurements are
+        no longer meaningful.
+        """
+        self._recent.clear()
+        self._drifting = False

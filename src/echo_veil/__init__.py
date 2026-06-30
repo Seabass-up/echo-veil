@@ -8,8 +8,9 @@ as an interface plus an explicit stub, not a working implementation -- see
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
+from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
 from .confidence import ConfidenceBand, classify
 from .conflict import (
     ConflictVine,
@@ -19,17 +20,30 @@ from .conflict import (
     open_conflict,
     resurrect,
 )
-from .crypto_shield import CryptoShield, EnclaveCryptoShield, NullCryptoShield
+from .crypto_shield import (
+    AesGcmCryptoShield,
+    CryptoShield,
+    EnclaveCryptoShield,
+    NullCryptoShield,
+    ProtectedVector,
+)
 from .drift import DriftDetector
-from .oracle import Oracle
+from .oracle import GenerationGated, Oracle
 from .proximity import ProximityConfig, proximity_score, time_decay
 from .vectors import cosine_similarity, normalize
 from .vine import Vine, VineState
 from .workspace import Workspace, WorkspaceConfig
 
+# EnclaveCryptoShield remains exported for compatibility, but construction
+# raises NotImplementedError because the CKKS/enclave/ZK layer is not built.
+
 __all__ = [
     "__version__",
     "Oracle",
+    "GenerationGated",
+    "CapabilityCheck",
+    "CapabilityReport",
+    "CapabilityStatus",
     "Workspace",
     "WorkspaceConfig",
     "Vine",
@@ -48,7 +62,9 @@ __all__ = [
     "DriftDetector",
     "CryptoShield",
     "NullCryptoShield",
+    "AesGcmCryptoShield",
     "EnclaveCryptoShield",
+    "ProtectedVector",
     "cosine_similarity",
     "normalize",
 ]

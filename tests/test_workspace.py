@@ -103,3 +103,52 @@ def test_compression_roundtrip_preserves_anchor():
     assert 0.0 <= ratio < 1.0
     v.decompress()
     assert np.allclose(v.anchor, original)
+
+
+def test_default_pressure_no_longer_blocks_decay():
+    ws = Workspace(WorkspaceConfig(capacity=100))
+    v = ws.add(Vine("off-topic", np.array([0.0, 1.0])))
+
+    report = ws.run_decay_cycle(np.array([1.0, 0.0]))
+
+    assert v.state == VineState.TWILIGHT
+    assert v.vine_id in report["demoted"]
+
+
+def test_capacity_overflow_evicts_lowest_scoring_vines():
+    ws = Workspace(WorkspaceConfig(capacity=2))
+    keep = ws.add(Vine("keep", np.array([1.0, 0.0])))
+    middle = ws.add(Vine("middle", np.array([0.5, 0.5])))
+    drop = ws.add(Vine("drop", np.array([0.0, 1.0])))
+
+    report = ws.run_decay_cycle(np.array([1.0, 0.0]))
+
+    assert keep.state != VineState.EVICTED
+    assert middle.state != VineState.EVICTED
+    assert drop.state == VineState.EVICTED
+    assert drop.vine_id in report["evicted"]
+    assert ws.pressure() == pytest.approx(1.0)
+
+
+def test_protected_vine_without_oracle_score_fn_does_not_crash_decay():
+    ws = Workspace(WorkspaceConfig(capacity=2))
+    v = ws.add(Vine("protected", np.zeros(0)))
+    v.protected_anchor = object()
+
+    report = ws.run_decay_cycle(np.array([1.0, 0.0]))
+
+    assert report == {"demoted": [], "evicted": []}
+    assert v.state == VineState.ACTIVE
+
+
+def test_manual_twilight_vine_gets_internal_counter_and_expires():
+    ws = Workspace(WorkspaceConfig(capacity=2))
+    v = ws.add(Vine("manual", np.array([0.0, 1.0])))
+    now = time.time()
+    v.state = VineState.TWILIGHT
+    v.twilight_since = now - 31 * 60
+
+    for _ in range(6):
+        ws.run_decay_cycle(np.array([1.0, 0.0]), now=now)
+
+    assert v.state == VineState.EVICTED

@@ -49,8 +49,14 @@ class Vine:
         True if protected by an Amber Lock (immune to proximity decay).
     score:
         Last computed proximity score (cached for reporting / debugging).
+    protected_anchor:
+        Optional CryptoShield-protected anchor payload. When set, the live
+        plaintext ``anchor`` may be released and scoring is delegated to the
+        shield by the Oracle.
     _compressed:
         Internal store for the serialized payload when in TWILIGHT.
+    _anchor_shape:
+        Shape of the anchor array before compression (for decompress restore).
     """
 
     topic: str
@@ -62,7 +68,9 @@ class Vine:
     locked: bool = False
     score: float = 1.0
     twilight_since: float | None = None
+    protected_anchor: object | None = field(default=None, repr=False)
     _compressed: bytes | None = field(default=None, repr=False)
+    _anchor_shape: tuple[int, ...] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.anchor = as_vector(self.anchor)
@@ -83,17 +91,40 @@ class Vine:
     # docs/ARCHITECTURE_NOTES.md (Deviations).
 
     def compress(self) -> float:
-        """Serialize+compress the anchor; return achieved compression ratio."""
+        """Serialize+compress the anchor; return achieved compression ratio.
+
+        The anchor array is zeroed after compression to avoid holding both the
+        full array and the compressed bytes in memory simultaneously (the spec
+        intends TWILIGHT to reduce, not double, the RAM footprint).
+        """
         raw = self.anchor.astype(np.float64).tobytes()
         self._compressed = zlib.compress(raw, level=9)
+        self._anchor_shape = self.anchor.shape
+        self.anchor = np.zeros(0)  # release the live array
         if not raw:
             return 0.0
         return 1.0 - (len(self._compressed) / len(raw))
 
     def decompress(self) -> None:
-        """Restore the anchor from its compressed form (snap-back)."""
+        """Restore the anchor from its compressed form (snap-back).
+
+        Reconstructs the full-dimension anchor array and releases the
+        compressed bytes.
+        """
         if self._compressed is None:
             return
         raw = zlib.decompress(self._compressed)
-        self.anchor = np.frombuffer(raw, dtype=np.float64).copy()
+        restored = np.frombuffer(raw, dtype=np.float64).copy()
+        if self._anchor_shape is not None and self._anchor_shape != (0,):
+            restored = restored.reshape(self._anchor_shape)
+        self.anchor = restored
         self._compressed = None
+        self._anchor_shape = None
+
+    def archive_payload(self) -> bytes | None:
+        """Return the compressed anchor bytes for L3 cold archive storage.
+
+        Available when the vine is in TWILIGHT or EVICTED state (after
+        compress() has been called). Returns None if no compressed data exists.
+        """
+        return self._compressed

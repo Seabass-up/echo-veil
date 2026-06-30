@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echo-veil"
-version = "0.1.0"
+version = "0.3.0"
 description = "A tiered, decay-driven memory architecture for conversational agents (Echo Veil v1.0 core)."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Seabass-up" }]
 keywords = ["memory", "agents", "vector", "retrieval", "context-management"]
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "cryptography>=42.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.5", "mypy>=1.8"]
 
 [project.urls]
 Homepage = "https://github.com/Seabass-up/echo-veil"

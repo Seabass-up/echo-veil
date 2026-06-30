@@ -19,6 +19,7 @@ Constants taken verbatim from the spec:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .proximity import ProximityConfig, proximity_score
@@ -41,7 +42,7 @@ PRESSURE_TIGHTEN_AT = 0.90
 @dataclass
 class WorkspaceConfig:
     capacity: int = 400               # active-vine ceiling before pruning
-    pressure_evict_at: float = 0.85   # RAM% that triggers a scan (spec: 85%)
+    pressure_evict_at: float = 0.85   # retained for compatibility; decay always scans
     proximity: ProximityConfig = field(default_factory=ProximityConfig)
 
 
@@ -52,6 +53,7 @@ class Workspace:
         self.config = config or WorkspaceConfig()
         self._vines: dict[str, Vine] = {}
         self._crests: list[str] = []  # ordered: primary, secondary, tertiary
+        self._twilight_cycles: dict[str, int] = {}  # internal cycle counter
 
     # --- membership ----------------------------------------------------------
     def add(self, vine: Vine) -> Vine:
@@ -72,6 +74,20 @@ class Workspace:
         """Fraction of capacity currently occupied by non-evicted vines."""
         live = [v for v in self._vines.values() if v.state != VineState.EVICTED]
         return len(live) / self.config.capacity if self.config.capacity else 0.0
+
+    def prune_evicted(self) -> list[str]:
+        """Remove evicted vines from the workspace dict and return their ids.
+
+        Callers (typically the Oracle) should archive evicted vine data to L2/L3
+        *before* calling this method, since the vine objects become unreachable
+        afterward. This two-step pattern (observe ? archive ? prune) prevents
+        memory leaks while giving the archiving layer time to read the data.
+        """
+        evicted_ids = [vid for vid, v in list(self._vines.items()) if v.state == VineState.EVICTED]
+        for vid in evicted_ids:
+            del self._vines[vid]
+            self._twilight_cycles.pop(vid, None)
+        return evicted_ids
 
     # --- amber locks ---------------------------------------------------------
     def lock(self, vine_id: str) -> None:
@@ -115,13 +131,19 @@ class Workspace:
             vine.state = VineState.ACTIVE
             vine.twilight_since = None
             vine.score = min(1.0, vine.score + REINFORCEMENT_BONUS)
+            self._twilight_cycles.pop(vine_id, None)
         vine.touch(now)
 
-    def _twilight_expired(self, vine: Vine, now: float, cycles_elapsed: int) -> bool:
-        # "5 query cycles or 30 minutes, whichever is longer."
+    def _twilight_expired(self, vine: Vine, now: float) -> bool:
+        """Check if a twilight vine has exceeded both the cycle and time thresholds.
+
+        The spec requires "5 query cycles or 30 minutes, whichever is longer"
+        (i.e. both conditions must be met before eviction).
+        """
         if vine.twilight_since is None:
             return False
         minutes_elapsed = (now - vine.twilight_since) / 60.0
+        cycles_elapsed = self._twilight_cycles.get(vine.vine_id, 0)
         return cycles_elapsed >= TWILIGHT_CYCLES and minutes_elapsed >= TWILIGHT_MINUTES
 
     def run_decay_cycle(
@@ -129,6 +151,7 @@ class Workspace:
         intent: Vector,
         now: float | None = None,
         cycles_since_twilight: dict[str, int] | None = None,
+        score_fn: Callable[[Vector, Vine, float], float] | None = None,
     ) -> dict[str, list[str]]:
         """Score active vines against ``intent`` and advance the lifecycle.
 
@@ -136,44 +159,96 @@ class Workspace:
             {"demoted": [...], "evicted": [...]}
 
         ``cycles_since_twilight`` lets a caller drive the "5 query cycles" rule;
-        when omitted, eviction falls back to the 30-minute clock alone.
+        when omitted, the internal cycle counter is used instead.
+
+        Evicted vines remain in the workspace dict until ``prune_evicted()`` is
+        called, giving the archiving layer (e.g. the Oracle) a chance to read
+        their data for L2/L3 transfer.
         """
         now = time.time() if now is None else now
-        cycles = cycles_since_twilight or {}
+        caller_cycles = cycles_since_twilight or {}
         report: dict[str, list[str]] = {"demoted": [], "evicted": []}
 
-        # Only scan when memory pressure warrants it (spec: > 85%). The check is
-        # advisory: callers can force a scan by lowering pressure_evict_at to 0.
-        if self.pressure() < self.config.pressure_evict_at:
-            # Still update scores so reporting is accurate, but skip eviction.
-            self._rescore(intent, now)
-            return report
-
-        for vine in self._vines.values():
+        for vine in list(self._vines.values()):
             if vine.state == VineState.EVICTED or vine.locked:
                 continue
 
-            vine.score = proximity_score(
-                intent, vine.anchor, vine.age_hours(now), self.config.proximity
-            )
+            # Only rescore ACTIVE vines; TWILIGHT vines have their anchor
+            # compressed (zeroed) so proximity cannot be recomputed. Their
+            # score from demotion is preserved until reinforcement or eviction.
+            if vine.state == VineState.ACTIVE:
+                vine.score = self._score_active_vine(intent, vine, now, score_fn=score_fn)
 
             if vine.state == VineState.ACTIVE and vine.score < TWILIGHT_THRESHOLD:
                 vine.state = VineState.TWILIGHT
                 vine.twilight_since = now
-                vine.compress()
+                if vine.protected_anchor is None:
+                    vine.compress()
+                self._twilight_cycles[vine.vine_id] = 0
                 report["demoted"].append(vine.vine_id)
 
             elif vine.state == VineState.TWILIGHT:
-                elapsed = cycles.get(vine.vine_id, TWILIGHT_CYCLES)
-                if self._twilight_expired(vine, now, elapsed):
+                if vine.twilight_since is None:
+                    vine.twilight_since = now
+                self._twilight_cycles.setdefault(vine.vine_id, 0)
+
+                # Increment internal cycle counter
+                if vine.vine_id in self._twilight_cycles:
+                    self._twilight_cycles[vine.vine_id] += 1
+
+                # Allow caller override for cycle count
+                if vine.vine_id in caller_cycles:
+                    elapsed = caller_cycles[vine.vine_id]
+                    self._twilight_cycles[vine.vine_id] = elapsed
+                else:
+                    elapsed = self._twilight_cycles.get(vine.vine_id, 0)
+
+                if self._twilight_expired(vine, now):
                     vine.state = VineState.EVICTED
                     report["evicted"].append(vine.vine_id)
 
+        self._enforce_capacity(report)
         return report
 
-    def _rescore(self, intent: Vector, now: float) -> None:
+    def _enforce_capacity(self, report: dict[str, list[str]]) -> None:
+        if self.config.capacity <= 0:
+            return
+        live = [v for v in self._vines.values() if v.state != VineState.EVICTED]
+        overflow = len(live) - self.config.capacity
+        if overflow <= 0:
+            return
+
+        candidates = [v for v in live if not v.locked]
+        candidates.sort(key=lambda v: (v.score, v.last_touched))
+        for vine in candidates[:overflow]:
+            if vine.state == VineState.ACTIVE and vine.protected_anchor is None:
+                vine.compress()
+            vine.state = VineState.EVICTED
+            self._twilight_cycles.pop(vine.vine_id, None)
+            if vine.vine_id not in report["evicted"]:
+                report["evicted"].append(vine.vine_id)
+
+    def _rescore(
+        self,
+        intent: Vector,
+        now: float,
+        *,
+        score_fn: Callable[[Vector, Vine, float], float] | None = None,
+    ) -> None:
         for vine in self._vines.values():
-            if vine.state != VineState.EVICTED and not vine.locked:
-                vine.score = proximity_score(
-                    intent, vine.anchor, vine.age_hours(now), self.config.proximity
-                )
+            if vine.state == VineState.ACTIVE and not vine.locked:
+                vine.score = self._score_active_vine(intent, vine, now, score_fn=score_fn)
+
+    def _score_active_vine(
+        self,
+        intent: Vector,
+        vine: Vine,
+        now: float,
+        *,
+        score_fn: Callable[[Vector, Vine, float], float] | None = None,
+    ) -> float:
+        if score_fn is not None:
+            return score_fn(intent, vine, now)
+        if vine.protected_anchor is not None and vine.anchor.shape == (0,):
+            return vine.score
+        return proximity_score(intent, vine.anchor, vine.age_hours(now), self.config.proximity)

@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import base64
+import json
+
+import numpy as np
+import pytest
+
+from echo_veil import AesGcmCryptoShield, EnclaveCryptoShield, Oracle
+from echo_veil.crypto_shield import ProtectedVector
+
+
+def test_aes_gcm_shield_encrypts_anchor_and_computes_similarity() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    anchor = np.array([1.0, 0.0], dtype=np.float64)
+
+    protected = shield.protect(anchor)
+
+    assert isinstance(protected, ProtectedVector)
+    assert protected.algorithm == "AES-256-GCM"
+    assert protected.ciphertext != anchor.tobytes()
+    assert protected.nonce
+    assert protected.shape == (2,)
+
+    assert shield.similarity(np.array([1.0, 0.0]), protected) == pytest.approx(1.0)
+    assert shield.similarity(np.array([0.0, 1.0]), protected) == pytest.approx(0.0)
+
+
+def test_aes_gcm_shield_rejects_tampered_ciphertext() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    protected = shield.protect(np.array([1.0, 0.0], dtype=np.float64))
+    tampered = ProtectedVector(
+        algorithm=protected.algorithm,
+        nonce=protected.nonce,
+        ciphertext=protected.ciphertext[:-1] + bytes([protected.ciphertext[-1] ^ 0x01]),
+        shape=protected.shape,
+        dtype=protected.dtype,
+    )
+
+    with pytest.raises(ValueError, match="decrypt"):
+        shield.similarity(np.array([1.0, 0.0]), tampered)
+
+
+def test_protected_vector_json_roundtrip() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    protected = shield.protect(np.array([1.0, 0.0], dtype=np.float64))
+
+    restored = ProtectedVector.from_json_bytes(protected.to_json_bytes())
+
+    assert restored == protected
+    assert shield.similarity(np.array([1.0, 0.0], dtype=np.float64), restored) == pytest.approx(1.0)
+
+
+def test_aes_gcm_shield_key_helpers_and_env_loader(monkeypatch) -> None:
+    key = AesGcmCryptoShield.generate_key()
+    encoded = AesGcmCryptoShield.key_to_base64(key)
+    assert AesGcmCryptoShield.key_from_base64(encoded) == key
+
+    monkeypatch.setenv("ECHO_VEIL_CRYPTO_KEY", encoded)
+    shield = AesGcmCryptoShield.from_env()
+    protected = shield.protect(np.array([1.0, 0.0], dtype=np.float64))
+    assert shield.similarity(np.array([1.0, 0.0]), protected) == pytest.approx(1.0)
+
+
+def test_aes_gcm_shield_rejects_invalid_key_material() -> None:
+    with pytest.raises(ValueError, match="32 bytes"):
+        AesGcmCryptoShield(b"short")
+
+    with pytest.raises(ValueError, match="not set"):
+        AesGcmCryptoShield.from_env("MISSING_ECHO_VEIL_KEY")
+
+    with pytest.raises(ValueError, match="32 bytes"):
+        AesGcmCryptoShield.key_from_base64(base64.urlsafe_b64encode(b"short").decode())
+
+    with pytest.raises(ValueError, match="base64"):
+        AesGcmCryptoShield.key_from_base64("not valid base64!")
+
+
+def test_aes_gcm_shield_rejects_empty_anchor() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+
+    with pytest.raises(ValueError, match="empty anchor"):
+        shield.protect(np.array([], dtype=np.float64))
+
+
+def test_protected_vector_rejects_malformed_json_and_payloads() -> None:
+    with pytest.raises(ValueError, match="JSON"):
+        ProtectedVector.from_json_bytes(b"not json")
+
+    with pytest.raises(ValueError, match="JSON"):
+        ProtectedVector.from_json_bytes(json.dumps(["not", "a", "dict"]).encode())
+
+    valid = ProtectedVector(
+        algorithm="AES-256-GCM",
+        nonce=b"1" * 12,
+        ciphertext=b"2" * 16,
+        shape=(2,),
+        dtype="float64",
+    ).as_dict()
+
+    for mutation in (
+        {"shape": "2"},
+        {"shape": [0]},
+        {"shape": [2, 2]},
+        {"shape": [True]},
+        {"nonce_b64": "not valid base64!"},
+        {"nonce_b64": base64.urlsafe_b64encode(b"short").decode("ascii")},
+        {"ciphertext_b64": ""},
+        {"algorithm": ""},
+        {"dtype": ""},
+    ):
+        payload = dict(valid)
+        payload.update(mutation)
+        with pytest.raises(ValueError, match="Invalid|base64"):
+            ProtectedVector.from_dict(payload)
+
+
+def test_aes_gcm_shield_rejects_unsupported_protected_metadata() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    protected = shield.protect(np.array([1.0, 0.0], dtype=np.float64))
+
+    wrong_algorithm = ProtectedVector(
+        algorithm="OTHER",
+        nonce=protected.nonce,
+        ciphertext=protected.ciphertext,
+        shape=protected.shape,
+        dtype=protected.dtype,
+    )
+    with pytest.raises(ValueError, match="Unsupported"):
+        shield.similarity(np.array([1.0, 0.0], dtype=np.float64), wrong_algorithm)
+
+    wrong_dtype = ProtectedVector(
+        algorithm=protected.algorithm,
+        nonce=protected.nonce,
+        ciphertext=protected.ciphertext,
+        shape=protected.shape,
+        dtype="float32",
+    )
+    with pytest.raises(ValueError, match="Unsupported"):
+        shield.similarity(np.array([1.0, 0.0], dtype=np.float64), wrong_dtype)
+
+
+def test_aes_gcm_shield_rejects_dimension_mismatch() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    protected = shield.protect(np.array([1.0, 0.0], dtype=np.float64))
+
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        shield.similarity(np.array([1.0, 0.0, 0.0], dtype=np.float64), protected)
+
+
+def test_enclave_crypto_shield_remains_top_level_importable_placeholder() -> None:
+    with pytest.raises(NotImplementedError, match="placeholder"):
+        EnclaveCryptoShield()
+
+
+def test_oracle_production_accepts_aes_gcm_shield() -> None:
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    oracle = Oracle(environment="production", shield=shield)
+    report = oracle.capability_report().as_dict()
+
+    assert oracle.environment == "production"
+    assert report["crypto_readiness"]["status"] == "ready"
+    assert "AES-GCM" in report["crypto_readiness"]["message"]
+    assert not any("NullCryptoShield" in blocker for blocker in report["production_blockers"])
+
+
+def test_oracle_with_aes_gcm_protects_active_vine_anchor_and_scores_decay() -> None:
+    from echo_veil import WorkspaceConfig
+    from echo_veil.vine import VineState
+
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    oracle = Oracle(WorkspaceConfig(capacity=2, pressure_evict_at=0.0), shield=shield)
+    keep = oracle.sprout("keep", np.array([1.0, 0.0], dtype=np.float64))
+    drop = oracle.sprout("drop", np.array([0.0, 1.0], dtype=np.float64))
+
+    assert isinstance(keep.protected_anchor, ProtectedVector)
+    assert keep.anchor.shape == (0,)
+    assert isinstance(drop.protected_anchor, ProtectedVector)
+    assert drop.anchor.shape == (0,)
+
+    report = oracle.observe(np.array([1.0, 0.0], dtype=np.float64))
+
+    assert keep.state == VineState.ACTIVE
+    assert drop.state == VineState.TWILIGHT
+    assert drop.vine_id in report["demoted"]
+
+
+def test_oracle_with_aes_gcm_indexes_and_archives_evicted_protected_vine() -> None:
+    from echo_veil import WorkspaceConfig
+
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    oracle = Oracle(WorkspaceConfig(capacity=2, pressure_evict_at=0.0), shield=shield)
+    drop = oracle.sprout("drop", np.array([0.0, 1.0], dtype=np.float64))
+
+    oracle.observe(np.array([1.0, 0.0], dtype=np.float64))
+    drop.twilight_since -= 3600
+    for _ in range(6):
+        oracle.observe(np.array([1.0, 0.0], dtype=np.float64))
+
+    assert len(oracle.index) == 1
+    assert oracle.search_index(np.array([0.0, 1.0], dtype=np.float64), top_k=1)[0][0] == drop.vine_id
+
+    archived = oracle.archive.get(drop.vine_id)
+    assert archived is not None
+    restored = ProtectedVector.from_json_bytes(archived)
+    assert shield.similarity(np.array([0.0, 1.0], dtype=np.float64), restored) == pytest.approx(1.0)
+
+
+def test_oracle_with_aes_gcm_garden_centroid_and_drift_use_protected_vines() -> None:
+    from echo_veil import WorkspaceConfig
+
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    oracle = Oracle(WorkspaceConfig(capacity=5, pressure_evict_at=0.0), shield=shield)
+    a = oracle.sprout("a", np.array([1.0, 0.0], dtype=np.float64))
+    b = oracle.sprout("b", np.array([1.0, 0.0], dtype=np.float64))
+    oracle.workspace.lock(a.vine_id)
+    oracle.workspace.lock(b.vine_id)
+
+    assert np.allclose(oracle.garden_centroid(), np.array([1.0, 0.0], dtype=np.float64))
+
+    for _ in range(3):
+        oracle.observe(np.array([0.0, 1.0], dtype=np.float64))
+
+    assert oracle.is_drifting() is True
