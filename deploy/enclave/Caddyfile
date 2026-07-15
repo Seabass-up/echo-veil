@@ -1,0 +1,29 @@
+enclave-origin.algo-cli.com {
+    request_body {
+        max_size 2MB
+    }
+
+    tls {
+        client_auth {
+            mode require_and_verify
+            trust_pool file {
+                pem_file /etc/echo-veil/cloudflare-mtls-client-ca.pem
+            }
+        }
+    }
+
+    reverse_proxy 127.0.0.1:8080 {
+        header_up -X-Echo-Veil-mTLS
+        header_up X-Echo-Veil-mTLS verified
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 15s
+        }
+    }
+
+    header {
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+}

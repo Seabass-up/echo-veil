@@ -2,36 +2,239 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [main, master]
   pull_request:
-    branches: [master, main]
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  python:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
 
-      - name: Install dependencies
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked Python environment
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install ruff mypy
+          uv python install "$PYTHON_VERSION"
+          uv sync --locked --python "$PYTHON_VERSION" --extra dev --extra enclave-origin
 
-      - name: Lint with ruff
-        run: ruff check src/ tests/
+      - name: Lint
+        run: uv run --locked ruff check src tests scripts examples
 
-      - name: Type check with mypy
-        run: mypy src/echo_veil --ignore-missing-imports --no-error-summary
+      - name: Type check
+        run: >-
+          uv run --locked mypy src/echo_veil src/echo_veil_origin scripts examples
+          --ignore-missing-imports --no-error-summary
 
-      - name: Run tests
-        run: pytest -q
+      - name: Test
+        run: uv run --locked pytest -q
+
+  package:
+    name: Reproducible package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build twice from the locked source tree
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          uv build --no-sources --out-dir dist-a
+          uv build --no-sources --out-dir dist-b
+          python scripts/normalize_sdist.py dist-a/*.tar.gz
+          python scripts/normalize_sdist.py dist-b/*.tar.gz
+          cmp dist-a/*.whl dist-b/*.whl
+          cmp dist-a/*.tar.gz dist-b/*.tar.gz
+
+      - name: Check package metadata and contents
+        run: |
+          uvx --from twine==6.2.0 twine check dist-a/*
+          python scripts/release_check.py --dist dist-a
+
+      - name: Install and smoke-test the wheel
+        run: |
+          uv venv /tmp/echo-veil-release-smoke
+          uv pip install --python /tmp/echo-veil-release-smoke/bin/python dist-a/*.whl
+          EXPECTED_VERSION="$(python -c \
+            'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          ECHO_VEIL_EXPECTED_VERSION="$EXPECTED_VERSION" \
+            /tmp/echo-veil-release-smoke/bin/python -c \
+            'import os, echo_veil; assert echo_veil.__version__ == os.environ["ECHO_VEIL_EXPECTED_VERSION"]'
+
+  rust-zkp:
+    name: Rust ZKP
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.96.0
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path crates/echo-veil-zkp/Cargo.toml -- --check
+
+      - name: Lint
+        run: >-
+          cargo clippy --locked --all-targets
+          --manifest-path crates/echo-veil-zkp/Cargo.toml -- -D warnings
+
+      - name: Test proof gate
+        run: cargo test --locked --manifest-path crates/echo-veil-zkp/Cargo.toml
+
+  worker:
+    name: Cloudflare Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cloudflare/enclave-gateway
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare/enclave-gateway/package-lock.json
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Type check
+        run: npm run check
+
+      - name: Validate generated deployment bundle
+        env:
+          CF_ACCESS_AUD: 0000000000000000000000000000000000000000000000000000000000000000
+          CF_MTLS_CERTIFICATE_ID: 00000000-0000-0000-0000-000000000000
+        run: npm run deploy:dry-run
+
+  product-site:
+    name: Echo Veil product site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Lint and render-test the site
+        run: |
+          npm run lint
+          npm test
+
+  infrastructure:
+    name: Infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.12.4
+
+      - name: Validate Cloudflare OpenTofu
+        run: |
+          tofu -chdir=deploy/cloudflare init -backend=false -lockfile=readonly
+          tofu -chdir=deploy/cloudflare fmt -check
+          tofu -chdir=deploy/cloudflare validate
+
+      - name: Install verified Azure Bicep binary
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/Azure/bicep/releases/download/v0.45.15/bicep-linux-x64 \
+            --output /tmp/bicep
+          echo 'ff5b194b042c220df4a50d6768ed1d6c39a32894bfdc4ff83d62b115d966a7ce  /tmp/bicep' \
+            | sha256sum --check --strict
+          chmod 700 /tmp/bicep
+
+      - name: Validate Azure Bicep
+        run: |
+          /tmp/bicep build deploy/azure/main.bicep --stdout >/dev/null
+          /tmp/bicep build deploy/azure/skr-key.bicep --stdout >/dev/null
+
+  enclave-image:
+    name: Confidential-origin image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build the OpenFHE confidential-origin image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/enclave/Dockerfile
+          pull: true
+          push: false
+          tags: echo-veil-enclave-origin:ci

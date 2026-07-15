@@ -134,7 +134,7 @@ def test_aes_protected_eviction_is_searchable_after_restart(
     oracle = Oracle(
         WorkspaceConfig(capacity=2, pressure_evict_at=0.0),
         shield=shield,
-        environment="production",
+        environment="staging",
         storage=store,
     )
     vine = oracle.sprout("protected", np.array([0.0, 1.0]))
@@ -152,7 +152,7 @@ def test_aes_protected_eviction_is_searchable_after_restart(
     restored = SQLiteStore(path)
     restored_oracle = Oracle(
         shield=shield,
-        environment="production",
+        environment="staging",
         storage=restored,
     )
     assert restored_oracle.search_index(np.array([0.0, 1.0]), top_k=1)[0] == (
@@ -170,23 +170,25 @@ def test_aes_protected_eviction_is_searchable_after_restart(
     restored.close()
 
 
-def test_durable_production_configuration_has_no_capability_blockers(
+def test_durable_staging_configuration_reports_only_crypto_blocker(
     tmp_path: Path,
 ) -> None:
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
     with SQLiteStore(tmp_path / "ready.db") as store:
         oracle = Oracle(
             shield=shield,
-            environment="production",
+            environment="staging",
             storage=store,
         )
         report = oracle.capability_report()
 
-        assert report.production_blockers == ()
+        assert report.production_blockers == (
+            "AES-GCM does not satisfy the production enclave profile.",
+        )
         assert report.storage_backend.status == CapabilityStatus.READY
         assert report.persistence.status == CapabilityStatus.READY
         assert report.vector_index_backend.status == CapabilityStatus.READY
-        assert report.overall_status == CapabilityStatus.DEGRADED
+        assert report.overall_status == CapabilityStatus.BLOCKED
         assert not any("linear" in warning.lower() for warning in report.warnings)
 
 
@@ -195,7 +197,7 @@ def test_in_memory_sqlite_is_not_reported_as_durable() -> None:
     with SQLiteStore(":memory:") as store:
         oracle = Oracle(
             shield=shield,
-            environment="production",
+            environment="staging",
             storage=store,
         )
         report = oracle.capability_report()
@@ -251,7 +253,7 @@ def test_active_workspace_is_checkpointed_and_restored(tmp_path: Path) -> None:
     key = AesGcmCryptoShield.generate_key()
     shield = AesGcmCryptoShield(key)
     with SQLiteStore(path) as store:
-        oracle = Oracle(shield=shield, environment="production", storage=store)
+        oracle = Oracle(shield=shield, environment="staging", storage=store)
         primary = oracle.sprout("primary", np.array([1.0, 0.0]))
         secondary = oracle.sprout("secondary", np.array([0.0, 1.0]))
         oracle.lock(primary.vine_id)
@@ -265,7 +267,7 @@ def test_active_workspace_is_checkpointed_and_restored(tmp_path: Path) -> None:
     with SQLiteStore(path) as restored_store:
         restored = Oracle(
             shield=AesGcmCryptoShield(key),
-            environment="production",
+            environment="staging",
             storage=restored_store,
         )
         restored_primary = restored.workspace.get(primary.vine_id)

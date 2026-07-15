@@ -1,0 +1,17 @@
+services:
+  origin:
+    image: ${ECHO_VEIL_IMAGE:?set ECHO_VEIL_IMAGE to an immutable image digest}
+    restart: unless-stopped
+    env_file:
+      - /etc/echo-veil/origin.env
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    volumes:
+      - /run/echo-veil/secrets:/run/echo-veil/secrets:ro
+      - /var/lib/echo-veil/ckks:/var/lib/echo-veil/ckks:rw

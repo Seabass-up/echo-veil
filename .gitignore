@@ -11,4 +11,10 @@ venv/
 *.log
 .DS_Store
 node_modules/
+target/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
 .dev.vars
+.wrangler.generated.json

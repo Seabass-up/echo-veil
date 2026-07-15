@@ -479,7 +479,7 @@ class TestCryptoShieldAPI:
 
     def test_oracle_production_refuses_explicit_null_shield(self):
         """Production must reject NullCryptoShield even when passed explicitly."""
-        with pytest.raises(RuntimeError, match="real CryptoShield"):
+        with pytest.raises(RuntimeError, match="EnclaveCryptoShield"):
             Oracle(
                 environment="production",
                 shield=NullCryptoShield(silence_warning=True),
@@ -495,7 +495,7 @@ class TestCryptoShieldAPI:
             def similarity(self, intent, protected_anchor):
                 return 1.0
 
-        with pytest.raises(RuntimeError, match="production_ready=True"):
+        with pytest.raises(RuntimeError, match="EnclaveCryptoShield"):
             Oracle(environment="production", shield=DummyShield())
 
     def test_crypto_shield_protocol(self):
