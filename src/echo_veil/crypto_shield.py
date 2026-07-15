@@ -30,6 +30,7 @@ import time
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, TypeGuard, runtime_checkable
 
 import numpy as np
@@ -403,12 +404,26 @@ class CryptoShield(Protocol):
         ...
 
 
-class ProductionCryptoShield(CryptoShield, Protocol):
-    """A shield that explicitly opts into use in production-like modes.
+class LocalCkksEngine(Protocol):
+    """Minimal OpenFHE engine contract used by the local-private shield."""
 
-    This marker cannot prove cryptographic quality; it prevents an arbitrary
-    two-method object from silently bypassing the production startup guard.
-    Capability reporting still treats unknown custom shields conservatively.
+    key_id: str
+
+    def encrypt_normalized(self, vector: Sequence[float]) -> bytes: ...
+
+    def cosine_similarity(
+        self, normalized_intent: Sequence[float], ciphertext: bytes
+    ) -> float: ...
+
+    def ciphertext_dimension(self, ciphertext: bytes) -> int: ...
+
+
+class ProductionCryptoShield(CryptoShield, Protocol):
+    """A shield that explicitly opts into use in staging-like modes.
+
+    This marker cannot prove cryptographic quality and is never sufficient for
+    production, which requires ``EnclaveCryptoShield`` specifically. It prevents
+    an arbitrary two-method object from silently bypassing the staging guard.
     """
 
     production_ready: bool
@@ -491,7 +506,7 @@ class AesGcmCryptoShield:
     """
 
     algorithm = "AES-256-GCM"
-    production_ready = True
+    production_ready = False
 
     def __init__(self, key: bytes) -> None:
         if not isinstance(key, (bytes, bytearray, memoryview)):
@@ -634,6 +649,106 @@ class AesGcmCryptoShield:
         if len(protected_anchor.ciphertext) != expected_ciphertext_bytes:
             raise ValueError("Protected vector ciphertext size does not match metadata")
         return protected_anchor
+
+
+class LocalOpenFheCryptoShield:
+    """Run OpenFHE CKKS directly on a user's local machine.
+
+    This profile keeps vectors, ciphertexts, and key material on the device and
+    performs similarity homomorphically. It deliberately does not claim remote
+    attestation or hardware-enclave isolation: a process with access to the
+    local account can potentially access the OpenFHE secret-key state.
+    """
+
+    algorithm = "CKKS"
+    provider_id = "local-openfhe"
+    production_ready = False
+    local_private_ready = True
+
+    def __init__(self, engine: LocalCkksEngine) -> None:
+        key_id = getattr(engine, "key_id", None)
+        if not isinstance(key_id, str) or not key_id:
+            raise ValueError("local OpenFHE engine must expose a non-empty key_id")
+        for method in (
+            "encrypt_normalized",
+            "cosine_similarity",
+            "ciphertext_dimension",
+        ):
+            if not callable(getattr(engine, method, None)):
+                raise TypeError(f"local OpenFHE engine must implement {method}()")
+        self._engine = engine
+        self.key_id = key_id
+
+    @classmethod
+    def from_directory(
+        cls,
+        state_directory: str | Path,
+        *,
+        key_id: str = "echo-veil-local-v1",
+        batch_size: int = 16_384,
+        create_keys: bool = False,
+    ) -> LocalOpenFheCryptoShield:
+        """Load or initialize owner-local OpenFHE key state."""
+        from echo_veil_origin.openfhe_engine import OpenFheCkksEngine
+
+        return cls(
+            OpenFheCkksEngine(
+                key_id,
+                state_directory,
+                batch_size=batch_size,
+                create_keys=create_keys,
+            )
+        )
+
+    @staticmethod
+    def _normalize(vector: Vector, label: str) -> Vector:
+        value = as_vector(vector, allow_empty=False, name=label)
+        norm = float(np.linalg.norm(value))
+        if not math.isfinite(norm) or norm <= 1e-15:
+            raise ValueError(f"{label} must have a non-zero finite norm")
+        return value / norm
+
+    def protect(self, anchor: Vector) -> EnclaveProtectedVector:
+        value = as_vector(anchor, allow_empty=False, name="anchor vector")
+        ciphertext = self._engine.encrypt_normalized(
+            self._normalize(value, "anchor vector").tolist()
+        )
+        if not isinstance(ciphertext, bytes) or not ciphertext:
+            raise RuntimeError("local OpenFHE engine returned an invalid ciphertext")
+        if self._engine.ciphertext_dimension(ciphertext) != value.size:
+            raise RuntimeError("local OpenFHE ciphertext dimension is inconsistent")
+        return EnclaveProtectedVector(
+            provider_id=self.provider_id,
+            key_id=self.key_id,
+            ciphertext=ciphertext,
+            shape=value.shape,
+        )
+
+    def similarity(self, intent: Vector, protected_anchor: object) -> float:
+        if not isinstance(protected_anchor, EnclaveProtectedVector):
+            raise TypeError("LocalOpenFheCryptoShield expects EnclaveProtectedVector")
+        if (
+            protected_anchor.provider_id != self.provider_id
+            or protected_anchor.key_id != self.key_id
+        ):
+            raise ValueError("protected vector belongs to another local OpenFHE key")
+        query = as_vector(intent, allow_empty=False, name="intent vector")
+        if query.shape != protected_anchor.shape:
+            raise ValueError(
+                f"dimension mismatch: expected {protected_anchor.shape}, got {query.shape}"
+            )
+        if self._engine.ciphertext_dimension(protected_anchor.ciphertext) != query.size:
+            raise ValueError("local OpenFHE ciphertext dimension is inconsistent")
+        result = self._engine.cosine_similarity(
+            self._normalize(query, "intent vector").tolist(),
+            protected_anchor.ciphertext,
+        )
+        if isinstance(result, bool) or not isinstance(result, (int, float)):
+            raise TypeError("local OpenFHE similarity must return a finite number")
+        score = float(result)
+        if not math.isfinite(score) or not -1.0001 <= score <= 1.0001:
+            raise ValueError("local OpenFHE returned an invalid cosine score")
+        return max(-1.0, min(1.0, score))
 
 
 class EnclaveCryptoShield:

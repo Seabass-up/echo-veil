@@ -1,6 +1,7 @@
 # Cloudflare enclave gateway protocol
 
-The Worker forwards five JSON endpoints unchanged. `/v1/attest` accepts
+The Worker forwards five JSON endpoints and an authenticated health check.
+`/v1/attest` accepts
 `nonce_b64` and returns `evidence_b64`. The signed normalized evidence must bind
 the nonce, approved enclave measurement, sealed CKKS key, security level,
 hardware/ZKP/homomorphic capability flags, expiry, and a 32-byte X25519
@@ -38,3 +39,13 @@ Decrypted application payloads are:
 The origin must reject nonce reuse, expired sessions, invalid ZK proofs, wrong
 dimensions, unbounded vectors, and any request whose mTLS client identity or
 bearer credential is not approved.
+
+The Ristretto proof is canonical JSON containing version, the issued challenge,
+the allowlisted compressed public key, the compressed commitment, and the
+canonical response scalar. Its Merlin transcript binds the provider ID,
+measurement, CKKS key ID, challenge, public key, and commitment. The origin
+consumes the challenge only after successful verification.
+
+`GET /healthz` is not end-to-end enveloped, contains no secret values, and still
+requires Access at the Worker plus Worker-to-origin mTLS and the origin bearer
+token.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from echo_veil import NullCryptoShield, Oracle
+import numpy as np
+
+from echo_veil import LocalOpenFheCryptoShield, NullCryptoShield, Oracle
 from echo_veil.capability import CapabilityStatus
 
 
@@ -10,6 +12,19 @@ class DummyCryptoShield:
 
     def similarity(self, intent, protected_anchor):
         return 1.0
+
+
+class DummyLocalCkksEngine:
+    key_id = "local-key"
+
+    def encrypt_normalized(self, vector) -> bytes:
+        return np.asarray(vector, dtype=np.float64).tobytes()
+
+    def cosine_similarity(self, normalized_intent, ciphertext) -> float:
+        return 1.0
+
+    def ciphertext_dimension(self, ciphertext) -> int:
+        return len(ciphertext) // np.dtype(np.float64).itemsize
 
 
 def test_development_report_marks_reference_backends_and_null_crypto() -> None:
@@ -35,8 +50,27 @@ def test_custom_structural_shield_is_degraded_until_externally_validated() -> No
     data = report.as_dict()
 
     assert data["crypto_readiness"]["status"] == CapabilityStatus.DEGRADED.value
-    assert not any("NullCryptoShield" in blocker for blocker in data["production_blockers"])
-    assert any("Custom CryptoShield" in blocker for blocker in data["production_blockers"])
+    assert not any(
+        "NullCryptoShield" in blocker for blocker in data["production_blockers"]
+    )
+    assert any(
+        "Custom CryptoShield" in blocker for blocker in data["production_blockers"]
+    )
+
+
+def test_local_private_report_is_honest_about_its_security_boundary() -> None:
+    oracle = Oracle(
+        environment="local-private",
+        shield=LocalOpenFheCryptoShield(DummyLocalCkksEngine()),
+    )
+
+    data = oracle.capability_report().as_dict()
+
+    assert data["crypto_readiness"]["status"] == CapabilityStatus.READY.value
+    assert "remain on this device" in data["crypto_readiness"]["message"]
+    assert any(
+        "remote attestation" in blocker for blocker in data["production_blockers"]
+    )
 
 
 def test_invalid_shield_is_blocked_if_detected_in_report() -> None:
@@ -46,11 +80,16 @@ def test_invalid_shield_is_blocked_if_detected_in_report() -> None:
     data = oracle.capability_report().as_dict()
 
     assert data["crypto_readiness"]["status"] == CapabilityStatus.BLOCKED.value
-    assert any("does not implement CryptoShield" in blocker for blocker in data["production_blockers"])
+    assert any(
+        "does not implement CryptoShield" in blocker
+        for blocker in data["production_blockers"]
+    )
 
 
 def test_doctor_report_alias_is_serializable() -> None:
-    oracle = Oracle(environment="development", shield=NullCryptoShield(silence_warning=True))
+    oracle = Oracle(
+        environment="development", shield=NullCryptoShield(silence_warning=True)
+    )
     data = oracle.doctor_report().as_dict()
     assert isinstance(data, dict)
     assert "known_limitations" in data

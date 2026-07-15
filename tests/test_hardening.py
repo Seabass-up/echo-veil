@@ -109,18 +109,21 @@ def test_configuration_and_query_limits_fail_closed() -> None:
 
 def test_environment_policy_normalizes_and_rejects_ambiguous_modes() -> None:
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
-    oracle = Oracle(environment=" Production ", shield=shield)
-    assert oracle.environment == "production"
+    with pytest.raises(RuntimeError, match="EnclaveCryptoShield"):
+        Oracle(environment=" Production ", shield=shield)
     staging = Oracle(environment="staging", shield=shield)
     assert staging.capability_report().overall_status.value == "blocked"
 
     with pytest.raises(ValueError, match="environment must be one of"):
         Oracle(environment="prod", shield=shield)
 
+    with pytest.raises(RuntimeError, match="LocalOpenFheCryptoShield"):
+        Oracle(environment="local-private", shield=shield)
+
     class UnmarkedShield(_SerializableShield):
         pass
 
-    with pytest.raises(RuntimeError, match="production_ready=True"):
+    with pytest.raises(RuntimeError, match="EnclaveCryptoShield"):
         Oracle(environment="production", shield=UnmarkedShield())
 
 

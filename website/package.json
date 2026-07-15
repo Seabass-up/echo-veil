@@ -1,0 +1,44 @@
+{
+  "name": "echo-veil-site",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "deploy:cloudflare": "npm run build && wrangler deploy --config wrangler.production.jsonc",
+    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+  },
+  "dependencies": {
+    "next": "16.2.10",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.45.0",
+    "@tailwindcss/postcss": "4.3.2",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.10",
+    "react-server-dom-webpack": "19.2.7",
+    "tailwindcss": "4.3.2",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "8.1.4",
+    "wrangler": "4.111.0"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7",
+    "js-yaml": "4.3.0",
+    "postcss": "8.5.19"
+  },
+  "type": "module"
+}

@@ -2,11 +2,14 @@
   "name": "echo-veil-enclave-gateway",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "render-config": "node scripts/render-config.mjs",
+    "deploy": "npm run render-config && wrangler deploy --config .wrangler.generated.json",
+    "deploy:dry-run": "npm run render-config && wrangler deploy --dry-run --config .wrangler.generated.json",
+    "dev": "npm run render-config && wrangler dev --config .wrangler.generated.json"
   },
   "dependencies": {
     "jose": "^6.1.0"

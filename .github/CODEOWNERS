@@ -1,0 +1,12 @@
+# Security and release controls always require repository-owner review.
+* @Seabass-up
+/.github/ @Seabass-up
+/scripts/security_scan.py @Seabass-up
+/scripts/release_check.py @Seabass-up
+/scripts/normalize_sdist.py @Seabass-up
+/SECURITY.md @Seabass-up
+/pyproject.toml @Seabass-up
+/uv.lock @Seabass-up
+/cloudflare/enclave-gateway/package-lock.json @Seabass-up
+/crates/echo-veil-zkp/Cargo.lock @Seabass-up
+/deploy/ @Seabass-up

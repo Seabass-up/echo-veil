@@ -11,7 +11,7 @@ from echo_veil.conflict import (
 
 
 def test_peer_review_zone_threshold():
-    assert in_peer_review_zone(0.80, 0.70) is True   # delta 0.10 <= 0.15
+    assert in_peer_review_zone(0.80, 0.70) is True  # delta 0.10 <= 0.15
     assert in_peer_review_zone(0.80, 0.60) is False  # delta 0.20 > 0.15
 
 
