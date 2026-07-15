@@ -39,6 +39,13 @@ Implemented and tested:
 - Persisted random-projection LSH candidate lookup with exact reranking.
 - A fail-closed CKKS enclave provider boundary with attestation policy and a
   zero-knowledge access-proof exchange.
+- A deployable Azure AMD SEV-SNP origin using OpenFHE CKKS at the 128-bit
+  classic security level, with end-to-end request envelopes, one-time
+  challenges, expiring sessions, replay defense, and fail-closed configuration.
+- A Ristretto255 Schnorr proof-of-possession helper using Merlin transcripts,
+  public-key allowlisting, context binding, and owner-only identity keys.
+- Reproducible Azure Bicep, Cloudflare OpenTofu/Worker, Caddy mTLS, container,
+  key-generation, and deployment-runbook artifacts for `algo-cli.com`.
 - Reentrant locking around Oracle, Workspace, MetadataIndex, ColdArchive, and
   DriftDetector operations.
 
@@ -46,9 +53,11 @@ Implemented as a practical confidentiality baseline:
 - `AesGcmCryptoShield` encrypts/authenticates protected vectors with AES-256-GCM and loads keys from explicit bytes or `ECHO_VEIL_CRYPTO_KEY`.
 
 Deployment-provided:
-- The concrete SGX/SEV-SNP transport, vendor attestation verifier, CKKS runtime,
-  and ZKP circuit/prover. Echo Veil implements and enforces their integration
-  boundary; it cannot manufacture hardware isolation inside a Python process.
+- The Azure subscription/quota, actual SEV-SNP VM, approved launch measurement,
+  Key Vault Secure Key Release operation, Cloudflare Access audience/team,
+  mTLS certificate registration, secrets, DNS, and independent production
+  approval. Repository code cannot claim hardware isolation until those
+  external controls have been provisioned and verified.
 
 ## 2. Assumptions made explicit
 
@@ -94,10 +103,10 @@ Deployment-provided:
 | "< 5ms global lookup latency" | SQLite uses persisted random-projection LSH plus exact candidate reranking; no universal latency guarantee | Latency depends on corpus, dimensions, bucket collisions, and storage hardware. |
 | "Exabyte-viable data horizon" (L3) | In-memory reference store or durable local SQLite | SQLite is crash-safe local persistence, not exabyte-scale object storage. |
 | Practical encrypted vector protection | `AesGcmCryptoShield` with AES-256-GCM | Provides confidentiality/authentication for protected vector payloads, with transient decrypt for similarity. |
-| Homomorphic / enclave / zk-SNARK shield | Fail-closed provider adapter verified against deployment attestation policy | Vendor runtimes and trust roots are necessarily deployment-specific. |
+| Homomorphic / enclave / zk-SNARK shield | OpenFHE CKKS in an Azure SEV-SNP VM plus a Ristretto255 Schnorr possession proof | The spec provides no SNARK circuit or statement. The selected proof has no trusted setup and proves allowlisted key possession; Cloudflare posture separately handles operator devices. |
 | Confidence bands gate generation | Implemented `Oracle.check_generation_gate()` with `GenerationGated` exception | Originally the `gates_generation` flag was defined but never enforced. Now INFERENTIAL requires explicit override and OBSCURITY is a hard stop. |
 | Evicted vines remain in workspace dict | Evicted vines are pruned after L2/L3 archiving via `Workspace.prune_evicted()` | Original code leaked evicted vine objects forever. The Oracle now archives first, prunes only written IDs, and retries pending evictions after backend failures. |
-| Production starts with explicit `NullCryptoShield` or arbitrary two-method object | Rejected | Production and staging require a structurally valid shield with an explicit `production_ready = True` marker. Unknown custom shields remain capability-report blockers pending external review. |
+| Production starts with AES-GCM, `NullCryptoShield`, or an arbitrary readiness marker | Rejected | Production requires `EnclaveCryptoShield` specifically. AES-GCM remains a development/staging encrypted-storage baseline. |
 | Custom protected payload cannot be archived | Reject the sprout | Silently retaining and archiving the plaintext anchor would violate the caller's confidentiality intent. Protected payloads must provide `to_json_bytes()`. |
 
 ## 4. Risks and tradeoffs
@@ -125,7 +134,7 @@ Deployment-provided:
 - **Custom crypto shields are not automatically trusted.** The Oracle rejects
   objects that do not implement `protect()` and `similarity()`, rejects
   non-serializable protected payloads, and requires an explicit readiness marker
-  in production-like modes. A marker cannot prove cryptographic strength;
+  for custom shields in staging. A marker cannot prove cryptographic strength;
   capability reporting keeps custom shields degraded until their design,
   serialization behavior, and threat model are reviewed outside Echo Veil.
 
@@ -146,17 +155,22 @@ A practical baseline and the Level-5 integration boundary are implemented:
   security, hardware isolation, homomorphic similarity, and a ZKP access gate,
   then exchanges the proof for an opaque session. Vectors remain opaque CKKS
   ciphertexts in the Python process.
-- `Oracle(environment="production")` and staging — refuse to start without a structurally valid shield that declares `production_ready = True`; `AesGcmCryptoShield` declares this practical-storage readiness and `NullCryptoShield` does not. Unknown custom shields are still not reported as fully ready without external validation.
+- `Oracle(environment="production")` — requires `EnclaveCryptoShield`
+  specifically. Staging accepts AES-GCM or an explicitly staging-ready custom
+  shield, but capability reporting keeps AES/custom shields blocked for
+  production.
 - `Oracle.capability_report()` / `doctor_report()` — returns JSON-serializable readiness status for crypto, storage, vector index, persistence, thread safety, confidence gating, warnings, and production blockers.
 
-A deployment must still supply:
+The included deployment supplies the concrete pieces:
 
-1. An `EnclaveProvider` transport backed by its SGX/SEV-SNP service and CKKS library.
-2. An `AttestationVerifier` anchored in the expected vendor chain and approved measurements.
-3. A `ZeroKnowledgeProofProvider` for the deployment's access circuit and credentials.
+1. `CloudflareEnclaveProvider` plus the Worker/mTLS path for transport.
+2. `echo_veil_origin` with OpenFHE CKKS, normalized signed evidence, secure
+   envelopes, sessions, and replay defense on an Azure confidential VM.
+3. `RistrettoSchnorrProofProvider` and `echo-veil-zkp` for the proof gate.
 
-These dependencies are explicit because accepting self-asserted attestation or
-shipping a toy HE/ZKP implementation would weaken the security boundary.
+Real trust still begins only after Azure Key Vault releases the attestation key
+under a policy bound to the approved SEV-SNP measurement and the client installs
+the matching public key/measurement allowlist.
 
 ### Cloudflare gateway
 

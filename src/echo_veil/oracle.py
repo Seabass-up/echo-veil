@@ -40,7 +40,10 @@ from .caretaker import GardenersReport, gardeners_report
 from .confidence import BandPolicy, ConfidenceBand, classify
 from .conflict import ConflictVine, FossilizedEcho
 from .crypto_shield import (
+    AesGcmCryptoShield,
     CryptoShield,
+    EnclaveCryptoShield,
+    LocalOpenFheCryptoShield,
     NullCryptoShield,
     is_crypto_shield,
     is_production_crypto_shield,
@@ -81,8 +84,11 @@ class Oracle:
         if not isinstance(environment, str):
             raise TypeError("environment must be a string")
         normalized_environment = environment.strip().lower()
+        if normalized_environment == "local":
+            normalized_environment = "local-private"
         allowed_environments = {
             "development",
+            "local-private",
             "test",
             "testing",
             "staging",
@@ -91,7 +97,7 @@ class Oracle:
         if normalized_environment not in allowed_environments:
             raise ValueError(
                 "environment must be one of: development, test, testing, "
-                "staging, production"
+                "local-private, staging, production"
             )
         if shield is not None and not is_crypto_shield(shield):
             raise TypeError(
@@ -101,12 +107,28 @@ class Oracle:
             raise TypeError(
                 "storage must expose index, archive, and commit_evictions(records)"
             )
-        if normalized_environment in {"staging", "production"} and not (
-            shield is not None and is_production_crypto_shield(shield)
+        if normalized_environment == "production" and not isinstance(
+            shield, EnclaveCryptoShield
         ):
             raise RuntimeError(
-                f"Refusing to start in {normalized_environment} without a real "
-                "CryptoShield that explicitly declares production_ready=True."
+                "Refusing to start in production without an attested "
+                "EnclaveCryptoShield providing CKKS, hardware isolation, and the "
+                "verified ZKP access gate."
+            )
+        if normalized_environment == "local-private" and not isinstance(
+            shield, LocalOpenFheCryptoShield
+        ):
+            raise RuntimeError(
+                "Refusing to start in local-private mode without a native "
+                "LocalOpenFheCryptoShield."
+            )
+        if normalized_environment == "staging" and not (
+            isinstance(shield, AesGcmCryptoShield)
+            or (shield is not None and is_production_crypto_shield(shield))
+        ):
+            raise RuntimeError(
+                "Refusing to start in staging without AES-GCM or an explicitly "
+                "staging-ready CryptoShield."
             )
         self.environment = normalized_environment
         self.workspace = Workspace(config)

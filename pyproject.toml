@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,19 +9,36 @@ description = "A tiered, decay-driven memory architecture for conversational age
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Seabass-up" }]
+license-files = ["LICENSE"]
+authors = [{ name = "Algo-cli.com" }]
 keywords = ["memory", "agents", "vector", "retrieval", "context-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
 dependencies = ["numpy>=1.24", "cryptography>=42.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.5", "mypy>=1.8"]
+enclave-origin = ["fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1"]
 
 [project.urls]
 Homepage = "https://github.com/Seabass-up/echo-veil"
+Changelog = "https://github.com/Seabass-up/echo-veil/blob/master/CHANGELOG.md"
+Issues = "https://github.com/Seabass-up/echo-veil/issues"
+Repository = "https://github.com/Seabass-up/echo-veil"
+Security = "https://github.com/Seabass-up/echo-veil/security/policy"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]

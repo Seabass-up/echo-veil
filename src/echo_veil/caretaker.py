@@ -20,11 +20,11 @@ from .workspace import Workspace
 
 @dataclass
 class GardenersReport:
-    thriving_vines: int       # active
-    twilight_grove: int       # hibernating
-    knotted_branches: int     # open conflicts
-    ancient_rings: int        # fossils
-    memory_pressure: float    # 0..1
+    thriving_vines: int  # active
+    twilight_grove: int  # hibernating
+    knotted_branches: int  # open conflicts
+    ancient_rings: int  # fossils
+    memory_pressure: float  # 0..1
 
     def as_dict(self) -> dict:
         return {

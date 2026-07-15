@@ -25,6 +25,7 @@ from .crypto_shield import (
     EnclaveProtectedVector,
     EnclaveCryptoShield,
     Ed25519AttestationVerifier,
+    LocalOpenFheCryptoShield,
     NullCryptoShield,
     ProductionCryptoShield,
     ProtectedVector,
@@ -32,12 +33,14 @@ from .crypto_shield import (
     load_protected_vector,
 )
 from .drift import DriftDetector
+from .deployment import build_production_enclave_shield_from_env
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteColdArchive, SQLiteMetadataIndex, SQLiteStore
 from .proximity import ProximityConfig, proximity_score, time_decay
 from .vectors import cosine_similarity, normalize
 from .vine import Vine, VineState
 from .workspace import Workspace, WorkspaceConfig
+from .zkp import RistrettoSchnorrProofProvider
 
 __all__ = [
     "__version__",
@@ -66,16 +69,19 @@ __all__ = [
     "resurrect",
     "in_peer_review_zone",
     "DriftDetector",
+    "build_production_enclave_shield_from_env",
     "CryptoShield",
     "ProductionCryptoShield",
     "NullCryptoShield",
     "AesGcmCryptoShield",
+    "LocalOpenFheCryptoShield",
     "EnclaveCryptoShield",
     "EnclaveProtectedVector",
     "Ed25519AttestationVerifier",
     "VerifiedEnclave",
     "ProtectedVector",
     "load_protected_vector",
+    "RistrettoSchnorrProofProvider",
     "cosine_similarity",
     "normalize",
 ]

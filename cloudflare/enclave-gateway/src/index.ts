@@ -44,8 +44,45 @@ async function authenticate(request: Request, env: Env): Promise<void> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method !== "POST") return jsonError(405, "POST required");
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/healthz") {
+      try {
+        await authenticate(request, env);
+      } catch {
+        return jsonError(403, "Cloudflare Access validation failed");
+      }
+      const origin = validatedOrigin(env.ENCLAVE_ORIGIN);
+      if (!origin) return jsonError(500, "invalid enclave origin");
+      try {
+        const upstream = await env.ENCLAVE_MTLS.fetch(
+          new URL("/healthz", origin).toString(),
+          {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${env.ENCLAVE_ORIGIN_TOKEN}`,
+              "Accept": "application/json",
+              "Cache-Control": "no-store",
+            },
+          },
+        );
+        if (!upstream.ok) return jsonError(502, "enclave health check failed");
+        const response = await upstream.arrayBuffer();
+        if (response.byteLength > 64 * 1024) {
+          return jsonError(502, "enclave health response too large");
+        }
+        return new Response(response, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      } catch {
+        return jsonError(502, "enclave origin unavailable");
+      }
+    }
+    if (request.method !== "POST") return jsonError(405, "POST required");
     if (!ALLOWED_PATHS.has(url.pathname)) return jsonError(404, "not found");
     const requestType = request.headers.get("Content-Type") ?? "";
     if (!requestType.toLowerCase().startsWith("application/json")) {
@@ -67,8 +104,8 @@ export default {
       return jsonError(413, "invalid request size");
     }
 
-    const origin = new URL(env.ENCLAVE_ORIGIN);
-    if (origin.protocol !== "https:") return jsonError(500, "invalid enclave origin");
+    const origin = validatedOrigin(env.ENCLAVE_ORIGIN);
+    if (!origin) return jsonError(500, "invalid enclave origin");
     const target = new URL(url.pathname, origin);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -110,3 +147,22 @@ export default {
     });
   },
 } satisfies ExportedHandler<Env>;
+
+function validatedOrigin(value: string): URL | null {
+  try {
+    const origin = new URL(value);
+    if (
+      origin.protocol !== "https:" ||
+      origin.username ||
+      origin.password ||
+      origin.search ||
+      origin.hash ||
+      (origin.pathname !== "/" && origin.pathname !== "")
+    ) {
+      return null;
+    }
+    return origin;
+  } catch {
+    return null;
+  }
+}

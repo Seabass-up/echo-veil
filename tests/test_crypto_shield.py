@@ -13,6 +13,7 @@ from echo_veil import (
     EnclaveCryptoShield,
     EnclaveProtectedVector,
     Ed25519AttestationVerifier,
+    LocalOpenFheCryptoShield,
     Oracle,
     VerifiedEnclave,
 )
@@ -70,6 +71,21 @@ class _TestProofProvider:
         return b"valid-proof"
 
 
+class _TestLocalCkksEngine:
+    def __init__(self, key_id: str = "local-key-1") -> None:
+        self.key_id = key_id
+
+    def encrypt_normalized(self, vector) -> bytes:
+        return np.asarray(vector, dtype=np.float64).tobytes()
+
+    def ciphertext_dimension(self, ciphertext: bytes) -> int:
+        return len(ciphertext) // np.dtype(np.float64).itemsize
+
+    def cosine_similarity(self, normalized_intent, ciphertext: bytes) -> float:
+        anchor = np.frombuffer(ciphertext, dtype=np.float64)
+        return float(np.dot(np.asarray(normalized_intent), anchor))
+
+
 def test_aes_gcm_shield_encrypts_anchor_and_computes_similarity() -> None:
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
     anchor = np.array([1.0, 0.0], dtype=np.float64)
@@ -84,6 +100,37 @@ def test_aes_gcm_shield_encrypts_anchor_and_computes_similarity() -> None:
 
     assert shield.similarity(np.array([1.0, 0.0]), protected) == pytest.approx(1.0)
     assert shield.similarity(np.array([0.0, 1.0]), protected) == pytest.approx(0.0)
+
+
+def test_local_openfhe_shield_runs_ckks_without_a_remote_provider() -> None:
+    shield = LocalOpenFheCryptoShield(_TestLocalCkksEngine())
+    oracle = Oracle(environment="local", shield=shield)
+
+    protected = shield.protect(np.array([3.0, 4.0]))
+
+    assert oracle.environment == "local-private"
+    assert protected.provider_id == "local-openfhe"
+    assert protected.key_id == "local-key-1"
+    assert protected.shape == (2,)
+    assert shield.similarity(np.array([3.0, 4.0]), protected) == pytest.approx(1.0)
+    assert shield.similarity(np.array([-4.0, 3.0]), protected) == pytest.approx(0.0)
+    assert (
+        EnclaveProtectedVector.from_json_bytes(protected.to_json_bytes()) == protected
+    )
+
+
+def test_local_openfhe_shield_rejects_invalid_vectors_and_keys() -> None:
+    shield = LocalOpenFheCryptoShield(_TestLocalCkksEngine())
+    protected = shield.protect(np.array([1.0, 0.0]))
+
+    with pytest.raises(ValueError, match="non-zero"):
+        shield.protect(np.array([0.0, 0.0]))
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        shield.similarity(np.array([1.0, 0.0, 0.0]), protected)
+    with pytest.raises(ValueError, match="another local OpenFHE key"):
+        LocalOpenFheCryptoShield(_TestLocalCkksEngine("other-key")).similarity(
+            np.array([1.0, 0.0]), protected
+        )
 
 
 def test_aes_gcm_shield_rejects_tampered_ciphertext() -> None:
@@ -214,8 +261,12 @@ def test_enclave_crypto_shield_requires_verified_ckks_enclave_and_zkp() -> None:
     shield = EnclaveCryptoShield(
         _TestEnclaveProvider(), _TestVerifier(), _TestProofProvider()
     )
+    production_oracle = Oracle(environment="production", shield=shield)
     protected = shield.protect(np.array([1.0, 0.0]))
 
+    assert (
+        production_oracle.capability_report().crypto_readiness.status.value == "ready"
+    )
     assert isinstance(protected, EnclaveProtectedVector)
     assert shield.similarity(np.array([1.0, 0.0]), protected) == pytest.approx(1.0)
     assert (
@@ -264,17 +315,15 @@ def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
         )
 
 
-def test_oracle_production_accepts_aes_gcm_shield() -> None:
+def test_oracle_production_rejects_aes_gcm_shield() -> None:
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
-    oracle = Oracle(environment="production", shield=shield)
-    report = oracle.capability_report().as_dict()
+    with pytest.raises(RuntimeError, match="EnclaveCryptoShield"):
+        Oracle(environment="production", shield=shield)
 
-    assert oracle.environment == "production"
-    assert report["crypto_readiness"]["status"] == "ready"
-    assert "AES-GCM" in report["crypto_readiness"]["message"]
-    assert not any(
-        "NullCryptoShield" in blocker for blocker in report["production_blockers"]
-    )
+    staging = Oracle(environment="staging", shield=shield)
+    report = staging.capability_report().as_dict()
+    assert report["crypto_readiness"]["status"] == "degraded"
+    assert any("AES-GCM" in blocker for blocker in report["production_blockers"])
 
 
 def test_oracle_with_aes_gcm_protects_active_vine_anchor_and_scores_decay() -> None:

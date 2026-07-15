@@ -15,6 +15,7 @@ from typing import Any
 from .crypto_shield import (
     AesGcmCryptoShield,
     EnclaveCryptoShield,
+    LocalOpenFheCryptoShield,
     NullCryptoShield,
     is_crypto_shield,
 )
@@ -106,17 +107,32 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
                 f"Trust is rooted in the configured verifier for measurement {attestation.measurement}.",
             ),
         )
-    elif isinstance(shield, AesGcmCryptoShield):
+    elif isinstance(shield, LocalOpenFheCryptoShield):
         crypto = CapabilityCheck(
             "crypto_readiness",
             CapabilityStatus.READY,
-            "AES-GCM shield active: anchor vectors are encrypted and authenticated while protected.",
-            "Keep the AES key in a secret manager or ECHO_VEIL_CRYPTO_KEY; rotate it under an application-level migration plan.",
+            "Native local OpenFHE CKKS shield active; vectors remain on this device.",
+            "Keep the owner-only CKKS state directory and SQLite database backed up together.",
+            (
+                "Similarity is homomorphic, but the local process is not a hardware enclave.",
+                "There is no remote attestation or ZKP access gate in local-private mode.",
+            ),
+        )
+        blockers.append(
+            "Local OpenFHE does not provide hardware isolation or remote attestation."
+        )
+    elif isinstance(shield, AesGcmCryptoShield):
+        crypto = CapabilityCheck(
+            "crypto_readiness",
+            CapabilityStatus.DEGRADED,
+            "AES-GCM shield active for development/staging encrypted storage.",
+            "Use EnclaveCryptoShield for production CKKS, hardware isolation, and proof-gated access.",
             (
                 "AES-GCM is not homomorphic; vectors decrypt transiently during similarity().",
                 "This does not provide hardware-enclave isolation or zk attestation.",
             ),
         )
+        blockers.append("AES-GCM does not satisfy the production enclave profile.")
     else:
         crypto = CapabilityCheck(
             "crypto_readiness",

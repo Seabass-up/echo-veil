@@ -1,0 +1,143 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: "17 9 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-history:
+    name: Secret history
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reject personal metadata and developer-machine paths
+        run: python3 scripts/privacy_scan.py . --git-history
+
+  policy:
+    name: Local policy and workflow audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Enforce dangerous-primitive and supply-chain policy
+        run: |
+          python3 scripts/security_scan.py .
+          python3 scripts/privacy_scan.py .
+
+      - name: Audit GitHub Actions workflows
+        uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
+        with:
+          version: 1.21.0
+          persona: auditor
+          min-severity: medium
+          online-audits: false
+          advanced-security: false
+          annotations: true
+
+  dependency-audit:
+    name: Dependencies, secrets, and misconfiguration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Audit locked Python dependencies
+        run: |
+          uv export --locked --all-extras --no-dev --no-emit-project \
+            --output-file /tmp/echo-veil-requirements.txt
+          uvx --from pip-audit==2.10.1 pip-audit \
+            --strict --requirement /tmp/echo-veil-requirements.txt
+
+      - name: Run independent Python security analysis
+        run: uvx --from bandit==1.9.4 bandit -r src scripts examples -ll -ii
+
+      - name: Audit locked Rust dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file crates/echo-veil-zkp/Cargo.lock
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            cloudflare/enclave-gateway/package-lock.json
+            website/package-lock.json
+
+      - name: Audit locked Worker dependencies
+        working-directory: cloudflare/enclave-gateway
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+      - name: Audit locked product-site dependencies
+        working-directory: website
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+
+      - name: Scan vulnerabilities, secrets, and deployment configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 1
+          version: v0.70.0
+
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Block vulnerable dependency changes
+        uses: actions/dependency-review-action@38ecb5b593bf0eb19e335c03f97670f792489a8b # v4.7.0
+        with:
+          fail-on-severity: moderate
+          fail-on-scopes: runtime, development, unknown

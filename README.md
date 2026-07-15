@@ -2,17 +2,21 @@
 
 A tiered, decay-driven memory architecture for conversational agents.
 
+**Product site:** [echo.algo-cli.com](https://echo.algo-cli.com)
+
 Echo Veil treats an agent's working memory not as a flat store but as a managed
 pool: relevant context stays "active," fading context is compressed and
 eventually archived, and contradictory information is preserved as structured
 tension rather than overwritten. This repository implements the core of the
 Echo Veil v1.0 specification (`docs/SPEC.md`).
 
-> **Status: 0.4.0 — durable active memory, indexed retrieval, and attested confidential-compute integration.**
+> **Status: 0.4.0 — durable active memory, indexed retrieval, and deployable confidential compute.**
 > The memory lifecycle, conflict handling, drift detection, capability reporting,
 > confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
-> and tested. Production deployments can connect a CKKS enclave provider through
-> a fail-closed attestation and zero-knowledge access-proof boundary. See
+> and tested. The repository includes an Azure SEV-SNP origin using OpenFHE CKKS,
+> a Ristretto255 proof gate, Cloudflare Access/Worker configuration, and fail-closed
+> attestation/session integration. Cloud credentials and hardware deployment are
+> still required before these claims are active. See
 > `docs/ARCHITECTURE_NOTES.md`.
 
 ## What's in the box
@@ -26,7 +30,7 @@ Echo Veil v1.0 specification (`docs/SPEC.md`).
 | 4. Intent drift detection | `drift.py` | Implemented |
 | 4. Caretaker / Gardener's Report | `caretaker.py` | Implemented |
 | Practical Crypto Shield | `crypto_shield.py` | AES-256-GCM protected vectors implemented |
-| 5. Level-5 cryptographic root shield | `crypto_shield.py` | Attested CKKS enclave and ZKP provider adapter implemented |
+| 5. Level-5 cryptographic root shield | `crypto_shield.py`, `echo_veil_origin`, `crates/echo-veil-zkp` | OpenFHE CKKS origin, SEV-SNP deployment, attestation, and Ristretto proof gate implemented |
 | Defensive readiness / doctor report | `capability.py`, `oracle.py` | Implemented |
 | — Facade | `oracle.py` | Implemented |
 
@@ -38,6 +42,10 @@ pip install -e ".[dev]"
 
 ## Quick start
 
+For a complete host-agent lifecycle, confidence-gating rules, security-mode
+selection, and an executable adapter, see
+[`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md).
+
 ```python
 import numpy as np
 from echo_veil import AesGcmCryptoShield, Oracle, SQLiteStore, WorkspaceConfig
@@ -45,15 +53,14 @@ from echo_veil import AesGcmCryptoShield, Oracle, SQLiteStore, WorkspaceConfig
 # Development/reference mode.
 _ = Oracle(WorkspaceConfig(capacity=400))
 
-# Production/staging requires a shield that explicitly declares production
-# readiness. AesGcmCryptoShield does; store its key in a secret manager or
-# ECHO_VEIL_CRYPTO_KEY, not source code.
+# AES-GCM is an encrypted-storage baseline for development/staging. Store its
+# key in a secret manager or ECHO_VEIL_CRYPTO_KEY, not source code.
 shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
 store = SQLiteStore("echo-veil.db")
 oracle = Oracle(
     WorkspaceConfig(capacity=400),
     shield=shield,
-    environment="production",
+    environment="staging",
     storage=store,
 )
 
@@ -82,19 +89,31 @@ through an mTLS binding. Configure the Python provider with the Access service
 token issued for that application:
 
 ```python
-from echo_veil import CloudflareEnclaveProvider, EnclaveCryptoShield
-
-provider = CloudflareEnclaveProvider(
-    "https://memory.example.com",
-    access_client_id,
-    access_client_secret,
+from echo_veil import (
+    Oracle,
+    SQLiteStore,
+    build_production_enclave_shield_from_env,
 )
-shield = EnclaveCryptoShield(provider, vendor_attestation_verifier, zkp_prover)
+
+# Performs live Access authentication, fresh attestation verification,
+# measurement allowlisting, Ristretto proof creation, and session opening.
+shield = build_production_enclave_shield_from_env()
+store = SQLiteStore("echo-veil.db")
+oracle = Oracle(environment="production", shield=shield, storage=store)
 ```
 
 `CloudflareEnclaveProvider.from_env()` reads the service token from
 `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` so it does not need to
 appear in application source.
+
+The production factory additionally requires the base64 Ed25519 trust key in
+`ECHO_VEIL_ATTESTATION_PUBLIC_KEY`, a JSON array in
+`ECHO_VEIL_ALLOWED_MEASUREMENTS`, and the Ristretto helper/key variables
+documented in the deployment runbook.
+
+`RistrettoSchnorrProofProvider.from_env()` uses the compiled
+`echo-veil-zkp` helper and an owner-only identity key. The included origin
+service uses OpenFHE CKKS and consumes every proof challenge once.
 
 The Worker is not treated as an enclave. The verifier must validate the
 downstream SGX/SEV-SNP evidence and approved measurement; construction fails if
@@ -106,6 +125,11 @@ gate.
 ```bash
 pytest -q
 ```
+
+Security issues should be reported privately through the process in
+[SECURITY.md](SECURITY.md). Maintainer release controls, artifact verification,
+SBOM generation, and provenance requirements are documented in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Design notes worth knowing up front
 
@@ -119,12 +143,14 @@ pytest -q
   encrypts and authenticates protected vectors with AES-256-GCM and decrypts
   transiently during `similarity()`. It is suitable for practical encrypted
   vector storage, but it is not homomorphic and not an enclave.
-- **The Level-5 integration fails closed.** `EnclaveCryptoShield` requires an
+- **Production requires the Level-5 integration.** `Oracle(environment="production")`
+  accepts `EnclaveCryptoShield` specifically; AES-GCM and custom readiness
+  markers cannot bypass that guard. `EnclaveCryptoShield` requires an
   enclave provider, a deployment trust-root verifier, and a zero-knowledge proof
   provider. Construction rejects expired evidence, CKKS security below 128 bits,
   missing hardware isolation, a missing ZKP gate, or non-homomorphic similarity.
-  Echo Veil does not emulate SGX/SEV-SNP or roll its own CKKS in Python; the
-  configured provider supplies those deployment-specific primitives.
+  The included Azure origin uses the official OpenFHE CKKS implementation and
+  runs inside a deployment-provisioned SEV-SNP confidential VM.
 - **Custom shields are conservative by default.** Echo Veil validates the
   `protect()` / `similarity()` contract. Protected payloads must implement
   `to_json_bytes()`; Echo Veil no longer falls back to archiving plaintext when
@@ -160,4 +186,9 @@ Full rationale, deviations, and risks: `docs/ARCHITECTURE_NOTES.md`.
 
 ## License
 
-MIT — see `LICENSE`.
+Echo Veil is available under the [MIT License](LICENSE). Personal, academic,
+and commercial use is permitted at no charge, including modification,
+distribution, sublicensing, and sale, provided the copyright and license notice
+are retained. The license grants permission to use the software; it does not
+transfer ownership of the original Echo Veil copyright. Third-party components
+remain subject to their own licenses.

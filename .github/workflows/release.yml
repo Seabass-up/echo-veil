@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag, such as v0.4.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate tag input
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([a-z]+[0-9]+)?$ ]]; then
+            echo "Release tag is not a semantic version" >&2
+            exit 1
+          fi
+
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify annotated tag and release metadata
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          python scripts/release_check.py --tag "$RELEASE_TAG"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build and validate distributions
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          uv build --no-sources --out-dir release
+          python scripts/normalize_sdist.py release/*.tar.gz
+          uvx --from twine==6.2.0 twine check release/*
+          python scripts/release_check.py --tag "$RELEASE_TAG" --dist release
+
+      - name: Smoke-test wheel
+        run: |
+          uv venv /tmp/echo-veil-release-smoke
+          uv pip install --python /tmp/echo-veil-release-smoke/bin/python release/*.whl
+          /tmp/echo-veil-release-smoke/bin/python -c \
+            'import echo_veil; print(echo_veil.__version__)'
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: release/echo-veil-${{ inputs.tag }}.sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum echo_veil-* > SHA256SUMS
+
+      - name: Upload immutable candidate bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: echo-veil-release-${{ inputs.tag }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: Attest and create draft
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Download candidate bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: echo-veil-release-${{ inputs.tag }}
+          path: release
+
+      - name: Verify candidate checksums
+        working-directory: release
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Refuse to modify an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Create draft GitHub release
+        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
+        with:
+          tag_name: ${{ inputs.tag }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/*
