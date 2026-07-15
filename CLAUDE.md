@@ -3,7 +3,8 @@ Commands
 Bashpip install -e ".[dev]"          # install with dev deps (pytest)
 pytest -q                        # run all tests
 pytest tests/test_oracle.py      # run a single test file
-Only runtime dependency is numpy>=1.24. No linter is configured.
+Runtime dependencies are numpy>=1.24 and cryptography>=42.0; durable SQLite
+storage uses the Python standard library. No linter is configured.
 Project Philosophy
 Echo Veil is a tiered, intent-driven, metabolically balanced, and cryptographically private memory system for AI agents. It rejects traditional "remember everything" approaches in favor of wise remembering — minimal active resources, precise retrieval, organic lifecycle management, and radical transparency about uncertainty.
 Core tenets:
@@ -16,7 +17,7 @@ Privacy is a first-class architectural primitive — the "shape of thought" must
 Architecture Overview
 Echo Veil uses a strict three-layer design:
 
-Level 1: Active Workspace (Memory Vines) — RAM-only, high-compute, intent-proximity managed
+Level 1: Active Workspace (Memory Vines) — high-compute, intent-proximity managed, transactionally checkpointed when SQLiteStore is configured
 Level 2: Metadata Index — Sparse vector map + Flash Vines + Fossilized Echoes
 Level 3: Latent Archive (Library of Worlds) — Cold storage of raw chunks
 
@@ -34,7 +35,7 @@ textUser Query → Oracle.observe(intent)
           (idle) BackgroundRefinementEngine → Gardener’s Report
 Module Responsibilities
 
-ModuleRoleoracle.pyMain facade. Exposes clean public API. Wires all subsystems.vine.pyVine and ConflictVine dataclasses. Lifecycle states + strength.workspace.pyL1 pool: pruning, Twilight, Amber Locks, Multi-Focal Tidal Flow (70/18/12), memory pressure enforcement.proximity.pyScoring logic: cosine_similarity + recency_bonusconflict.pyConflict detection, Peer-Review Zone, FossilizedEcho compression/resurrection (Lazarus Loop).drift.pyIntent Drift Engine: moving average against garden centroid, 0.38 threshold + 0.08 hysteresis.confidence.pyMaps scores → organic bands (Solid Vine Integration, Fragmented Synthesis, Data Obscurity Fault, etc.).caretaker.pyGenerates Gardener’s Report and manages background refinement.archive.pyL2 MetadataIndex + L3 ColdArchive (in-memory reference impls).crypto_shield.pyCryptographic root protection. Critical: Production requires real Enclave + HE implementation.vectors.pyCore math helpers (cosine, normalize, centroid, etc.).paleontology.py(Future) Exhume History, timeline rendering, knowledge evolution queries.
+ModuleRoleoracle.pyMain facade. Exposes clean public API. Wires all subsystems.vine.pyVine and ConflictVine dataclasses. Lifecycle states + strength.workspace.pyL1 pool: pruning, Twilight, Amber Locks, Multi-Focal Tidal Flow (70/18/12), memory pressure enforcement.proximity.pyScoring logic: cosine_similarity + recency_bonusconflict.pyConflict detection, Peer-Review Zone, FossilizedEcho compression/resurrection (Lazarus Loop).drift.pyIntent Drift Engine: moving average against garden centroid, 0.38 threshold + 0.08 hysteresis.confidence.pyMaps scores → organic bands (Solid Vine Integration, Fragmented Synthesis, Data Obscurity Fault, etc.).caretaker.pyGenerates Gardener’s Report and manages background refinement.archive.pyTiered backend contracts plus in-memory reference implementations.persistence.pyDurable transactional SQLite L1/L2/L3 backend with LSH retrieval and restart recovery.crypto_shield.pyAES-GCM protection and fail-closed attested CKKS enclave/ZKP provider integration.vectors.pyCore math helpers (cosine, normalize, centroid, etc.).paleontology.py(Future) Exhume History, timeline rendering, knowledge evolution queries.
 Key Constants (from full spec)
 
 Twilight Threshold: 0.42
@@ -60,8 +61,8 @@ NullCryptoShield is for development only. Production Oracle() must reject startu
 
 Still Missing / To Implement:
 
-Full persistence layer for L2/L3 (beyond in-memory).
-Complete crypto_shield.py with real HE + enclave integration.
+Distributed storage backend for deployments beyond local SQLite scale.
+Concrete vendor transports and trust policies for each SGX/SEV-SNP deployment.
 Paleontology UI components and interactive timeline.
 User-configurable Focus Areas + Deeper Tending toggles.
 Comprehensive test suite covering edge cases (context whiplash, mass resurrection, high memory pressure).

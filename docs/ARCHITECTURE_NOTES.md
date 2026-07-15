@@ -14,7 +14,8 @@ to implement faithfully, and is explicit about the parts that are not.
 
 Implemented and tested:
 - Tiered storage interfaces (L1 active workspace; L2 metadata index; L3 cold
-  archive). L2/L3 are in-memory reference implementations.
+  archive), with both in-memory reference backends and a durable transactional
+  SQLite L1/L2/L3 backend.
 - The decay loop: proximity scoring, twilight demotion, eviction, amber locks,
   multi-focal crests, and the tidal-flow cache split.
 - The confidence spectrum matrix with generation gating.
@@ -27,12 +28,27 @@ Implemented and tested:
 - Internal twilight cycle tracking (the workspace counts decay cycles itself,
   removing the caller-supplied footgun).
 - Evicted vine pruning (no memory leak in the workspace dict).
+- Boundary validation for finite/non-empty vectors, stable dimensions,
+  configuration, timestamps, scores, archive/index inputs, and lifecycle calls.
+- Retry-safe eviction transfer: failed L2/L3 writes leave vines pending rather
+  than pruning unarchived state.
+- Atomic SQLite eviction commits, crash recovery, restart search, protected
+  payload reconstruction, and durable topic/lifecycle metadata.
+- Transactional active-workspace checkpoints and startup restoration, including
+  twilight counters, Amber Locks, and focal crests.
+- Persisted random-projection LSH candidate lookup with exact reranking.
+- A fail-closed CKKS enclave provider boundary with attestation policy and a
+  zero-knowledge access-proof exchange.
+- Reentrant locking around Oracle, Workspace, MetadataIndex, ColdArchive, and
+  DriftDetector operations.
 
 Implemented as a practical confidentiality baseline:
 - `AesGcmCryptoShield` encrypts/authenticates protected vectors with AES-256-GCM and loads keys from explicit bytes or `ECHO_VEIL_CRYPTO_KEY`.
 
-Not implemented (interface/stub only):
-- The original Level-5 CKKS + hardware enclave + zk-SNARK shield (Section 5).
+Deployment-provided:
+- The concrete SGX/SEV-SNP transport, vendor attestation verifier, CKKS runtime,
+  and ZKP circuit/prover. Echo Veil implements and enforces their integration
+  boundary; it cannot manufacture hardware isolation inside a Python process.
 
 ## 2. Assumptions made explicit
 
@@ -60,8 +76,9 @@ Not implemented (interface/stub only):
 
 2. **Embedding model is out of scope.** Anchor/intent vectors are inputs. The
    spec assumes 768 dimensions; the code does not hard-code that so you can use
-   any model. Vector quality dominates real-world behavior and is the
-   responsibility of the caller.
+   any model. Each Oracle/Workspace does require one stable, finite, non-empty
+   vector dimension for its lifetime. Vector quality dominates real-world
+   behavior and is the responsibility of the caller.
 
 3. **Twilight cycle counting is internal.** The spec says "5 query cycles or
    30 minutes, whichever is longer." The workspace now tracks cycle counts
@@ -74,13 +91,14 @@ Not implemented (interface/stub only):
 | Spec statement | What we did | Why |
 |---|---|---|
 | "88% memory footprint compression" | Compress with zlib; report the *achieved* ratio; zero the anchor array during TWILIGHT | Real ratios depend on payload entropy; asserting a fixed number would be fiction. Zeroing the anchor prevents the original double-memory bug. |
-| "< 5ms global lookup latency" | No latency guarantee; linear-scan reference index | L2 is a reference impl. Swap in an ANN index/vector DB for production. |
-| "Exabyte-viable data horizon" (L3) | In-memory dict | Reference impl. Swap in an object store. |
+| "< 5ms global lookup latency" | SQLite uses persisted random-projection LSH plus exact candidate reranking; no universal latency guarantee | Latency depends on corpus, dimensions, bucket collisions, and storage hardware. |
+| "Exabyte-viable data horizon" (L3) | In-memory reference store or durable local SQLite | SQLite is crash-safe local persistence, not exabyte-scale object storage. |
 | Practical encrypted vector protection | `AesGcmCryptoShield` with AES-256-GCM | Provides confidentiality/authentication for protected vector payloads, with transient decrypt for similarity. |
-| Homomorphic / enclave / zk-SNARK shield | Interface + refusing stub | See section 5 below. |
+| Homomorphic / enclave / zk-SNARK shield | Fail-closed provider adapter verified against deployment attestation policy | Vendor runtimes and trust roots are necessarily deployment-specific. |
 | Confidence bands gate generation | Implemented `Oracle.check_generation_gate()` with `GenerationGated` exception | Originally the `gates_generation` flag was defined but never enforced. Now INFERENTIAL requires explicit override and OBSCURITY is a hard stop. |
-| Evicted vines remain in workspace dict | Evicted vines are pruned after L2/L3 archiving via `Workspace.prune_evicted()` | Original code leaked evicted vine objects forever. Now the Oracle archives first, then prunes. |
-| Production starts with explicit `NullCryptoShield` or invalid shield object | Rejected | Production mode now rejects missing shields, explicit `NullCryptoShield`, and objects that do not implement the shield contract. |
+| Evicted vines remain in workspace dict | Evicted vines are pruned after L2/L3 archiving via `Workspace.prune_evicted()` | Original code leaked evicted vine objects forever. The Oracle now archives first, prunes only written IDs, and retries pending evictions after backend failures. |
+| Production starts with explicit `NullCryptoShield` or arbitrary two-method object | Rejected | Production and staging require a structurally valid shield with an explicit `production_ready = True` marker. Unknown custom shields remain capability-report blockers pending external review. |
+| Custom protected payload cannot be archived | Reject the sprout | Silently retaining and archiving the plaintext anchor would violate the caller's confidentiality intent. Protected payloads must provide `to_json_bytes()`. |
 
 ## 4. Risks and tradeoffs
 
@@ -88,53 +106,87 @@ Not implemented (interface/stub only):
   `pressure_evict_at`. Defaults are reasonable but unvalidated against real
   traffic. Recommend logging proximity-score distributions before trusting
   eviction in production.
-- **Reference storage (high if shipped as-is).** L2/L3 are in-memory and do not
-  persist or scale. They are correct for testing the lifecycle, not for
-  production. The interfaces are the stable contract.
-- **No persistence layer.** A process restart loses all state. Persistence was
-  out of scope for the core; it belongs behind the L2/L3 interfaces.
+- **Storage scale (deployment-dependent).** `SQLiteStore` provides durable,
+  atomic local L1/L2/L3 state, restart recovery, and indexed LSH retrieval. Its
+  capacity is bounded by a local filesystem. Deployments needing distributed
+  storage or a different recall/latency tradeoff should implement the same backend
+  contracts with an appropriate database/object store.
+- **L1 has a durable checkpoint.** With `SQLiteStore`, active and twilight vines,
+  cycle counters, locks, and crests are restored at Oracle startup. The live
+  computation copy remains in memory, while SQLite is the restart source of truth.
 - **Confidence scores are inputs.** The matrix classifies a score it is given;
   it does not compute retrieval confidence. Garbage in, garbage out.
-- **Thread safety (low for dev, high for production).** Workspace._vines is a
-  plain dict with no locking. Concurrent mutation will corrupt state. Add
-  locking or single-thread the workspace access for any multi-threaded host.
+- **Thread safety (reduced, not eliminated).** Core Oracle, Workspace, index,
+  archive, and drift operations are serialized with reentrant locks. Publicly
+  returned `Vine` objects are still mutable outside those locks. `SQLiteStore`
+  coordinates L2/L3 writes across processes, but L1 objects remain process-local;
+  other backend implementations must provide equivalent coordination. Use the
+  public mutation methods rather than editing returned Vines concurrently.
 - **Custom crypto shields are not automatically trusted.** The Oracle rejects
-  objects that do not implement `protect()` and `similarity()`. Structurally
-  valid custom shields can be used, but capability reporting marks them degraded
-  until their cryptographic design, serialization behavior, and threat model are
-  reviewed outside Echo Veil.
+  objects that do not implement `protect()` and `similarity()`, rejects
+  non-serializable protected payloads, and requires an explicit readiness marker
+  in production-like modes. A marker cannot prove cryptographic strength;
+  capability reporting keeps custom shields degraded until their design,
+  serialization behavior, and threat model are reviewed outside Echo Veil.
 
-## 5. Crypto shield: status and path
+## 5. Crypto shield: trust boundary
 
 The spec's Section 5 composes three independently difficult technologies:
 CKKS homomorphic encryption, a hardware enclave (SGX / SEV-SNP), and a zk-SNARK
 attestation gate. The spec provides naming and topology but **no protocols,
 parameters, key-management story, or threat model.**
 
-A practical baseline is now implemented, but it is intentionally not described
-as the full Level-5 design:
+A practical baseline and the Level-5 integration boundary are implemented:
 
 - `AesGcmCryptoShield` — practical AES-256-GCM protected vectors. It encrypts and authenticates anchor-vector payloads, supports random 256-bit keys, base64 environment-variable loading, and tamper detection. When an Oracle is constructed with this shield, newly sprouted active vines store a protected anchor and release the plaintext anchor array; decay scoring uses shield-backed transient decrypt inside `similarity()`. Encrypted evictions are archived as ciphertext payloads and are not inserted into the plaintext reference L2 index. This does not provide homomorphic computation or enclave isolation.
 - `NullCryptoShield` — dev/test only, pass-through, **no confidentiality**,
   warns on construction.
-- `EnclaveCryptoShield` — raises `NotImplementedError` on construction for the unbuilt CKKS + enclave + ZK stack.
-- `Oracle(environment="production")` — refuses to start without a structurally valid shield and rejects explicit `NullCryptoShield`. Unknown custom shields are not reported as fully ready without external validation.
+- `EnclaveCryptoShield` — obtains fresh provider evidence, delegates verification
+  to the deployment trust root, enforces fresh attestation, at least 128-bit CKKS
+  security, hardware isolation, homomorphic similarity, and a ZKP access gate,
+  then exchanges the proof for an opaque session. Vectors remain opaque CKKS
+  ciphertexts in the Python process.
+- `Oracle(environment="production")` and staging — refuse to start without a structurally valid shield that declares `production_ready = True`; `AesGcmCryptoShield` declares this practical-storage readiness and `NullCryptoShield` does not. Unknown custom shields are still not reported as fully ready without external validation.
 - `Oracle.capability_report()` / `doctor_report()` — returns JSON-serializable readiness status for crypto, storage, vector index, persistence, thread safety, confidence gating, warnings, and production blockers.
 
-A realistic phased path, if this layer is pursued:
+A deployment must still supply:
 
-1. **Threat model first.** Define exactly what each layer defends against
-   (untrusted host? untrusted operator? offline disk theft?). The rest follows
-   from this and cannot be skipped.
-2. **At-rest + in-transit encryption** with standard primitives. Covers the
-   most common threats at a fraction of the cost.
-3. **Enclave-based confidential compute** (SGX DCAP or SEV-SNP) with a working
-   attestation flow, if the host itself is untrusted.
-4. **Homomorphic similarity** (OpenFHE / Microsoft SEAL) only if computing over
-   ciphertext on an untrusted party is a hard requirement — it carries large
-   performance costs and should be justified by the threat model.
-5. **zk-SNARK attestation gate** last, and only if a specific verifiable-access
-   requirement remains that steps 1–4 do not cover.
+1. An `EnclaveProvider` transport backed by its SGX/SEV-SNP service and CKKS library.
+2. An `AttestationVerifier` anchored in the expected vendor chain and approved measurements.
+3. A `ZeroKnowledgeProofProvider` for the deployment's access circuit and credentials.
 
-Recommendation: treat steps 2–3 as the practical target. Steps 4–5 are research
-commitments, not a sprint.
+These dependencies are explicit because accepting self-asserted attestation or
+shipping a toy HE/ZKP implementation would weaken the security boundary.
+
+### Cloudflare gateway
+
+The included Worker places Cloudflare Access in front of the provider protocol,
+validates the Access JWT issuer/audience/signature, accepts only the five POST
+endpoints, bounds request/response sizes, disables caching, and calls the
+enclave origin through a Worker mTLS binding plus an origin bearer secret. The
+Python `CloudflareEnclaveProvider` uses the documented Access service-token
+headers and bounded HTTPS responses. The attested X25519 key seals all
+post-attestation bodies end to end, so Cloudflare routes opaque envelopes rather
+than vector or proof plaintext. The downstream vendor evidence is still
+verified locally by the configured `AttestationVerifier`.
+
+## 6. Durable storage behavior
+
+`SQLiteStore` is the built-in production persistence path for a local process or
+small multi-process deployment:
+
+- L1 checkpoints, L2 index rows, L3 payloads, and eviction metadata use
+  transactions. L2/L3 eviction records commit inside one
+  `BEGIN IMMEDIATE` transaction. Any failure rolls the complete batch back and
+  the Oracle leaves affected vines pending for retry.
+- WAL mode, `synchronous=FULL`, a busy timeout, and SQLite locking provide crash
+  recovery and cross-process writer serialization.
+- Database files are created with owner-only permissions, versioned with
+  `PRAGMA user_version`, and checked with `PRAGMA quick_check` on open by
+  default. Unknown future schema versions fail closed.
+- Built-in AES and enclave payloads are reconstructed through the algorithm-aware
+  protected payload loader. Custom shields may supply a compatible loader.
+- The SQLite index reports `search_strategy="lsh-ann"`. Eight indexed bands of
+  random-projection signatures select candidates, and the exact scorer reranks
+  only those rows. Version-1 databases migrate to version 2 and backfill all
+  plaintext index rows.

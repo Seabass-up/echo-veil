@@ -1,16 +1,15 @@
 """Echo Veil: a tiered, decay-driven memory architecture for conversational agents.
 
-This package is a faithful, honest implementation of the implementable core of
-the Echo Veil v1.0 specification. The Level-5 cryptographic shield is provided
-as an interface plus an explicit stub, not a working implementation -- see
-``echo_veil.crypto_shield`` and docs/ARCHITECTURE_NOTES.md.
+This package implements the Echo Veil v1.0 core, including durable tiered
+storage and a fail-closed adapter for attested CKKS enclave providers.
 """
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
+from .cloudflare_provider import CloudflareEnclaveProvider
 from .confidence import ConfidenceBand, classify
 from .conflict import (
     ConflictVine,
@@ -23,27 +22,34 @@ from .conflict import (
 from .crypto_shield import (
     AesGcmCryptoShield,
     CryptoShield,
+    EnclaveProtectedVector,
     EnclaveCryptoShield,
+    Ed25519AttestationVerifier,
     NullCryptoShield,
+    ProductionCryptoShield,
     ProtectedVector,
+    VerifiedEnclave,
+    load_protected_vector,
 )
 from .drift import DriftDetector
 from .oracle import GenerationGated, Oracle
+from .persistence import SQLiteColdArchive, SQLiteMetadataIndex, SQLiteStore
 from .proximity import ProximityConfig, proximity_score, time_decay
 from .vectors import cosine_similarity, normalize
 from .vine import Vine, VineState
 from .workspace import Workspace, WorkspaceConfig
 
-# EnclaveCryptoShield remains exported for compatibility, but construction
-# raises NotImplementedError because the CKKS/enclave/ZK layer is not built.
-
 __all__ = [
     "__version__",
     "Oracle",
     "GenerationGated",
+    "SQLiteStore",
+    "SQLiteMetadataIndex",
+    "SQLiteColdArchive",
     "CapabilityCheck",
     "CapabilityReport",
     "CapabilityStatus",
+    "CloudflareEnclaveProvider",
     "Workspace",
     "WorkspaceConfig",
     "Vine",
@@ -61,10 +67,15 @@ __all__ = [
     "in_peer_review_zone",
     "DriftDetector",
     "CryptoShield",
+    "ProductionCryptoShield",
     "NullCryptoShield",
     "AesGcmCryptoShield",
     "EnclaveCryptoShield",
+    "EnclaveProtectedVector",
+    "Ed25519AttestationVerifier",
+    "VerifiedEnclave",
     "ProtectedVector",
+    "load_protected_vector",
     "cosine_similarity",
     "normalize",
 ]

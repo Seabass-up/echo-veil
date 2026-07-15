@@ -10,7 +10,7 @@ Sections
 5. Compression RAM doubling — anchor held alongside compressed bytes
 6. DriftDetector — no reset, edge cases
 7. Confidence bands — gates_generation never enforced
-8. EnclaveCryptoShield — importable but always raises
+8. EnclaveCryptoShield — requires explicit verified provider configuration
 9. Lifecycle completeness — reinforce edge cases, empty workspace, etc.
 10. Proximity edge cases — zero vectors, negative similarity, age
 11. Conflict / fossil edge cases — double-fossilize, resurrect mutation
@@ -55,6 +55,7 @@ from echo_veil.workspace import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _ws(capacity=400, evict_at=0.85):
     """Workspace with realistic defaults (tests can override)."""
     return Workspace(WorkspaceConfig(capacity=capacity, pressure_evict_at=evict_at))
@@ -73,6 +74,7 @@ def _vec(*components):
 # 1. EVICTED vine memory leak — vines never pruned from workspace dict
 # ===========================================================================
 
+
 class TestEvictedVineLeak:
     """FIXED: evicted vines are cleaned up via Workspace.prune_evicted().
 
@@ -89,7 +91,8 @@ class TestEvictedVineLeak:
         # Advance past twilight window
         now = time.time()
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
@@ -115,7 +118,8 @@ class TestEvictedVineLeak:
 
         # Evict all
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={vid: 5 for vid in ids},
         )
 
@@ -135,7 +139,8 @@ class TestEvictedVineLeak:
         v = ws.add(Vine("x", _vec(0.0, 1.0)))
         ws.run_decay_cycle(_vec(1.0, 0.0), now=now)
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
@@ -234,6 +239,7 @@ class TestEvictedVineLeak:
 # 4. Twilight cycle counting — caller-provided, not tracked internally
 # ===========================================================================
 
+
 class TestTwilightCycleCounting:
     """BUG: Workspace does not track how many decay cycles a vine has been in
     TWILIGHT. The caller must supply cycles_since_twilight, which is a
@@ -282,7 +288,8 @@ class TestTwilightCycleCounting:
         # 60 minutes have passed (well over 30 min), but only 1 cycle
         later = now + 60 * 60
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=later,
+            _vec(1.0, 0.0),
+            now=later,
             cycles_since_twilight={v.vine_id: 1},  # only 1 cycle
         )
         # With AND logic: 1 cycle < 5, so NOT evicted even though 60 min > 30
@@ -294,6 +301,7 @@ class TestTwilightCycleCounting:
 # ===========================================================================
 # 5. Compression RAM doubling — anchor held alongside compressed bytes
 # ===========================================================================
+
 
 class TestCompressionRAM:
     """FIXED: Vine.compress() now zeros the anchor array after compression.
@@ -340,6 +348,7 @@ class TestCompressionRAM:
 # ===========================================================================
 # 6. DriftDetector — no reset, edge cases
 # ===========================================================================
+
 
 class TestDriftDetectorEdgeCases:
     """FIXED: DriftDetector now has a reset() method that clears observed
@@ -405,11 +414,12 @@ class TestDriftDetectorEdgeCases:
 # 7. Confidence bands — gates_generation never enforced
 # ===========================================================================
 
+
 class TestConfidenceGating:
     """FIXED: Oracle.check_generation_gate() now enforces gates_generation.
     INFERENTIAL raises GenerationGated (overridable); OBSCURITY is a hard stop.
 
-    
+
     """
 
     def test_inferential_band_gates_generation(self):
@@ -439,16 +449,15 @@ class TestConfidenceGating:
 
 
 # ===========================================================================
-# 8. EnclaveCryptoShield — importable but always raises
+# 8. EnclaveCryptoShield — requires explicit provider configuration
 # ===========================================================================
 
-class TestCryptoShieldAPI:
-    """EnclaveCryptoShield is in __all__ but always raises NotImplementedError.
-    This is correct behavior, but the import experience could be smoother.
-    """
 
-    def test_enclave_shield_raises_on_construction(self):
-        with pytest.raises(NotImplementedError, match="placeholder"):
+class TestCryptoShieldAPI:
+    """EnclaveCryptoShield fails closed when its trust dependencies are absent."""
+
+    def test_enclave_shield_requires_provider_configuration(self):
+        with pytest.raises(TypeError, match="required positional"):
             EnclaveCryptoShield()
 
     def test_null_shield_passes_through(self):
@@ -476,8 +485,9 @@ class TestCryptoShieldAPI:
                 shield=NullCryptoShield(silence_warning=True),
             )
 
-    def test_oracle_production_accepts_non_null_shield(self):
-        """A non-null shield satisfies the runtime production guard."""
+    def test_oracle_production_rejects_unmarked_custom_shield(self):
+        """Two callable methods alone must not bypass the production guard."""
+
         class DummyShield:
             def protect(self, anchor):
                 return anchor
@@ -485,8 +495,8 @@ class TestCryptoShieldAPI:
             def similarity(self, intent, protected_anchor):
                 return 1.0
 
-        oracle = Oracle(environment="production", shield=DummyShield())
-        assert oracle.environment == "production"
+        with pytest.raises(RuntimeError, match="production_ready=True"):
+            Oracle(environment="production", shield=DummyShield())
 
     def test_crypto_shield_protocol(self):
         """CryptoShield is a Protocol — verify the interface."""
@@ -497,6 +507,7 @@ class TestCryptoShieldAPI:
 # ===========================================================================
 # 9. Lifecycle completeness — reinforce edge cases, empty workspace, etc.
 # ===========================================================================
+
 
 class TestReinforceEdgeCases:
     """Edge cases around the reinforce (snap-back) operation."""
@@ -514,24 +525,21 @@ class TestReinforceEdgeCases:
         )
 
     def test_reinforce_evicted_vine(self):
-        """Reinforcing an EVICTED vine should not resurrect it.
-        The current code only checks for TWILIGHT state in reinforce()."""
+        """Reinforcing an EVICTED vine fails explicitly and cannot resurrect it."""
         ws = _forced_ws(capacity=2)
         v = ws.add(Vine("gone", _vec(0.0, 1.0)))
         now = time.time()
         ws.run_decay_cycle(_vec(1.0, 0.0), now=now)
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
 
-        ws.reinforce(v.vine_id)
-        # BUG: reinforce on EVICTED vine does nothing — it stays EVICTED
-        # but also doesn't raise an error
-        assert v.state == VineState.EVICTED, (
-            "Reinforcing an EVICTED vine should either resurrect it or raise"
-        )
+        with pytest.raises(ValueError, match="evicted"):
+            ws.reinforce(v.vine_id)
+        assert v.state == VineState.EVICTED
 
     def test_reinforce_twilight_vine_gets_bonus(self):
         """Reinforcing a TWILIGHT vine snaps it back with +0.08 bonus."""
@@ -574,8 +582,8 @@ class TestEmptyWorkspace:
         assert ws.pressure() == 0.0
 
     def test_pressure_on_zero_capacity(self):
-        ws = Workspace(WorkspaceConfig(capacity=0))
-        assert ws.pressure() == 0.0
+        with pytest.raises(ValueError, match="positive integer"):
+            WorkspaceConfig(capacity=0)
 
     def test_active_on_empty_workspace(self):
         ws = Workspace(WorkspaceConfig(capacity=10))
@@ -623,8 +631,8 @@ class TestWorkspaceCapacity:
 # 10. Proximity edge cases — zero vectors, negative similarity, age
 # ===========================================================================
 
-class TestProximityEdgeCases:
 
+class TestProximityEdgeCases:
     def test_zero_intent_vector(self):
         """Zero intent vector: cosine=0, score is the recency bonus alone (0.15 at Δt=0)."""
         score = proximity_score(_vec(0.0, 0.0), _vec(1.0, 0.0), age_hours=0.0)
@@ -643,6 +651,7 @@ class TestProximityEdgeCases:
     def test_very_stale_vine_recency_bonus_decays(self):
         """After 1000 hours the recency bonus is negligible; cosine dominates."""
         import math as _math
+
         score = proximity_score(_vec(1.0, 0.0), _vec(1.0, 0.0), age_hours=1000.0)
         # cosine=1 stays 1; recency ≈ 0; total ≈ 1.0
         assert _math.isclose(score, 1.0, abs_tol=0.01)
@@ -671,19 +680,16 @@ class TestProximityEdgeCases:
 # 11. Conflict / fossil edge cases
 # ===========================================================================
 
-class TestConflictEdgeCases:
 
+class TestConflictEdgeCases:
     def test_fossilize_already_resolved_conflict(self):
-        """Fossilizing an already-resolved conflict should still work
-        (sets resolved=True again)."""
+        """A resolved conflict cannot produce duplicate fossil artifacts."""
         c = open_conflict("topic", "a", "b", 0.8, 0.7)
         fossilize(c, summary="first")
         assert c.resolved is True
 
-        # Fossilize again — no guard against double-fossilize
-        fossilize(c, summary="second")
-        # This creates a second fossil, which may not be intended
-        # The conflict is already resolved; fossilize should probably raise
+        with pytest.raises(ValueError, match="already resolved"):
+            fossilize(c, summary="second")
 
     def test_resurrect_mutates_original_fossil(self):
         """resurrect() mutates the FossilizedEcho's timeline in place.
@@ -732,8 +738,8 @@ class TestConflictEdgeCases:
 # 12. Archive edge cases
 # ===========================================================================
 
-class TestArchiveEdgeCases:
 
+class TestArchiveEdgeCases:
     def test_metadata_index_search_empty(self):
         idx = MetadataIndex()
         results = idx.search(_vec(1.0, 0.0), top_k=5)
@@ -770,8 +776,8 @@ class TestArchiveEdgeCases:
 # 13. Oracle integration — end-to-end lifecycle gaps
 # ===========================================================================
 
-class TestOracleIntegration:
 
+class TestOracleIntegration:
     def test_oracle_observe_demotes_and_reports(self):
         oracle = Oracle(WorkspaceConfig(capacity=2, pressure_evict_at=0.0))
         oracle.sprout("keep", _vec(1.0, 0.0))
@@ -823,7 +829,8 @@ class TestOracleIntegration:
         # Manually evict
         now = time.time()
         oracle.workspace.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
@@ -835,8 +842,8 @@ class TestOracleIntegration:
 # 14. Tidal split — 0, 1, 2 crests
 # ===========================================================================
 
-class TestTidalSplitEdgeCases:
 
+class TestTidalSplitEdgeCases:
     def test_tidal_split_with_one_crest(self):
         ws = Workspace(WorkspaceConfig(capacity=10))
         v = ws.add(Vine("only", _vec(1.0, 0.0)))
@@ -873,6 +880,7 @@ class TestTidalSplitEdgeCases:
 # 15. Thread safety — concurrent mutation (documented as unsupported)
 # ===========================================================================
 
+
 class TestThreadSafety:
     """Workspace concurrency is documented as degraded, not silently safe."""
 
@@ -880,15 +888,16 @@ class TestThreadSafety:
         oracle = Oracle(WorkspaceConfig(capacity=100, pressure_evict_at=0.0))
         report = oracle.capability_report().as_dict()
         assert report["thread_safety"]["status"] == "degraded"
-        assert "without locking" in report["thread_safety"]["message"]
+        assert "reentrant locks" in report["thread_safety"]["message"]
+        assert "mutable" in report["thread_safety"]["known_limitations"][0]
 
 
 # ===========================================================================
 # 16. Vector utility edge cases
 # ===========================================================================
 
-class TestVectorEdgeCases:
 
+class TestVectorEdgeCases:
     def test_normalize_zero_vector(self):
         result = normalize(_vec(0.0, 0.0))
         assert np.allclose(result, _vec(0.0, 0.0))
@@ -921,6 +930,7 @@ class TestVectorEdgeCases:
 # 17. Vine lifecycle state machine
 # ===========================================================================
 
+
 class TestVineStateMachine:
     """Verify the legal state transitions and catch illegal ones."""
 
@@ -936,7 +946,8 @@ class TestVineStateMachine:
         now = time.time()
         ws.run_decay_cycle(_vec(1.0, 0.0), now=now)
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
@@ -950,23 +961,21 @@ class TestVineStateMachine:
         assert v.state == VineState.ACTIVE
 
     def test_evicted_is_terminal(self):
-        """Once EVICTED, a vine should not transition back.
-        Currently reinforce() silently ignores EVICTED vines."""
+        """Once EVICTED, a vine cannot transition back through reinforce()."""
         ws = _forced_ws(capacity=2)
         v = ws.add(Vine("v", _vec(0.0, 1.0)))
         now = time.time()
         ws.run_decay_cycle(_vec(1.0, 0.0), now=now)
         ws.run_decay_cycle(
-            _vec(1.0, 0.0), now=now + 31 * 60,
+            _vec(1.0, 0.0),
+            now=now + 31 * 60,
             cycles_since_twilight={v.vine_id: 5},
         )
         assert v.state == VineState.EVICTED
 
-        # Reinforce should not bring it back
-        ws.reinforce(v.vine_id)
-        assert v.state == VineState.EVICTED, (
-            "EVICTED is terminal — reinforce should not resurrect it"
-        )
+        with pytest.raises(ValueError, match="evicted"):
+            ws.reinforce(v.vine_id)
+        assert v.state == VineState.EVICTED
 
     def test_locked_vine_survives_decay(self):
         ws = _forced_ws(capacity=2)
@@ -992,15 +1001,18 @@ class TestVineStateMachine:
 # 18. Gardener's Report completeness
 # ===========================================================================
 
-class TestGardenersReport:
 
+class TestGardenersReport:
     def test_report_dict_keys(self):
         ws = Workspace(WorkspaceConfig(capacity=10))
         r = gardeners_report(ws)
         d = r.as_dict()
         assert set(d.keys()) == {
-            "thriving_vines", "twilight_grove",
-            "knotted_branches", "ancient_rings", "memory_pressure",
+            "thriving_vines",
+            "twilight_grove",
+            "knotted_branches",
+            "ancient_rings",
+            "memory_pressure",
         }
 
     def test_report_with_conflicts_and_fossils(self):
@@ -1023,8 +1035,8 @@ class TestGardenersReport:
 # 19. Decay loop: multiple cycles and score progression
 # ===========================================================================
 
-class TestDecayLoopProgression:
 
+class TestDecayLoopProgression:
     def test_scores_decrease_with_time(self):
         """Vines that are not touched should have decreasing scores over time."""
         ws = _forced_ws(capacity=10)

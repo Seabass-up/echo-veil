@@ -11,11 +11,13 @@ A Vine is deliberately a plain dataclass. All decay/eviction policy lives in
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 import zlib
 from dataclasses import dataclass, field
 from enum import Enum
+from numbers import Real
 
 import numpy as np
 
@@ -25,9 +27,9 @@ from .vectors import Vector, as_vector
 class VineState(str, Enum):
     """Lifecycle states from the spec's decay loop (Section 2)."""
 
-    ACTIVE = "active"        # Thriving Vine
-    TWILIGHT = "twilight"    # compressed, eligible to snap back
-    EVICTED = "evicted"      # dissolved from RAM, handed to the archive
+    ACTIVE = "active"  # Thriving Vine
+    TWILIGHT = "twilight"  # compressed, eligible to snap back
+    EVICTED = "evicted"  # dissolved from RAM, handed to the archive
 
 
 @dataclass
@@ -73,16 +75,50 @@ class Vine:
     _anchor_shape: tuple[int, ...] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        self.anchor = as_vector(self.anchor)
+        if not isinstance(self.topic, str) or not self.topic.strip():
+            raise ValueError("topic must be a non-empty string")
+        if not isinstance(self.vine_id, str) or not self.vine_id.strip():
+            raise ValueError("vine_id must be a non-empty string")
+        self.state = VineState(self.state)
+        self.created_at = self._validate_timestamp(self.created_at, "created_at")
+        self.last_touched = self._validate_timestamp(self.last_touched, "last_touched")
+        if self.twilight_since is not None:
+            self.twilight_since = self._validate_timestamp(
+                self.twilight_since,
+                "twilight_since",
+            )
+        if isinstance(self.score, bool) or not isinstance(self.score, Real):
+            raise TypeError("score must be finite")
+        self.score = float(self.score)
+        if not math.isfinite(self.score):
+            raise ValueError("score must be finite")
+        self.anchor = as_vector(
+            self.anchor,
+            allow_empty=self.protected_anchor is not None,
+            copy=True,
+            name="anchor vector",
+        )
+
+    @staticmethod
+    def _validate_timestamp(value: float, name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{name} must be a finite non-negative timestamp")
+        result = float(value)
+        if not math.isfinite(result) or result < 0.0:
+            raise ValueError(f"{name} must be a finite non-negative timestamp")
+        return result
 
     def touch(self, now: float | None = None) -> None:
         """Mark the vine as just-used, resetting its decay clock."""
-        self.last_touched = time.time() if now is None else now
+        value = time.time() if now is None else now
+        self.last_touched = self._validate_timestamp(value, "now")
 
     def age_hours(self, now: float | None = None) -> float:
         """Elapsed hours since the vine was last touched."""
-        ref = time.time() if now is None else now
-        return max(0.0, (ref - self.last_touched) / 3600.0)
+        value = time.time() if now is None else now
+        ref = self._validate_timestamp(value, "now")
+        last_touched = self._validate_timestamp(self.last_touched, "last_touched")
+        return max(0.0, (ref - last_touched) / 3600.0)
 
     # --- Twilight compression ------------------------------------------------
     # The spec quotes "88% memory footprint compression". Real compression
@@ -97,13 +133,57 @@ class Vine:
         full array and the compressed bytes in memory simultaneously (the spec
         intends TWILIGHT to reduce, not double, the RAM footprint).
         """
-        raw = self.anchor.astype(np.float64).tobytes()
+        if self.anchor.size == 0:
+            raise ValueError("cannot compress an empty anchor vector")
+        raw = self.anchor.astype(np.float64, copy=False).tobytes(order="C")
         self._compressed = zlib.compress(raw, level=9)
         self._anchor_shape = self.anchor.shape
-        self.anchor = np.zeros(0)  # release the live array
-        if not raw:
-            return 0.0
+        self.anchor = np.zeros(0, dtype=np.float64)  # release the live array
         return 1.0 - (len(self._compressed) / len(raw))
+
+    def anchor_snapshot(self) -> Vector:
+        """Return a validated copy of the anchor without changing lifecycle state.
+
+        For TWILIGHT/EVICTED vines this performs bounded decompression into a
+        temporary array. It lets the Oracle build L2 metadata without restoring
+        plaintext onto an externally referenced evicted Vine object.
+        """
+        if self._compressed is None:
+            return as_vector(
+                self.anchor,
+                allow_empty=False,
+                copy=True,
+                name="anchor vector",
+            )
+        if (
+            self._anchor_shape is None
+            or len(self._anchor_shape) != 1
+            or isinstance(self._anchor_shape[0], bool)
+            or not isinstance(self._anchor_shape[0], int)
+            or self._anchor_shape[0] <= 0
+        ):
+            raise ValueError("compressed anchor has invalid shape metadata")
+
+        expected_bytes = self._anchor_shape[0] * np.dtype(np.float64).itemsize
+        decompressor = zlib.decompressobj()
+        try:
+            raw = decompressor.decompress(self._compressed, expected_bytes + 1)
+        except zlib.error as exc:
+            raise ValueError("compressed anchor payload is corrupt") from exc
+        if (
+            len(raw) != expected_bytes
+            or not decompressor.eof
+            or decompressor.unconsumed_tail
+            or decompressor.unused_data
+        ):
+            raise ValueError("compressed anchor payload does not match shape metadata")
+        restored = np.frombuffer(raw, dtype=np.float64).reshape(self._anchor_shape)
+        return as_vector(
+            restored,
+            allow_empty=False,
+            copy=True,
+            name="decompressed anchor vector",
+        )
 
     def decompress(self) -> None:
         """Restore the anchor from its compressed form (snap-back).
@@ -113,11 +193,7 @@ class Vine:
         """
         if self._compressed is None:
             return
-        raw = zlib.decompress(self._compressed)
-        restored = np.frombuffer(raw, dtype=np.float64).copy()
-        if self._anchor_shape is not None and self._anchor_shape != (0,):
-            restored = restored.reshape(self._anchor_shape)
-        self.anchor = restored
+        self.anchor = self.anchor_snapshot()
         self._compressed = None
         self._anchor_shape = None
 

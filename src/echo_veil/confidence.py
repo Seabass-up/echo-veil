@@ -7,8 +7,10 @@ scores in [0, 1] and the system's own proximity scores in [-1, 1.15].
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
+from numbers import Real
 
 
 class ConfidenceBand(str, Enum):
@@ -30,21 +32,41 @@ class BandPolicy:
 
 # Ordered high -> low. Thresholds per the spec table.
 _POLICIES: tuple[BandPolicy, ...] = (
-    BandPolicy(ConfidenceBand.SOLID, 0.85,
-               "Solid Vine Integration",
-               "Seamless, authoritative delivery.", False),
-    BandPolicy(ConfidenceBand.COHERENT, 0.70,
-               "Coherent Assembly",
-               "Standard delivery; minor context gaps noted in footer.", False),
-    BandPolicy(ConfidenceBand.FRAGMENTED, 0.50,
-               "Fragmented Synthesis",
-               "Micro-Vine Assembly layout; notes inferential leaps.", False),
-    BandPolicy(ConfidenceBand.INFERENTIAL, 0.35,
-               "High Inferential Leaps",
-               "Speculative reconstruction; requires explicit user override.", True),
-    BandPolicy(ConfidenceBand.OBSCURITY, 0.0,
-               "Data Obscurity Fault",
-               "Hard stop. Surface the 3-pronged escalation menu.", True),
+    BandPolicy(
+        ConfidenceBand.SOLID,
+        0.85,
+        "Solid Vine Integration",
+        "Seamless, authoritative delivery.",
+        False,
+    ),
+    BandPolicy(
+        ConfidenceBand.COHERENT,
+        0.70,
+        "Coherent Assembly",
+        "Standard delivery; minor context gaps noted in footer.",
+        False,
+    ),
+    BandPolicy(
+        ConfidenceBand.FRAGMENTED,
+        0.50,
+        "Fragmented Synthesis",
+        "Micro-Vine Assembly layout; notes inferential leaps.",
+        False,
+    ),
+    BandPolicy(
+        ConfidenceBand.INFERENTIAL,
+        0.35,
+        "High Inferential Leaps",
+        "Speculative reconstruction; requires explicit user override.",
+        True,
+    ),
+    BandPolicy(
+        ConfidenceBand.OBSCURITY,
+        0.0,
+        "Data Obscurity Fault",
+        "Hard stop. Surface the 3-pronged escalation menu.",
+        True,
+    ),
 )
 
 
@@ -56,7 +78,10 @@ def classify(score: float) -> BandPolicy:
     range are clamped into the confidence bands: anti-aligned memories become
     OBSCURITY, and very fresh exact matches become SOLID.
     """
-    if not -1.0 <= score <= 1.15:
+    if isinstance(score, bool) or not isinstance(score, Real):
+        raise TypeError("confidence score must be a finite number")
+    score = float(score)
+    if not math.isfinite(score) or not -1.0 <= score <= 1.15:
         raise ValueError(f"confidence score out of range: {score}")
     score = min(1.0, max(0.0, score))
     for policy in _POLICIES:

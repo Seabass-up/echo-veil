@@ -42,7 +42,7 @@ def test_oracle_observe_demotes_offtopic_vine():
     assert drop.state == VineState.TWILIGHT
 
 
-def test_custom_nonserializable_shield_keeps_plaintext_fallback_for_archive():
+def test_custom_nonserializable_shield_is_rejected_without_plaintext_fallback():
     class TupleShield:
         def protect(self, anchor):
             return ("protected", anchor.copy())
@@ -51,16 +51,9 @@ def test_custom_nonserializable_shield_keeps_plaintext_fallback_for_archive():
             return 0.0
 
     o = Oracle(WorkspaceConfig(capacity=1, pressure_evict_at=0.0), shield=TupleShield())
-    v = o.sprout("custom", np.array([1.0, 0.0], dtype=np.float64))
+    with pytest.raises(TypeError, match="plaintext archive fallback is disabled"):
+        o.sprout("custom", np.array([1.0, 0.0], dtype=np.float64))
 
-    assert v.protected_anchor is not None
-    assert v.anchor.shape == (2,)
-
-    o.observe(np.array([0.0, 1.0], dtype=np.float64))
-    v.twilight_since -= 3600
-    for _ in range(6):
-        o.observe(np.array([0.0, 1.0], dtype=np.float64))
-
-    assert len(o.index) == 1
-    assert o.index.search(np.array([1.0, 0.0], dtype=np.float64), top_k=1)[0][0] == v.vine_id
-    assert o.archive.get(v.vine_id) is not None
+    assert o.workspace.vines == []
+    assert len(o.index) == 0
+    assert len(o.archive) == 0

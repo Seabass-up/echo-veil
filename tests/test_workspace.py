@@ -41,7 +41,10 @@ def test_locked_vine_never_decays():
 
 def test_amber_lock_cap_enforced():
     ws = Workspace(WorkspaceConfig(capacity=100))
-    ids = [ws.add(Vine(f"v{i}", np.array([1.0, 0.0]))).vine_id for i in range(MAX_AMBER_LOCKS + 1)]
+    ids = [
+        ws.add(Vine(f"v{i}", np.array([1.0, 0.0]))).vine_id
+        for i in range(MAX_AMBER_LOCKS + 1)
+    ]
     for vid in ids[:MAX_AMBER_LOCKS]:
         ws.lock(vid)
     with pytest.raises(ValueError):
@@ -76,7 +79,10 @@ def test_twilight_evicts_after_window():
 
 def test_crest_cap_enforced():
     ws = Workspace(WorkspaceConfig(capacity=100))
-    ids = [ws.add(Vine(f"v{i}", np.array([1.0, 0.0]))).vine_id for i in range(MAX_CRESTS + 1)]
+    ids = [
+        ws.add(Vine(f"v{i}", np.array([1.0, 0.0]))).vine_id
+        for i in range(MAX_CRESTS + 1)
+    ]
     with pytest.raises(ValueError):
         ws.set_crests(ids)
 
@@ -132,8 +138,7 @@ def test_capacity_overflow_evicts_lowest_scoring_vines():
 
 def test_protected_vine_without_oracle_score_fn_does_not_crash_decay():
     ws = Workspace(WorkspaceConfig(capacity=2))
-    v = ws.add(Vine("protected", np.zeros(0)))
-    v.protected_anchor = object()
+    v = ws.add(Vine("protected", np.zeros(0), protected_anchor=object()))
 
     report = ws.run_decay_cycle(np.array([1.0, 0.0]))
 

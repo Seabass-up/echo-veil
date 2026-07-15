@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echo-veil"
-version = "0.3.0"
+version = "0.4.0"
 description = "A tiered, decay-driven memory architecture for conversational agents (Echo Veil v1.0 core)."
 readme = "README.md"
 requires-python = ">=3.10"

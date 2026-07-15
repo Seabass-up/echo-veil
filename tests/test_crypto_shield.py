@@ -2,12 +2,72 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import numpy as np
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from echo_veil import AesGcmCryptoShield, EnclaveCryptoShield, Oracle
+from echo_veil import (
+    AesGcmCryptoShield,
+    EnclaveCryptoShield,
+    EnclaveProtectedVector,
+    Ed25519AttestationVerifier,
+    Oracle,
+    VerifiedEnclave,
+)
 from echo_veil.crypto_shield import ProtectedVector
+
+
+class _TestEnclaveProvider:
+    def attest(self, nonce: bytes) -> bytes:
+        self.nonce = nonce
+        return b"vendor-evidence:" + nonce
+
+    def access_challenge(self) -> bytes:
+        return b"access-challenge"
+
+    def bind_attestation(self, enclave: VerifiedEnclave) -> None:
+        self.enclave = enclave
+
+    def open_session(self, proof: bytes) -> str:
+        return "session" if proof == b"valid-proof" else ""
+
+    def encrypt_vector(self, session: str, anchor: np.ndarray) -> bytes:
+        assert session == "session"
+        return anchor.astype(np.float64).tobytes()
+
+    def cosine_similarity(
+        self, session: str, intent: np.ndarray, ciphertext: bytes
+    ) -> float:
+        assert session == "session"
+        anchor = np.frombuffer(ciphertext, dtype=np.float64)
+        return float(
+            np.dot(intent, anchor) / (np.linalg.norm(intent) * np.linalg.norm(anchor))
+        )
+
+
+class _TestVerifier:
+    def verify(self, evidence: bytes, nonce: bytes) -> VerifiedEnclave:
+        assert evidence == b"vendor-evidence:" + nonce
+        return VerifiedEnclave(
+            provider_id="test-enclave",
+            measurement="trusted-measurement",
+            key_id="sealed-key-1",
+            expires_at=time.time() + 60,
+            ckks_security_bits=128,
+            hardware_isolation=True,
+            zkp_access_gate=True,
+            homomorphic_similarity=True,
+            transport_public_key=b"k" * 32,
+        )
+
+
+class _TestProofProvider:
+    def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
+        assert challenge == b"access-challenge"
+        assert enclave.measurement == "trusted-measurement"
+        return b"valid-proof"
 
 
 def test_aes_gcm_shield_encrypts_anchor_and_computes_similarity() -> None:
@@ -48,7 +108,9 @@ def test_protected_vector_json_roundtrip() -> None:
     restored = ProtectedVector.from_json_bytes(protected.to_json_bytes())
 
     assert restored == protected
-    assert shield.similarity(np.array([1.0, 0.0], dtype=np.float64), restored) == pytest.approx(1.0)
+    assert shield.similarity(
+        np.array([1.0, 0.0], dtype=np.float64), restored
+    ) == pytest.approx(1.0)
 
 
 def test_aes_gcm_shield_key_helpers_and_env_loader(monkeypatch) -> None:
@@ -148,9 +210,58 @@ def test_aes_gcm_shield_rejects_dimension_mismatch() -> None:
         shield.similarity(np.array([1.0, 0.0, 0.0], dtype=np.float64), protected)
 
 
-def test_enclave_crypto_shield_remains_top_level_importable_placeholder() -> None:
-    with pytest.raises(NotImplementedError, match="placeholder"):
-        EnclaveCryptoShield()
+def test_enclave_crypto_shield_requires_verified_ckks_enclave_and_zkp() -> None:
+    shield = EnclaveCryptoShield(
+        _TestEnclaveProvider(), _TestVerifier(), _TestProofProvider()
+    )
+    protected = shield.protect(np.array([1.0, 0.0]))
+
+    assert isinstance(protected, EnclaveProtectedVector)
+    assert shield.similarity(np.array([1.0, 0.0]), protected) == pytest.approx(1.0)
+    assert (
+        EnclaveProtectedVector.from_json_bytes(protected.to_json_bytes()) == protected
+    )
+
+
+def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    nonce = b"n" * 32
+    now = time.time()
+    claims = json.dumps(
+        {
+            "nonce_b64": base64.urlsafe_b64encode(nonce).decode(),
+            "provider_id": "provider",
+            "measurement": "approved",
+            "key_id": "key-1",
+            "issued_at": now,
+            "expires_at": now + 60,
+            "ckks_security_bits": 128,
+            "hardware_isolation": True,
+            "zkp_access_gate": True,
+            "homomorphic_similarity": True,
+            "transport_public_key_b64": base64.urlsafe_b64encode(b"k" * 32).decode(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    evidence = json.dumps(
+        {
+            "payload_b64": base64.urlsafe_b64encode(claims).decode(),
+            "signature_b64": base64.urlsafe_b64encode(
+                private_key.sign(claims)
+            ).decode(),
+        }
+    ).encode()
+    verifier = Ed25519AttestationVerifier(private_key.public_key(), {"approved"})
+
+    verified = verifier.verify(evidence, nonce)
+    assert verified.measurement == "approved"
+    with pytest.raises(ValueError, match="nonce"):
+        verifier.verify(evidence, b"x" * 32)
+    with pytest.raises(ValueError, match="measurement"):
+        Ed25519AttestationVerifier(private_key.public_key(), {"different"}).verify(
+            evidence, nonce
+        )
 
 
 def test_oracle_production_accepts_aes_gcm_shield() -> None:
@@ -161,7 +272,9 @@ def test_oracle_production_accepts_aes_gcm_shield() -> None:
     assert oracle.environment == "production"
     assert report["crypto_readiness"]["status"] == "ready"
     assert "AES-GCM" in report["crypto_readiness"]["message"]
-    assert not any("NullCryptoShield" in blocker for blocker in report["production_blockers"])
+    assert not any(
+        "NullCryptoShield" in blocker for blocker in report["production_blockers"]
+    )
 
 
 def test_oracle_with_aes_gcm_protects_active_vine_anchor_and_scores_decay() -> None:
@@ -198,12 +311,17 @@ def test_oracle_with_aes_gcm_indexes_and_archives_evicted_protected_vine() -> No
         oracle.observe(np.array([1.0, 0.0], dtype=np.float64))
 
     assert len(oracle.index) == 1
-    assert oracle.search_index(np.array([0.0, 1.0], dtype=np.float64), top_k=1)[0][0] == drop.vine_id
+    assert (
+        oracle.search_index(np.array([0.0, 1.0], dtype=np.float64), top_k=1)[0][0]
+        == drop.vine_id
+    )
 
     archived = oracle.archive.get(drop.vine_id)
     assert archived is not None
     restored = ProtectedVector.from_json_bytes(archived)
-    assert shield.similarity(np.array([0.0, 1.0], dtype=np.float64), restored) == pytest.approx(1.0)
+    assert shield.similarity(
+        np.array([0.0, 1.0], dtype=np.float64), restored
+    ) == pytest.approx(1.0)
 
 
 def test_oracle_with_aes_gcm_garden_centroid_and_drift_use_protected_vines() -> None:

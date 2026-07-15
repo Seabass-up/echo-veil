@@ -8,25 +8,25 @@ eventually archived, and contradictory information is preserved as structured
 tension rather than overwritten. This repository implements the core of the
 Echo Veil v1.0 specification (`docs/SPEC.md`).
 
-> **Status: 0.3.0 — v1 core complete, practical Crypto Shield implemented.**
+> **Status: 0.4.0 — durable active memory, indexed retrieval, and attested confidential-compute integration.**
 > The memory lifecycle, conflict handling, drift detection, capability reporting,
 > confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
-> and tested. The original Level-5 shield concept (CKKS + hardware enclave +
-> zk-SNARK) remains a research path and is intentionally not faked. See
+> and tested. Production deployments can connect a CKKS enclave provider through
+> a fail-closed attestation and zero-knowledge access-proof boundary. See
 > `docs/ARCHITECTURE_NOTES.md`.
 
 ## What's in the box
 
 | Spec section | Module | Status |
 |---|---|---|
-| 1. Tiered storage | `archive.py` (L2/L3), `workspace.py` (L1) | Implemented (in-memory reference) |
+| 1. Tiered storage | `archive.py`, `persistence.py`, `workspace.py` | In-memory reference + durable transactional SQLite L1/L2/L3 |
 | 2. Workspace metabolism / decay loop | `workspace.py`, `proximity.py`, `vine.py` | Implemented |
 | 3. Confidence spectrum matrix | `confidence.py` | Implemented |
 | 3. Conflict / fossil / resurrection | `conflict.py` | Implemented |
 | 4. Intent drift detection | `drift.py` | Implemented |
 | 4. Caretaker / Gardener's Report | `caretaker.py` | Implemented |
 | Practical Crypto Shield | `crypto_shield.py` | AES-256-GCM protected vectors implemented |
-| 5. Level-5 cryptographic root shield | `crypto_shield.py` | CKKS/enclave/ZK placeholder intentionally refuses construction |
+| 5. Level-5 cryptographic root shield | `crypto_shield.py` | Attested CKKS enclave and ZKP provider adapter implemented |
 | Defensive readiness / doctor report | `capability.py`, `oracle.py` | Implemented |
 | — Facade | `oracle.py` | Implemented |
 
@@ -40,15 +40,22 @@ pip install -e ".[dev]"
 
 ```python
 import numpy as np
-from echo_veil import AesGcmCryptoShield, Oracle, WorkspaceConfig
+from echo_veil import AesGcmCryptoShield, Oracle, SQLiteStore, WorkspaceConfig
 
 # Development/reference mode.
 _ = Oracle(WorkspaceConfig(capacity=400))
 
-# Production requires a structurally valid non-null shield. Store this key in a
-# secret manager or ECHO_VEIL_CRYPTO_KEY, not source code.
+# Production/staging requires a shield that explicitly declares production
+# readiness. AesGcmCryptoShield does; store its key in a secret manager or
+# ECHO_VEIL_CRYPTO_KEY, not source code.
 shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
-oracle = Oracle(WorkspaceConfig(capacity=400), shield=shield, environment="production")
+store = SQLiteStore("echo-veil.db")
+oracle = Oracle(
+    WorkspaceConfig(capacity=400),
+    shield=shield,
+    environment="production",
+    storage=store,
+)
 
 # Add active memories (anchor vectors come from your embedding model).
 oracle.sprout("estimate: Topping Ave", embed("200A service upgrade quote"))
@@ -62,7 +69,37 @@ print(oracle.report().as_dict())
 
 # Defensive readiness / production-gap report.
 print(oracle.capability_report().as_dict())
+
+# Checkpoint WAL state and close the database during application shutdown.
+store.close()
 ```
+
+### Cloudflare enclave gateway
+
+[`cloudflare/enclave-gateway`](cloudflare/enclave-gateway) contains a deployable
+Worker that validates Cloudflare Access JWTs and forwards the enclave protocol
+through an mTLS binding. Configure the Python provider with the Access service
+token issued for that application:
+
+```python
+from echo_veil import CloudflareEnclaveProvider, EnclaveCryptoShield
+
+provider = CloudflareEnclaveProvider(
+    "https://memory.example.com",
+    access_client_id,
+    access_client_secret,
+)
+shield = EnclaveCryptoShield(provider, vendor_attestation_verifier, zkp_prover)
+```
+
+`CloudflareEnclaveProvider.from_env()` reads the service token from
+`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` so it does not need to
+appear in application source.
+
+The Worker is not treated as an enclave. The verifier must validate the
+downstream SGX/SEV-SNP evidence and approved measurement; construction fails if
+that evidence does not bind hardware isolation, CKKS similarity, and the ZKP
+gate.
 
 ## Run the tests
 
@@ -82,14 +119,39 @@ pytest -q
   encrypts and authenticates protected vectors with AES-256-GCM and decrypts
   transiently during `similarity()`. It is suitable for practical encrypted
   vector storage, but it is not homomorphic and not an enclave.
-- **The Level-5 shield is honest about its gap.** `NullCryptoShield` is a
-  dev-only pass-through with no confidentiality; `EnclaveCryptoShield` raises
-  rather than pretend. `Oracle(environment="production")` refuses to start
-  without a structurally valid shield and rejects `NullCryptoShield` explicitly.
+- **The Level-5 integration fails closed.** `EnclaveCryptoShield` requires an
+  enclave provider, a deployment trust-root verifier, and a zero-knowledge proof
+  provider. Construction rejects expired evidence, CKKS security below 128 bits,
+  missing hardware isolation, a missing ZKP gate, or non-homomorphic similarity.
+  Echo Veil does not emulate SGX/SEV-SNP or roll its own CKKS in Python; the
+  configured provider supplies those deployment-specific primitives.
 - **Custom shields are conservative by default.** Echo Veil validates the
-  `protect()` / `similarity()` contract before accepting a custom shield, but
-  capability reporting marks unknown custom shields degraded until their threat
-  model and protected-payload behavior are externally reviewed.
+  `protect()` / `similarity()` contract. Protected payloads must implement
+  `to_json_bytes()`; Echo Veil no longer falls back to archiving plaintext when
+  a custom payload cannot be serialized. Capability reporting marks unknown
+  custom shields degraded until their threat model is externally reviewed.
+- **Inputs fail closed.** Stored vectors are copied, must be non-empty and
+  finite, and must keep one embedding dimension per Oracle/Workspace. Invalid
+  capacities, decay constants, timestamps, cycle overrides, confidence scores,
+  and index limits are rejected at their boundaries.
+- **Eviction is retry-safe.** An archive/index failure leaves an evicted vine
+  pending and retriable; pruning happens only after both lower-tier writes have
+  succeeded. Building the L2 entry no longer restores plaintext onto an
+  externally retained evicted Vine.
+- **Durable storage is available without another dependency.** `SQLiteStore`
+  checkpoints active L1 vines and commits each L2 index entry, L3 archive payload, and lifecycle/topic metadata
+  in one crash-recoverable transaction. It enables WAL mode, full synchronous
+  durability, integrity checks, cross-process writer coordination, and owner-only
+  database-file permissions. Reopening the store restores active, twilight,
+  locked, and focal-crest state as well as searchable lower-tier memory.
+- **SQLite retrieval is indexed.** Stable random-projection LSH signatures are
+  stored in indexed SQLite buckets. Lookup selects approximate cosine-neighbor
+  candidates and then applies the exact shield-aware scorer. Schema-v1 databases
+  migrate automatically and backfill signatures for plaintext entries.
+- **Internal operations are serialized.** Oracle, Workspace, index, archive,
+  and drift mutations use reentrant locks. Returned `Vine` objects remain
+  mutable, so callers should not edit them concurrently or bypass the public
+  mutation methods.
 - **Capability reporting is built in.** `Oracle.capability_report()` /
   `doctor_report()` returns a JSON-serializable readiness report covering crypto,
   storage, vector index, persistence, thread safety, and confidence gating.

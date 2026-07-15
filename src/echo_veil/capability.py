@@ -5,14 +5,19 @@ or imply unavailable security features are present. Host applications can use it
 to detect development-only backends, missing persistence, non-thread-safe
 reference storage, and crypto readiness before integrating Echo Veil.
 """
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
-from .archive import ColdArchive, MetadataIndex
-from .crypto_shield import AesGcmCryptoShield, NullCryptoShield, is_crypto_shield
+from .crypto_shield import (
+    AesGcmCryptoShield,
+    EnclaveCryptoShield,
+    NullCryptoShield,
+    is_crypto_shield,
+)
 
 
 class CapabilityStatus(str, Enum):
@@ -87,9 +92,20 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
             CapabilityStatus.DEGRADED,
             f"{shield_name} is development-only and provides no confidentiality.",
             "Provide a real CryptoShield before production use.",
-            ("CKKS/enclave/zk-SNARK shield is not implemented.",),
+            ("Configure EnclaveCryptoShield for the Level-5 security profile.",),
         )
         blockers.append("NullCryptoShield is not production-ready.")
+    elif isinstance(shield, EnclaveCryptoShield):
+        attestation = shield.attestation
+        crypto = CapabilityCheck(
+            "crypto_readiness",
+            CapabilityStatus.READY,
+            "Attested CKKS enclave shield active with a verified ZKP access gate.",
+            "Monitor attestation expiry and rotate the enclave sealing key under deployment policy.",
+            (
+                f"Trust is rooted in the configured verifier for measurement {attestation.measurement}.",
+            ),
+        )
     elif isinstance(shield, AesGcmCryptoShield):
         crypto = CapabilityCheck(
             "crypto_readiness",
@@ -112,49 +128,131 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
                 "Capability report cannot prove custom cryptographic strength.",
             ),
         )
-        blockers.append("Custom CryptoShield requires external validation before production use.")
+        blockers.append(
+            "Custom CryptoShield requires external validation before production use."
+        )
 
     archive = getattr(oracle, "archive", None)
-    storage_is_reference = isinstance(archive, ColdArchive)
+    archive_name = str(getattr(archive, "backend_name", type(archive).__name__))
+    archive_durable = getattr(archive, "durable", False) is True
+    archive_cross_process = getattr(archive, "cross_process_safe", False) is True
     storage = CapabilityCheck(
         "storage_backend",
-        CapabilityStatus.DEGRADED if storage_is_reference else CapabilityStatus.READY,
-        "ColdArchive is an in-memory reference backend." if storage_is_reference else f"Storage backend: {type(archive).__name__}.",
-        "Swap in durable object storage for production." if storage_is_reference else "Validate durability and access controls.",
-        ("In-memory archive is lost on process restart.",) if storage_is_reference else (),
+        CapabilityStatus.READY if archive_durable else CapabilityStatus.DEGRADED,
+        (
+            f"{archive_name} is durable and restart-safe."
+            if archive_durable
+            else f"{archive_name} is non-durable/reference storage."
+        ),
+        (
+            "Protect database files and backups with deployment access controls."
+            if archive_durable
+            else "Configure a durable transactional L3 backend."
+        ),
+        (
+            ()
+            if archive_durable
+            else ("Archived payloads are lost on process restart.",)
+        ),
     )
-    if storage_is_reference:
-        blockers.append("ColdArchive is in-memory/reference storage.")
+    if not archive_durable:
+        blockers.append("L3 archive is not durable.")
 
     index = getattr(oracle, "index", None)
-    index_is_reference = isinstance(index, MetadataIndex)
+    index_name = str(getattr(index, "backend_name", type(index).__name__))
+    index_durable = getattr(index, "durable", False) is True
+    search_strategy = str(getattr(index, "search_strategy", "unknown"))
+    search_is_linear = search_strategy == "linear"
+    if index_durable and not search_is_linear:
+        index_status = CapabilityStatus.READY
+    else:
+        index_status = CapabilityStatus.DEGRADED
     vector_index = CapabilityCheck(
         "vector_index_backend",
-        CapabilityStatus.DEGRADED if index_is_reference else CapabilityStatus.READY,
-        "MetadataIndex is a linear-scan in-memory reference index." if index_is_reference else f"Vector index backend: {type(index).__name__}.",
-        "Swap in an ANN/vector DB backend before relying on low-latency global lookup." if index_is_reference else "Validate latency and recall behavior.",
-        ("No <5ms global lookup guarantee with reference index.",) if index_is_reference else (),
+        index_status,
+        (
+            f"{index_name} is durable; search strategy is {search_strategy}."
+            if index_durable
+            else f"{index_name} is non-durable; search strategy is {search_strategy}."
+        ),
+        (
+            "Use an ANN backend when corpus size requires a bounded lookup SLA."
+            if search_is_linear
+            else "Validate latency and recall against the deployment corpus."
+        ),
+        (
+            ("Linear search has no <5ms global lookup guarantee at large scale.",)
+            if search_is_linear
+            else ()
+        ),
     )
-    if index_is_reference:
-        blockers.append("MetadataIndex is a reference linear-scan index.")
+    if not index_durable:
+        blockers.append("L2 metadata index is not durable.")
+    elif search_is_linear:
+        warnings.append("The durable L2 index uses linear search, not ANN lookup.")
 
+    coordinator = getattr(oracle, "storage", None)
+    coordinated_transactions = (
+        coordinator is not None
+        and getattr(coordinator, "durable", False) is True
+        and getattr(coordinator, "transactional", False) is True
+        and getattr(coordinator, "cross_process_safe", False) is True
+        and archive_durable
+        and index_durable
+    )
     persistence = CapabilityCheck(
         "persistence",
-        CapabilityStatus.BLOCKED,
-        "No durable persistence layer is configured for L1/L2/L3 state.",
-        "Add persistence behind storage/index interfaces before production stateful use.",
-        ("Process restart loses in-memory state.",),
+        (
+            CapabilityStatus.READY
+            if coordinated_transactions
+            else CapabilityStatus.BLOCKED
+        ),
+        (
+            "L1 checkpoints and L2/L3 writes are durable, atomic, crash-recoverable, and coordinated across processes."
+            if coordinated_transactions
+            else "No durable transaction coordinator spans the L2 index and L3 archive."
+        ),
+        (
+            "Back up and test restore procedures for the durable lower tiers."
+            if coordinated_transactions
+            else "Configure a TransactionalEvictionStore such as SQLiteStore."
+        ),
+        (
+            (
+                "L1 active state is checkpointed after Oracle mutations and restored at startup."
+                if coordinated_transactions
+                else "A crash can lose or split lower-tier eviction writes."
+            ),
+        ),
     )
-    blockers.append("No durable persistence layer is configured.")
+    if not coordinated_transactions:
+        blockers.append("No durable cross-tier transaction coordinator is configured.")
 
     thread_safety = CapabilityCheck(
         "thread_safety",
         CapabilityStatus.DEGRADED,
-        "Workspace uses plain in-memory dictionaries without locking.",
-        "Single-thread access or add locking before multi-threaded hosts.",
-        ("Concurrent mutation can corrupt workspace state.",),
+        (
+            "Core mutations use reentrant locks; the durable lower tiers also coordinate across processes."
+            if archive_cross_process and coordinated_transactions
+            else "Core mutations use reentrant locks; lower tiers lack cross-process transaction coordination."
+        ),
+        (
+            "Do not mutate returned Vine objects directly; use Oracle/Workspace methods."
+            if coordinated_transactions
+            else "Use Oracle/Workspace methods and configure cross-process coordination around persistent backends."
+        ),
+        (
+            "Vine objects returned to callers remain mutable outside internal locks.",
+            (
+                "Cross-process coordination covers L2/L3 only, not mutable L1 Vine objects."
+                if coordinated_transactions
+                else "No cross-process locking or transactional persistence is provided."
+            ),
+        ),
     )
-    warnings.append("Thread safety is not production-grade for concurrent hosts.")
+    warnings.append(
+        "Internal operations are thread-serialized, but externally mutated Vine objects are not protected."
+    )
 
     confidence = CapabilityCheck(
         "confidence_gating",
@@ -164,7 +262,7 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
     )
 
     # Development can be honest/degraded without being blocked from local use.
-    if environment == "production" and blockers:
+    if environment in {"staging", "production"} and blockers:
         overall = CapabilityStatus.BLOCKED
     elif blockers or warnings:
         overall = CapabilityStatus.DEGRADED
@@ -182,9 +280,20 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
         confidence_gating=confidence,
         production_blockers=tuple(blockers),
         warnings=tuple(warnings),
-        known_limitations=(
-            "Level-5 cryptographic root shield is interface/stub only.",
-            "L2/L3 backends are in-memory reference implementations.",
-            "No persistence or cross-process concurrency control is provided.",
+        known_limitations=tuple(
+            limitation
+            for limitation in (
+                (
+                    "Configured L2 search is linear and has no large-corpus latency guarantee."
+                    if search_is_linear
+                    else ""
+                ),
+                (
+                    "Durable L2/L3 storage is not configured."
+                    if not coordinated_transactions
+                    else ""
+                ),
+            )
+            if limitation
         ),
     )
