@@ -44,7 +44,9 @@ jobs:
           uv sync --locked --python "$PYTHON_VERSION" --extra dev --extra enclave-origin
 
       - name: Lint
-        run: uv run --locked ruff check src tests scripts examples
+        run: |
+          uv run --locked ruff check src tests scripts examples
+          uv run --locked ruff format --check src tests scripts examples
 
       - name: Type check
         run: >-

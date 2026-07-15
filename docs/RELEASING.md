@@ -42,6 +42,7 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    uv lock --check
    uv sync --locked --extra dev --extra enclave-origin
    uv run ruff check src tests scripts examples
+   uv run ruff format --check src tests scripts examples
    uv run mypy src/echo_veil src/echo_veil_origin scripts examples --ignore-missing-imports --no-error-summary
    uv run pytest -q
    python scripts/security_scan.py .
