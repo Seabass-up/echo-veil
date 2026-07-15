@@ -9,9 +9,9 @@ import re
 import sys
 import tarfile
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # Python 3.10
+else:  # Python 3.10
     import tomli as tomllib
 import zipfile
 from pathlib import Path, PurePosixPath
