@@ -24,6 +24,7 @@ SAFE_EMAIL_SUFFIXES = (
     "@example.org",
     "@users.noreply.github.com",
 )
+SAFE_EMAILS = {"noreply@github.com"}
 SKIP_PARTS = {
     ".git",
     ".mypy_cache",
@@ -52,7 +53,9 @@ class Finding:
 
 def _is_safe_email(value: str) -> bool:
     lower = value.lower()
-    return any(lower.endswith(suffix) for suffix in SAFE_EMAIL_SUFFIXES)
+    return lower in SAFE_EMAILS or any(
+        lower.endswith(suffix) for suffix in SAFE_EMAIL_SUFFIXES
+    )
 
 
 def scan_text(text: str, display: str) -> list[Finding]:

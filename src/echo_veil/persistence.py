@@ -687,7 +687,7 @@ class SQLiteStore:
         dimension = self._validate_dimension(int(dimension))
         raw = self._validate_payload(payload, "workspace")
         protected: object | None = None
-        anchor = np.zeros(0, dtype=np.float64)
+        anchor: Vector = np.zeros(0, dtype=np.float64)
         compressed: bytes | None = None
         if payload_kind == "protected":
             protected = self._loader(raw)

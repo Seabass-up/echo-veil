@@ -70,7 +70,9 @@ def test_privacy_scanner_rejects_local_paths_and_personal_email() -> None:
 
 def test_privacy_scanner_allows_placeholders_and_github_noreply() -> None:
     findings = scan_text(
-        "endpoint=memory.example.com\nauthor=123+user@users.noreply.github.com\n",
+        "endpoint=memory.example.com\n"
+        "author=123+user@users.noreply.github.com\n"
+        "merge=noreply@github.com\n",
         "sample.txt",
     )
 
