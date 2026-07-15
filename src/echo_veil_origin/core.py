@@ -40,17 +40,21 @@ class ProtocolError(RuntimeError):
 class CkksEngine(Protocol):
     key_id: str
 
-    def encrypt_normalized(self, vector: Sequence[float]) -> bytes: ...
+    def encrypt_normalized(self, vector: Sequence[float]) -> bytes:
+        raise NotImplementedError
 
     def cosine_similarity(
         self, normalized_intent: Sequence[float], ciphertext: bytes
-    ) -> float: ...
+    ) -> float:
+        raise NotImplementedError
 
-    def ciphertext_dimension(self, ciphertext: bytes) -> int: ...
+    def ciphertext_dimension(self, ciphertext: bytes) -> int:
+        raise NotImplementedError
 
 
 class ProofVerifier(Protocol):
-    def verify(self, proof: bytes, config: OriginConfig) -> bytes: ...
+    def verify(self, proof: bytes, config: OriginConfig) -> bytes:
+        raise NotImplementedError
 
 
 def _decode_base64(value: object, field: str, *, maximum: int) -> bytes:

@@ -409,13 +409,16 @@ class LocalCkksEngine(Protocol):
 
     key_id: str
 
-    def encrypt_normalized(self, vector: Sequence[float]) -> bytes: ...
+    def encrypt_normalized(self, vector: Sequence[float]) -> bytes:
+        raise NotImplementedError
 
     def cosine_similarity(
         self, normalized_intent: Sequence[float], ciphertext: bytes
-    ) -> float: ...
+    ) -> float:
+        raise NotImplementedError
 
-    def ciphertext_dimension(self, ciphertext: bytes) -> int: ...
+    def ciphertext_dimension(self, ciphertext: bytes) -> int:
+        raise NotImplementedError
 
 
 class ProductionCryptoShield(CryptoShield, Protocol):
