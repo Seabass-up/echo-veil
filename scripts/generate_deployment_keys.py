@@ -9,7 +9,7 @@ import json
 import os
 import secrets
 import subprocess
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography import x509
@@ -45,7 +45,7 @@ def raw_private(  # gitleaks:allow -- function handles generated key objects, no
 
 
 def generate_mtls(directory: Path) -> None:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     ca_key = ec.generate_private_key(ec.SECP384R1())
     ca_name = x509.Name(
         [x509.NameAttribute(NameOID.COMMON_NAME, "Echo Veil Worker mTLS CA")]
@@ -187,7 +187,7 @@ def main() -> int:
     )
     generate_mtls(output)
     manifest = {
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "files": sorted(path.name for path in output.iterdir()),
         "public": {
             "attestation_ed25519": (output / "attestation-ed25519.pub")

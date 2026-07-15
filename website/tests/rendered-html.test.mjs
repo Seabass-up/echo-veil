@@ -36,7 +36,7 @@ test("server-renders the complete Echo Veil product page", async () => {
   assert.match(html, /Customer &amp; field copilots/);
   assert.match(html, /The policy layer between/);
   assert.match(html, /Attested enclave \+ ZKP gate/);
-  assert.match(html, /https:\/\/echo\.algo-cli\.com\/og\.png/);
+  assert.ok(html.includes("https://echo.algo-cli.com/og.png"));
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 

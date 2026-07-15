@@ -285,6 +285,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 enclave-origin = [
     { name = "fastapi" },
@@ -299,6 +300,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'enclave-origin'", specifier = ">=0.35,<1" },
 ]
 provides-extras = ["dev", "enclave-origin"]
