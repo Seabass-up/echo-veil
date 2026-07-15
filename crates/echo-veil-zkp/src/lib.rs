@@ -63,13 +63,20 @@ impl std::fmt::Display for ProofError {
 
 impl std::error::Error for ProofError {}
 
+fn invalid_field(field: &str, suffix: &str) -> ProofError {
+    let mut message = String::from("invalid ");
+    message.push_str(field);
+    message.push_str(suffix);
+    ProofError(message)
+}
+
 fn decode_fixed(value: &str, field: &str) -> Result<[u8; 32], ProofError> {
     let bytes = URL_SAFE
         .decode(value)
-        .map_err(|_| ProofError(format!("invalid {}", field)))?;
+        .map_err(|_| invalid_field(field, ""))?;
     bytes
         .try_into()
-        .map_err(|_| ProofError(format!("invalid {} length", field)))
+        .map_err(|_| invalid_field(field, " length"))
 }
 
 fn decode_challenge(value: &str) -> Result<Vec<u8>, ProofError> {
