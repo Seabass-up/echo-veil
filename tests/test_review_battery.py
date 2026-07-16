@@ -22,6 +22,7 @@ Sections
 
 import math
 import time
+from inspect import signature
 
 import numpy as np
 import pytest
@@ -457,8 +458,8 @@ class TestCryptoShieldAPI:
     """EnclaveCryptoShield fails closed when its trust dependencies are absent."""
 
     def test_enclave_shield_requires_provider_configuration(self):
-        with pytest.raises(TypeError, match="required positional"):
-            EnclaveCryptoShield()
+        with pytest.raises(TypeError, match="missing a required argument"):
+            signature(EnclaveCryptoShield).bind()
 
     def test_null_shield_passes_through(self):
         shield = NullCryptoShield(silence_warning=True)

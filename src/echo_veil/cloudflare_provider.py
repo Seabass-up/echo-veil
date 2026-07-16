@@ -40,7 +40,8 @@ class CloudflareTransport(Protocol):
         headers: Mapping[str, str],
         body: bytes,
         timeout_seconds: float,
-    ) -> bytes: ...
+    ) -> bytes:
+        raise NotImplementedError
 
 
 class UrllibCloudflareTransport:

@@ -275,31 +275,39 @@ class EnclaveProtectedVector:
 class EnclaveProvider(Protocol):
     """Transport contract implemented by an SGX/SEV-SNP CKKS service client."""
 
-    def attest(self, nonce: bytes) -> bytes: ...
+    def attest(self, nonce: bytes) -> bytes:
+        raise NotImplementedError
 
-    def bind_attestation(self, enclave: VerifiedEnclave) -> None: ...
+    def bind_attestation(self, enclave: VerifiedEnclave) -> None:
+        raise NotImplementedError
 
-    def access_challenge(self) -> bytes: ...
+    def access_challenge(self) -> bytes:
+        raise NotImplementedError
 
-    def open_session(self, proof: bytes) -> str: ...
+    def open_session(self, proof: bytes) -> str:
+        raise NotImplementedError
 
-    def encrypt_vector(self, session: str, anchor: Vector) -> bytes: ...
+    def encrypt_vector(self, session: str, anchor: Vector) -> bytes:
+        raise NotImplementedError
 
     def cosine_similarity(
         self, session: str, intent: Vector, ciphertext: bytes
-    ) -> float: ...
+    ) -> float:
+        raise NotImplementedError
 
 
 class AttestationVerifier(Protocol):
     """Verify vendor attestation evidence against a deployment trust policy."""
 
-    def verify(self, evidence: bytes, nonce: bytes) -> VerifiedEnclave: ...
+    def verify(self, evidence: bytes, nonce: bytes) -> VerifiedEnclave:
+        raise NotImplementedError
 
 
 class ZeroKnowledgeProofProvider(Protocol):
     """Create the deployment-specific proof accepted by the enclave ZKP gate."""
 
-    def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes: ...
+    def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
+        raise NotImplementedError
 
 
 class Ed25519AttestationVerifier:
@@ -397,11 +405,11 @@ class CryptoShield(Protocol):
 
     def protect(self, anchor: Vector) -> object:
         """Wrap a plaintext anchor into the shield's protected representation."""
-        ...
+        raise NotImplementedError
 
     def similarity(self, intent: Vector, protected_anchor: object) -> float:
         """Compute similarity between a plaintext intent and a protected anchor."""
-        ...
+        raise NotImplementedError
 
 
 class LocalCkksEngine(Protocol):
@@ -438,7 +446,7 @@ class SerializableProtectedPayload(Protocol):
 
     def to_json_bytes(self) -> bytes:
         """Return authenticated/serialized protected payload bytes."""
-        ...
+        raise NotImplementedError
 
 
 def is_crypto_shield(candidate: object) -> TypeGuard[CryptoShield]:

@@ -51,20 +51,25 @@ class MetadataIndexBackend(Protocol):
     search_strategy: str
 
     @property
-    def dimension(self) -> int | None: ...
+    def dimension(self) -> int | None:
+        raise NotImplementedError
 
-    def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None: ...
+    def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None:
+        raise NotImplementedError
 
-    def remove(self, key: str) -> None: ...
+    def remove(self, key: str) -> None:
+        raise NotImplementedError
 
     def search(
         self,
         query: Vector,
         top_k: int = 5,
         score_fn: Callable[[Vector, IndexEntry], float] | None = None,
-    ) -> list[tuple[str, float]]: ...
+    ) -> list[tuple[str, float]]:
+        raise NotImplementedError
 
-    def __len__(self) -> int: ...
+    def __len__(self) -> int:
+        raise NotImplementedError
 
 
 class ArchiveBackend(Protocol):
@@ -75,11 +80,14 @@ class ArchiveBackend(Protocol):
     transactional: bool
     cross_process_safe: bool
 
-    def put(self, key: str, payload: bytes) -> None: ...
+    def put(self, key: str, payload: bytes) -> None:
+        raise NotImplementedError
 
-    def get(self, key: str) -> bytes | None: ...
+    def get(self, key: str) -> bytes | None:
+        raise NotImplementedError
 
-    def __len__(self) -> int: ...
+    def __len__(self) -> int:
+        raise NotImplementedError
 
 
 class TransactionalEvictionStore(Protocol):
@@ -92,16 +100,19 @@ class TransactionalEvictionStore(Protocol):
     transactional: bool
     cross_process_safe: bool
 
-    def commit_evictions(self, records: list[EvictionRecord]) -> None: ...
+    def commit_evictions(self, records: list[EvictionRecord]) -> None:
+        raise NotImplementedError
 
     def save_workspace(
         self,
         vines: list[Any],
         twilight_cycles: Mapping[str, int],
         crests: tuple[str, ...],
-    ) -> None: ...
+    ) -> None:
+        raise NotImplementedError
 
-    def load_workspace(self) -> tuple[list[Any], dict[str, int], tuple[str, ...]]: ...
+    def load_workspace(self) -> tuple[list[Any], dict[str, int], tuple[str, ...]]:
+        raise NotImplementedError
 
 
 def is_transactional_eviction_store(
