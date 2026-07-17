@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/index.test.mjs",
     "render-config": "node scripts/render-config.mjs",
     "deploy": "npm run render-config && wrangler deploy --config .wrangler.generated.json",
     "deploy:dry-run": "npm run render-config && wrangler deploy --dry-run --config .wrangler.generated.json",

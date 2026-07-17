@@ -73,8 +73,12 @@ const stackSteps = [
 
 export default function Home() {
   return (
-    <main>
-      <div className="grain" aria-hidden="true" />
+    <>
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
+      <main id="main-content" tabIndex={-1}>
+        <div className="grain" aria-hidden="true" />
 
       <nav className="nav shell" aria-label="Primary navigation">
         <a className="brand" href="#top" aria-label="Echo Veil home">
@@ -158,7 +162,11 @@ export default function Home() {
       </section>
 
       <section className="marquee" aria-label="Echo Veil capabilities">
-        <div className="marquee-track">
+        <span className="sr-only">
+          Intent proximity, organic decay, conflict preservation, confidence
+          gating, and encrypted retrieval.
+        </span>
+        <div className="marquee-track" aria-hidden="true">
           <span>INTENT PROXIMITY</span><i>✦</i>
           <span>ORGANIC DECAY</span><i>✦</i>
           <span>CONFLICT PRESERVATION</span><i>✦</i>
@@ -352,6 +360,7 @@ export default function Home() {
         <p>A privacy-first memory system for AI agents, by <a href="https://algo-cli.com">Algo-cli.com</a>.</p>
         <div><span>MIT LICENSE</span><span>© 2026 ALGO-CLI.COM</span></div>
       </footer>
-    </main>
+      </main>
+    </>
   );
 }

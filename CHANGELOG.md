@@ -5,6 +5,22 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Added a keyboard skip link, visible focus states, canonical metadata, and a
+  non-repeating screen-reader description to the product site.
+- Added deterministic gateway unit tests and sanitized, status-aware Python
+  gateway errors for easier integration troubleshooting.
+
+### Security
+
+- Enforced request and response limits while streaming at both the Cloudflare
+  gateway and enclave origin, rather than after unbounded buffering.
+- Added a deadline to authenticated health forwarding, bounded Access JWTs,
+  stricter Cloudflare team-domain validation, and defensive API headers.
+- Removed upstream response bodies from Python client exceptions so enclave or
+  proxy details cannot be copied into application logs.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added

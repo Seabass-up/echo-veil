@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import types
@@ -20,6 +21,7 @@ from echo_veil import (
     VerifiedEnclave,
 )
 from echo_veil_origin import AttestationSigner, EnclaveService, OriginConfig
+from echo_veil_origin.app import MAX_REQUEST_BYTES, _read_bounded_request_body
 from echo_veil_origin.core import ProtocolError, origin_token_matches
 from echo_veil_origin.openfhe_engine import OpenFheCkksEngine
 
@@ -52,6 +54,18 @@ class _ProofProvider:
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
         assert enclave.measurement == "approved-measurement"
         return b"proof:" + challenge
+
+
+class _StreamingRequest:
+    def __init__(self, chunks: list[bytes], content_length: str | None = None) -> None:
+        self._chunks = chunks
+        self.headers: dict[str, str] = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+
+    async def stream(self):
+        for chunk in self._chunks:
+            yield chunk
 
 
 class _OriginTransport:
@@ -235,6 +249,26 @@ def test_origin_bearer_token_comparison_is_fail_closed() -> None:
     assert not origin_token_matches(expected, None)
     assert not origin_token_matches(expected, "Basic " + expected)
     assert not origin_token_matches(expected, "Bearer " + "b" * 48)
+
+
+def test_origin_streams_request_body_with_a_hard_memory_bound() -> None:
+    request = _StreamingRequest([b'{"ok":', b"true}"], content_length="11")
+
+    assert asyncio.run(_read_bounded_request_body(request)) == b'{"ok":true}'
+
+    oversized = _StreamingRequest([b"x" * MAX_REQUEST_BYTES, b"y"])
+    with pytest.raises(ProtocolError, match="request size"):
+        asyncio.run(_read_bounded_request_body(oversized))
+
+
+@pytest.mark.parametrize("content_length", ["0", "-1", "1.5", "unknown"])
+def test_origin_rejects_invalid_content_length_before_streaming(
+    content_length: str,
+) -> None:
+    request = _StreamingRequest([b"{}"], content_length=content_length)
+
+    with pytest.raises(ProtocolError, match="request size"):
+        asyncio.run(_read_bounded_request_body(request))
 
 
 def test_origin_rejects_engine_key_id_mismatch() -> None:

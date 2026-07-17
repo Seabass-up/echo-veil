@@ -25,3 +25,8 @@ currently require a non-proxied destination.
 
 The enclave origin must implement the envelope protocol documented in
 `docs/CLOUDFLARE_ENCLAVE_PROTOCOL.md`.
+
+Before deployment, run `npm run check` and `npm test`. The Worker streams
+request and response bodies through hard byte limits, applies a deadline to
+origin calls, rejects unexpected query strings and team domains, and returns
+sanitized errors with no upstream body content.

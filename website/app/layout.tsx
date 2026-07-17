@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { DM_Mono, Manrope } from "next/font/google";
 import "./globals.css";
 
@@ -18,6 +18,8 @@ export const metadata: Metadata = {
   title: "Echo Veil — A Wiser Memory for AI Agents",
   description:
     "A privacy-first, intent-driven memory layer for AI agents that keeps active context sharp, preserves contradictions, and makes uncertainty visible.",
+  alternates: { canonical: "/" },
+  robots: { index: true, follow: true },
   openGraph: {
     title: "Echo Veil — Memory that knows what to keep",
     description:
@@ -41,6 +43,11 @@ export const metadata: Metadata = {
       "A living memory layer for AI agents. Intent-driven, privacy-first, and honest about uncertainty.",
     images: ["/og.png"],
   },
+};
+
+export const viewport: Viewport = {
+  colorScheme: "light",
+  themeColor: "#0b1822",
 };
 
 export default function RootLayout({

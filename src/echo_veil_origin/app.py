@@ -22,6 +22,27 @@ from .proof_verifier import RistrettoProofVerifier
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
+async def _read_bounded_request_body(request: Any) -> bytes:
+    """Read an ASGI request without buffering past the protocol limit."""
+    declared_length = request.headers.get("Content-Length")
+    if declared_length is not None:
+        if not declared_length.isascii() or not declared_length.isdigit():
+            raise ProtocolError("invalid request size")
+        if not 0 < int(declared_length) <= MAX_REQUEST_BYTES:
+            raise ProtocolError("invalid request size")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if not isinstance(chunk, bytes):
+            raise ProtocolError("invalid request body")
+        if len(chunk) > MAX_REQUEST_BYTES - len(body):
+            raise ProtocolError("invalid request size")
+        body.extend(chunk)
+    if not body:
+        raise ProtocolError("invalid request size")
+    return bytes(body)
+
+
 def _required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -96,9 +117,7 @@ def create_app(service: EnclaveService | None = None, origin_token: str | None =
         content_type = request.headers.get("Content-Type", "")
         if not content_type.lower().startswith("application/json"):
             raise ProtocolError("application/json required")
-        body = await request.body()
-        if not 0 < len(body) <= MAX_REQUEST_BYTES:
-            raise ProtocolError("invalid request size")
+        body = await _read_bounded_request_body(request)
         try:
             value = json.loads(body)
         except Exception as exc:

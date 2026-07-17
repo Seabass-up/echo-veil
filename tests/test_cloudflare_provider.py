@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 import numpy as np
@@ -18,10 +21,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from echo_veil import (
     CloudflareEnclaveProvider,
+    CloudflareGatewayError,
     EnclaveCryptoShield,
     EnclaveProtectedVector,
     VerifiedEnclave,
 )
+from echo_veil.cloudflare_provider import UrllibCloudflareTransport
 
 
 class _GatewayTransport:
@@ -168,3 +173,36 @@ def test_cloudflare_provider_loads_access_credentials_from_env(monkeypatch) -> N
     monkeypatch.setenv("CF_ACCESS_CLIENT_SECRET", "secret")
     provider = CloudflareEnclaveProvider.from_env("https://memory.example.com")
     assert provider is not None
+
+
+def test_cloudflare_provider_bounds_timeout() -> None:
+    with pytest.raises(ValueError, match="within"):
+        CloudflareEnclaveProvider(
+            "https://memory.example.com", "id", "secret", timeout_seconds=61
+        )
+
+
+def test_urllib_transport_redacts_upstream_error_body(monkeypatch) -> None:
+    upstream_error = urllib.error.HTTPError(
+        "https://memory.example.com/v1/attest",
+        502,
+        "Bad Gateway",
+        {},
+        io.BytesIO(b"internal secret detail"),
+    )
+
+    def reject(*_args, **_kwargs):
+        raise upstream_error
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(CloudflareGatewayError) as caught:
+        UrllibCloudflareTransport().post(
+            "https://memory.example.com/v1/attest",
+            {"Content-Type": "application/json"},
+            b"{}",
+            10.0,
+        )
+
+    assert caught.value.status_code == 502
+    assert "secret" not in str(caught.value)

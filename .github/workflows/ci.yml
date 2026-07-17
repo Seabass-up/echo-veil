@@ -150,6 +150,9 @@ jobs:
       - name: Type check
         run: npm run check
 
+      - name: Test bounded gateway behavior
+        run: npm test
+
       - name: Validate generated deployment bundle
         env:
           CF_ACCESS_AUD: 0000000000000000000000000000000000000000000000000000000000000000

@@ -31,6 +31,15 @@ from .crypto_shield import VerifiedEnclave
 from .vectors import Vector, as_vector
 
 MAX_GATEWAY_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_GATEWAY_TIMEOUT_SECONDS = 60.0
+
+
+class CloudflareGatewayError(RuntimeError):
+    """A sanitized gateway failure that never includes an upstream body."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class CloudflareTransport(Protocol):
@@ -71,16 +80,36 @@ class UrllibCloudflareTransport:
             with urllib.request.urlopen(  # nosec B310
                 request, timeout=timeout_seconds, context=self._ssl_context
             ) as response:
+                declared_length = response.headers.get("Content-Length")
+                if declared_length is not None:
+                    if (
+                        not declared_length.isascii()
+                        or not declared_length.isdigit()
+                        or int(declared_length) > MAX_GATEWAY_RESPONSE_BYTES
+                    ):
+                        raise CloudflareGatewayError(
+                            "Cloudflare enclave gateway returned an invalid response size"
+                        )
+                content_type = response.headers.get("Content-Type", "")
+                if not content_type.lower().startswith("application/json"):
+                    raise CloudflareGatewayError(
+                        "Cloudflare enclave gateway returned an invalid content type"
+                    )
                 payload = response.read(MAX_GATEWAY_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(4096).decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Cloudflare enclave gateway rejected the request ({exc.code}): {detail}"
+            exc.close()
+            raise CloudflareGatewayError(
+                "Cloudflare enclave gateway rejected the request",
+                status_code=exc.code,
             ) from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError("Cloudflare enclave gateway is unavailable") from exc
+            raise CloudflareGatewayError(
+                "Cloudflare enclave gateway is unavailable"
+            ) from exc
         if len(payload) > MAX_GATEWAY_RESPONSE_BYTES:
-            raise RuntimeError("Cloudflare enclave gateway response is too large")
+            raise CloudflareGatewayError(
+                "Cloudflare enclave gateway response is too large"
+            )
         return payload
 
 
@@ -118,8 +147,14 @@ class CloudflareEnclaveProvider:
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, Real):
             raise TypeError("timeout_seconds must be a finite positive number")
         timeout = float(timeout_seconds)
-        if not math.isfinite(timeout) or timeout <= 0.0:
-            raise ValueError("timeout_seconds must be a finite positive number")
+        if (
+            not math.isfinite(timeout)
+            or timeout <= 0.0
+            or timeout > MAX_GATEWAY_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"timeout_seconds must be within (0, {MAX_GATEWAY_TIMEOUT_SECONDS:g}]"
+            )
         self._base_url = gateway_url.rstrip("/") + "/"
         self._headers = {
             "Content-Type": "application/json",

@@ -70,5 +70,8 @@ a production blocker until an independent reviewer is recorded.
 - Missing/expired Access assertions, bad mTLS, bad origin tokens, invalid or
   replayed envelopes, expired/consumed challenges, invalid sessions, wrong
   dimensions, and non-finite values are rejected.
-- `enclave-origin.algo-cli.com` remains DNS-only. Proxing that hostname through
+- Access assertions and request/response streams are byte-bounded before they
+  can be fully buffered. Worker-to-origin health and protocol requests have a
+  fixed deadline, and upstream error bodies are not propagated to clients.
+- `enclave-origin.algo-cli.com` remains DNS-only. Proxying that hostname through
   Cloudflare would invalidate the Worker mTLS origin design.

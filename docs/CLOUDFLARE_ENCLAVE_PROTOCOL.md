@@ -1,6 +1,10 @@
 # Cloudflare enclave gateway protocol
 
 The Worker forwards five JSON endpoints and an authenticated health check.
+Request bodies are limited to 2 MiB while streaming; protocol responses are
+limited to 16 MiB and health responses to 64 KiB. Origin calls have a fixed
+10-second deadline. The Python transport also bounds responses and never
+includes an upstream error body in an exception.
 `/v1/attest` accepts
 `nonce_b64` and returns `evidence_b64`. The signed normalized evidence must bind
 the nonce, approved enclave measurement, sealed CKKS key, security level,
