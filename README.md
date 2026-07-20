@@ -40,6 +40,45 @@ Echo Veil v1.0 specification (`docs/SPEC.md`).
 pip install -e ".[dev]"
 ```
 
+## Agent runtime adapters
+
+Echo Veil includes one local encrypted host adapter used across supported runtimes. It
+provides four opt-in operations: remember, recall, forget, and doctor. The
+adapter uses a deterministic local hashing embedder, AES-GCM protected anchors,
+an encrypted payload sidecar, durable SQLite lifecycle state, and Echo Veil's
+confidence gate. It does not silently capture conversations.
+
+Codex can run the bundled stdio MCP server directly from a checkout:
+
+```bash
+codex mcp add echo-veil -- \
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent mcp
+```
+
+The repository root is also a Codex plugin (`.codex-plugin/plugin.json` plus
+`.mcp.json`) for marketplace packaging. Native or MCP adapters are included for
+OpenClaw, Hermes, Claude Code, Pi, OpenCode, Droid, and Goose. Mercury receives
+a guarded Agent Skill that exposes readiness only because its documented
+extension surface does not yet provide arbitrary MCP or structured custom
+tools.
+
+OpenClaw uses the native tool plugin in `integrations/openclaw`:
+
+```bash
+npm --prefix integrations/openclaw ci --ignore-scripts
+npm --prefix integrations/openclaw run build
+openclaw plugins install -l ./integrations/openclaw
+openclaw plugins enable echo-veil
+openclaw plugins doctor
+```
+
+Linked development installs auto-detect the checkout. Packaged installs can set
+the plugin's `projectPath` or use an installed `echo-veil-agent` executable.
+Every host uses a distinct default profile to prevent accidental cross-agent
+sharing. See [`integrations/README.md`](integrations/README.md) for the adapter
+matrix and [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) for the
+security and usage contract.
+
 ## Quick start
 
 For a complete host-agent lifecycle, confidence-gating rules, security-mode
@@ -166,6 +205,13 @@ SBOM generation, and provenance requirements are documented in
   finite, and must keep one embedding dimension per Oracle/Workspace. Invalid
   capacities, decay constants, timestamps, cycle overrides, confidence scores,
   and index limits are rejected at their boundaries.
+- **Twilight return-to-topic recall works automatically.** A relevant intent
+  now rescores and reinforces a compressed twilight vine before eviction;
+  callers no longer need to know its hidden vine id in advance.
+- **The bundled agent embedder is intentionally modest.** It is deterministic,
+  local, and dependency-free, but keyword-oriented rather than a production
+  semantic embedding model. Hosts can still supply a reviewed embedder to
+  `AgentMemory`.
 - **Eviction is retry-safe.** An archive/index failure leaves an evicted vine
   pending and retriable; pruning happens only after both lower-tier writes have
   succeeded. Building the L2 entry no longer restores plaintext onto an

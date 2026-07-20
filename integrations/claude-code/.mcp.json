@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "echo-veil": {
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/../..",
+        "--locked",
+        "echo-veil-agent",
+        "mcp"
+      ],
+      "env": {
+        "ECHO_VEIL_PROFILE": "claude-code"
+      }
+    }
+  }
+}

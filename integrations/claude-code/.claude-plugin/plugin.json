@@ -1,0 +1,18 @@
+{
+  "name": "echo-veil",
+  "version": "0.4.0",
+  "description": "Local encrypted, decay-driven memory tools for Claude Code.",
+  "author": {
+    "name": "Algo-cli.com",
+    "url": "https://github.com/Seabass-up"
+  },
+  "homepage": "https://echo.algo-cli.com",
+  "repository": "https://github.com/Seabass-up/echo-veil",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "agents",
+    "retrieval",
+    "privacy"
+  ]
+}

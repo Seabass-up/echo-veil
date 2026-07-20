@@ -343,7 +343,7 @@ class Workspace:
                 )
             # Score first so a failing/custom scorer cannot leave half the
             # active set updated and half untouched.
-            active_scores = {
+            live_scores = {
                 vine.vine_id: self._score_active_vine(
                     intent_vector,
                     vine,
@@ -351,17 +351,31 @@ class Workspace:
                     score_fn=score_fn,
                 )
                 for vine in self._vines.values()
-                if vine.state == VineState.ACTIVE and not vine.locked
+                if vine.state in {VineState.ACTIVE, VineState.TWILIGHT}
+                and not vine.locked
             }
             for vine in list(self._vines.values()):
                 if vine.state == VineState.EVICTED or vine.locked:
                     continue
 
-                # Only rescore ACTIVE vines; TWILIGHT vines have their anchor
-                # compressed (zeroed) so proximity cannot be recomputed. Their
-                # score from demotion is preserved until reinforcement or eviction.
-                if vine.state == VineState.ACTIVE:
-                    vine.score = active_scores[vine.vine_id]
+                vine.score = live_scores[vine.vine_id]
+
+                # A relevant intent automatically snaps a twilight vine back
+                # before its eviction window expires. Requiring a caller to
+                # already know the hidden vine id made return-to-topic recall
+                # impossible for normal host integrations.
+                if (
+                    vine.state == VineState.TWILIGHT
+                    and vine.score >= TWILIGHT_THRESHOLD
+                ):
+                    if vine.protected_anchor is None:
+                        vine.decompress()
+                    vine.state = VineState.ACTIVE
+                    vine.twilight_since = None
+                    vine.score = min(1.0, vine.score + REINFORCEMENT_BONUS)
+                    vine.touch(current_time)
+                    self._twilight_cycles.pop(vine.vine_id, None)
+                    continue
 
                 if vine.state == VineState.ACTIVE and vine.score < TWILIGHT_THRESHOLD:
                     vine.state = VineState.TWILIGHT
@@ -459,9 +473,14 @@ class Workspace:
         elif vine.protected_anchor is not None and vine.anchor.shape == (0,):
             score = vine.score
         else:
+            anchor = (
+                vine.anchor_snapshot()
+                if vine.state == VineState.TWILIGHT
+                else vine.anchor
+            )
             score = proximity_score(
                 intent,
-                vine.anchor,
+                anchor,
                 vine.age_hours(now),
                 self.config.proximity,
             )

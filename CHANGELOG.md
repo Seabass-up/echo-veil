@@ -5,7 +5,7 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-07-19
+## [0.4.0] - 2026-07-20
 
 ### Changed
 
@@ -20,6 +20,18 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Added
 
+- Added a durable local `AgentMemory` adapter with stable hashing embeddings,
+  AES-GCM protected vectors, encrypted payload storage, deduplication, and
+  confidence-gated active/cold recall.
+- Added a dependency-free stdio MCP server and Codex/Claude Code plugin bundles.
+- Added a native OpenClaw tool plugin with remember, recall, forget, and doctor
+  operations backed by the same Python adapter.
+- Added Hermes, OpenCode, Droid, and Goose MCP configurations plus a native Pi
+  extension with locked, vulnerability-audited development dependencies.
+- Added a guarded Mercury Agent Skill that exposes readiness without leaking
+  protected content through its shell-only public extension boundary.
+- Isolated every host in its own default profile and removed local filesystem
+  paths from the model-visible doctor report.
 - Added `Oracle.forget()` for fail-closed deletion across Echo Veil-managed
   L1/L2/L3 state, including atomic SQLite rollback and best-effort
   live-material release.
@@ -35,6 +47,13 @@ All notable changes to Echo Veil are documented here. The project follows
   tested executable memory adapter.
 - A responsive Echo Veil product site with system visuals, use cases, stack
   placement, and a Cloudflare custom-domain deployment.
+
+### Fixed
+
+- Twilight vines are now rescored and automatically reinforced when the user
+  returns to their topic before eviction.
+- Updated the website's locked `brace-expansion` transitive dependencies to
+  patched versions after a high-severity denial-of-service advisory.
 
 ### Security
 

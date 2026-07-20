@@ -1,0 +1,39 @@
+{
+  "name": "pi-extension-echo-veil",
+  "version": "0.4.0",
+  "description": "Native Pi tools for Echo Veil's local agent memory adapter.",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "memory",
+    "privacy"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "typebox": "1.1.38",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}

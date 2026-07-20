@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "echo-veil": {
+      "title": "Echo Veil",
+      "description": "Local encrypted, decay-driven agent memory.",
+      "cwd": ".",
+      "command": "uv",
+      "args": [
+        "run",
+        "--locked",
+        "echo-veil-agent",
+        "mcp"
+      ],
+      "env": {
+        "ECHO_VEIL_PROFILE": "codex"
+      }
+    }
+  }
+}

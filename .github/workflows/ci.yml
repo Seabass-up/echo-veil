@@ -98,6 +98,46 @@ jobs:
             /tmp/echo-veil-release-smoke/bin/python -c \
             'import os, echo_veil; assert echo_veil.__version__ == os.environ["ECHO_VEIL_EXPECTED_VERSION"]'
 
+  agent-adapters:
+    name: Agent adapters
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            integrations/openclaw/package-lock.json
+            integrations/pi/package-lock.json
+
+      - name: Install locked dependencies
+        run: |
+          uv sync --locked --extra dev
+          npm --prefix integrations/openclaw ci --ignore-scripts
+          npm --prefix integrations/pi ci --ignore-scripts
+
+      - name: Validate adapter contracts
+        run: |
+          uv run --locked pytest -q tests/test_agent_memory.py tests/test_agent_adapters.py
+          npm --prefix integrations/openclaw run plugin:validate
+          npm --prefix integrations/openclaw test
+          npm --prefix integrations/pi run check
+          npm --prefix integrations/pi test
+
   rust-zkp:
     name: Rust ZKP
     runs-on: ubuntu-latest

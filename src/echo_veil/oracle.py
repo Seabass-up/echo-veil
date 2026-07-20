@@ -209,8 +209,11 @@ class Oracle:
             return similarity + time_decay(
                 vine.age_hours(now), self.workspace.config.proximity
             )
+        anchor = (
+            vine.anchor_snapshot() if vine.state == VineState.TWILIGHT else vine.anchor
+        )
         return proximity_score(
-            intent, vine.anchor, vine.age_hours(now), self.workspace.config.proximity
+            intent, anchor, vine.age_hours(now), self.workspace.config.proximity
         )
 
     def _reveal_protected_anchor(self, protected_anchor: object) -> Vector | None:

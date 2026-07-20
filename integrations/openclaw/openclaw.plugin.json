@@ -1,0 +1,52 @@
+{
+  "id": "echo-veil",
+  "name": "Echo Veil",
+  "description": "Local encrypted, decay-driven memory tools backed by Echo Veil.",
+  "version": "0.4.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "projectPath": {
+        "type": "string"
+      },
+      "executable": {
+        "type": "string"
+      },
+      "stateDir": {
+        "type": "string"
+      },
+      "profile": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 120000
+      }
+    },
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "echo_veil_remember",
+      "echo_veil_recall",
+      "echo_veil_forget",
+      "echo_veil_doctor"
+    ]
+  },
+  "toolMetadata": {
+    "echo_veil_remember": {
+      "optional": true
+    },
+    "echo_veil_forget": {
+      "optional": true
+    },
+    "echo_veil_doctor": {
+      "replaySafe": true
+    }
+  }
+}

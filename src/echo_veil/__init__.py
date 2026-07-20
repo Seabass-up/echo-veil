@@ -9,6 +9,7 @@ from __future__ import annotations
 __version__ = "0.4.0"
 
 from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
+from .agent_memory import AgentMemory, HashingTextEmbedder
 from .cloudflare_provider import CloudflareEnclaveProvider, CloudflareGatewayError
 from .confidence import ConfidenceBand, classify
 from .conflict import (
@@ -44,6 +45,8 @@ from .zkp import RistrettoSchnorrProofProvider
 
 __all__ = [
     "__version__",
+    "AgentMemory",
+    "HashingTextEmbedder",
     "Oracle",
     "GenerationGated",
     "SQLiteStore",

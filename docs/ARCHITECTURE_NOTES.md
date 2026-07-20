@@ -50,6 +50,16 @@ Implemented and tested:
   key-generation, and deployment-runbook artifacts for `algo-cli.com`.
 - Reentrant locking around Oracle, Workspace, MetadataIndex, ColdArchive, and
   DriftDetector operations.
+- Automatic return-to-topic scoring and reinforcement for twilight vines.
+- A concrete local `AgentMemory` host adapter with stable hashing embeddings,
+  AES-GCM protected anchors, encrypted payload storage, exact-write
+  deduplication, and confidence-gated active/cold recall.
+- A bounded stdio MCP server for Codex, Claude Code, Hermes, OpenCode, Droid,
+  and Goose, plus native OpenClaw and Pi packages. Every full adapter shares the
+  same `AgentMemory` policy instead of reimplementing lifecycle rules per host.
+- A Mercury readiness skill that reports the local boundary only. Mercury's
+  documented skill interface does not expose a safe structured custom-tool
+  transport, so remember, recall, and forget are deliberately unavailable.
 
 Implemented as a practical confidentiality baseline:
 - `AesGcmCryptoShield` encrypts/authenticates protected vectors with AES-256-GCM and loads keys from explicit bytes or `ECHO_VEIL_CRYPTO_KEY`.
@@ -97,6 +107,13 @@ Deployment-provided:
    `cycles_since_twilight` parameter, but it is no longer required for correct
    eviction behavior — the internal counter is the default.
 
+4. **The bundled host embedder favors portability over semantic quality.**
+   `HashingTextEmbedder` hashes token and adjacent-token features into a stable
+   384-dimensional vector. It requires no model download or network call and is
+   suitable for smoke tests and modest keyword-oriented local recall. It is not
+   evidence of semantic recall quality; production hosts should inject and
+   benchmark a reviewed embedding model.
+
 ## 3. Deviations from the spec
 
 | Spec statement | What we did | Why |
@@ -143,6 +160,13 @@ Deployment-provided:
   for custom shields in staging. A marker cannot prove cryptographic strength;
   capability reporting keeps custom shields degraded until their design,
   serialization behavior, and threat model are reviewed outside Echo Veil.
+- **Host-plugin overlap is intentional but bounded.** Every host gets a distinct
+  profile by default, and the adapters expose opt-in tools rather than automatic
+  prompt injection. The OpenClaw integration does not take its configured
+  memory slot or context engine. This prevents duplicate automatic recall with
+  `memory-core`, Active Memory, or Lossless Claw. A future automatic hook must
+  define precedence, tenant boundaries, latency budgets, and deduplication
+  before activation. Do not run two processes against one profile concurrently.
 
 ## 5. Crypto shield: trust boundary
 

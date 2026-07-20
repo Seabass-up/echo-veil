@@ -347,6 +347,25 @@ def test_oracle_with_aes_gcm_protects_active_vine_anchor_and_scores_decay() -> N
     assert drop.vine_id in report["demoted"]
 
 
+def test_protected_twilight_vine_automatically_snaps_back() -> None:
+    from echo_veil import WorkspaceConfig
+    from echo_veil.vine import VineState
+
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    oracle = Oracle(WorkspaceConfig(capacity=2), shield=shield)
+    vine = oracle.sprout("returning topic", np.array([1.0, 0.0]))
+    now = time.time()
+
+    oracle.observe(np.array([0.0, 1.0]), now=now)
+    assert vine.state == VineState.TWILIGHT
+
+    oracle.observe(np.array([1.0, 0.0]), now=now + 1)
+
+    assert vine.state == VineState.ACTIVE
+    assert vine.anchor.size == 0
+    assert vine.score == pytest.approx(1.0)
+
+
 def test_oracle_with_aes_gcm_indexes_and_archives_evicted_protected_vine() -> None:
     from echo_veil import WorkspaceConfig
 

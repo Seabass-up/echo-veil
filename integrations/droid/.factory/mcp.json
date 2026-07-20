@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "echo-veil": {
+      "command": "echo-veil-agent",
+      "args": [
+        "--profile",
+        "droid",
+        "mcp"
+      ],
+      "env": {}
+    }
+  }
+}

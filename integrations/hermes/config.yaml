@@ -1,0 +1,10 @@
+mcp_servers:
+  echo-veil:
+    command: "echo-veil-agent"
+    args: ["--profile", "hermes", "mcp"]
+    tools:
+      include:
+        - echo_veil_remember
+        - echo_veil_recall
+        - echo_veil_forget
+        - echo_veil_doctor

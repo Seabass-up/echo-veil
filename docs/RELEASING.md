@@ -34,7 +34,12 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
 
 1. Confirm the worktree contains only intended changes and all dependency lock
    updates have been reviewed.
-2. Update the version in `pyproject.toml` and `src/echo_veil/__init__.py`.
+2. Update the version in `pyproject.toml`, `src/echo_veil/__init__.py`,
+   `.codex-plugin/plugin.json`,
+   `integrations/claude-code/.claude-plugin/plugin.json`,
+   `integrations/openclaw/package.json`,
+   `integrations/openclaw/openclaw.plugin.json`, and
+   `integrations/pi/package.json`.
 3. Move the changelog entries from `Unreleased` into the new version section.
 4. Run:
 
@@ -57,7 +62,21 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    npm --prefix website audit --audit-level=high
    npm --prefix website run lint
    npm --prefix website test
+   npm --prefix integrations/openclaw ci --ignore-scripts
+   npm --prefix integrations/openclaw audit --audit-level=high
+   npm --prefix integrations/openclaw run plugin:validate
+   npm --prefix integrations/openclaw test
+   npm --prefix integrations/pi ci --ignore-scripts
+   npm --prefix integrations/pi audit --audit-level=high
+   npm --prefix integrations/pi run check
+   npm --prefix integrations/pi test
    ```
+
+   Also run `tests/test_agent_adapters.py`, validate the repository-root Codex
+   plugin and Claude Code plugin with their current validators, and validate the
+   Goose recipe with `goose recipe validate` before tagging. Hermes, OpenCode,
+   Droid, and Pi should be smoke-tested in isolated temporary host profiles so
+   release checks never mutate an operator's personal agent configuration.
 
 5. Merge only after required checks and independent review pass.
 6. Create and push an annotated tag from the protected release commit:

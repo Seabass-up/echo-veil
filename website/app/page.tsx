@@ -314,6 +314,15 @@ export default function Home() {
             <div><span>INPUT</span><strong>Stable intent embeddings</strong><p>Your host chooses and versions the embedding model.</p></div>
             <div><span>OUTPUT</span><strong>Vine IDs + confidence</strong><p>Your host authorizes and loads the matching payload.</p></div>
             <div><span>BOUNDARY</span><strong>Fail-closed production</strong><p>Production requires the configured attested enclave shield.</p></div>
+            <div className="host-support">
+              <strong>Adapters for the agents you already use.</strong>
+              <div aria-label="Supported agent runtime adapters">
+                <span>OPENCLAW</span><span>HERMES</span><span>CODEX</span>
+                <span>CLAUDE CODE</span><span>PI</span><span>OPENCODE</span>
+                <span>DROID</span><span>GOOSE</span><span>MERCURY*</span>
+              </div>
+              <p>* Mercury readiness skill today; full structured tools await a documented host boundary.</p>
+            </div>
           </div>
         </div>
       </section>

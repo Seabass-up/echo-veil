@@ -9,6 +9,60 @@ the host can use as payload keys.
 The runnable development example is
 [`examples/agent_memory.py`](../examples/agent_memory.py).
 
+## Ready-to-run agent adapters
+
+`echo_veil.agent_memory.AgentMemory` implements the host responsibilities for a
+single local OS user. It creates an owner-only profile directory, protects
+vectors with AES-GCM, encrypts authorized payloads in a separate SQLite
+database, and performs confidence-gated active/cold recall. Exact remember
+retries are deduplicated. Topics remain plaintext metadata and the local mode
+does not satisfy the production enclave profile.
+
+The console entry point accepts payload-bearing requests only through stdin:
+
+```bash
+printf '%s' '{"action":"doctor","arguments":{}}' | echo-veil-agent rpc
+echo-veil-agent mcp
+```
+
+Codex consumes `mcp` over stdio. The checked-in `.mcp.json` uses
+`uv run --locked echo-veil-agent mcp` when the repository is installed as a
+Codex plugin. For a direct local setup:
+
+```bash
+codex mcp add echo-veil -- \
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent mcp
+```
+
+OpenClaw loads `integrations/openclaw` as a native tool plugin. Pi loads a
+native TypeScript extension package. Codex and Claude Code use plugin-bundled
+stdio MCP servers. Hermes, OpenCode, Droid, and Goose use their documented
+stdio MCP configuration surfaces. Every full adapter exposes:
+
+- `echo_veil_remember` — opt-in durable capture;
+- `echo_veil_recall` — lifecycle-mutating, confidence-gated retrieval;
+- `echo_veil_forget` — payload-first local erasure; and
+- `echo_veil_doctor` — adapter and core readiness reporting.
+
+Existing host memory providers and context engines remain unchanged. Echo Veil
+is not injected into every prompt and does not replace host-native memory. This
+avoids duplicate automatic recall while the policy layer is evaluated.
+
+`ECHO_VEIL_STATE_DIR` and `ECHO_VEIL_PROFILE` select storage. Bundled adapters
+use a distinct profile per host. Profiles are authorization and concurrency
+boundaries: share one only when the hosts represent the same local user and
+authorization domain, and avoid simultaneous writers because live L1 remains
+process memory even though SQLite persistence is cross-process safe.
+
+Mercury is intentionally readiness-only. Its current public documentation
+supports Agent Skills but not arbitrary MCP or structured custom-tool
+registration. Sending protected content through shell arguments, pipelines,
+temporary files, URLs, or environment variables would create plaintext traces,
+so the included Mercury skill refuses remember, recall, and forget until the
+host exposes a reviewed structured boundary. See
+[`integrations/README.md`](../integrations/README.md) for install and validation
+commands for every host.
+
 ## Integration flow
 
 For each memory worth retaining:
@@ -24,7 +78,9 @@ For each user turn:
 1. Authorize the user before loading or embedding private content.
 2. Embed the current intent with the same embedding model and dimension.
 3. Call `Oracle.observe(intent)` exactly once for the turn. This advances drift,
-   proximity, twilight, eviction, and persistence state.
+   proximity, twilight, eviction, and persistence state. A returning relevant
+   intent also rescores and automatically reinforces a twilight vine before it
+   expires.
 4. Rank eligible active vines by their newly computed score. Search cold L2
    metadata with `Oracle.search_index(intent)` when the active set is
    insufficient, then resolve returned vine IDs through the authorized payload
