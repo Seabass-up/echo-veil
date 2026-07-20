@@ -50,6 +50,12 @@ canonical response scalar. Its Merlin transcript binds the provider ID,
 measurement, CKKS key ID, challenge, public key, and commitment. The origin
 consumes the challenge only after successful verification.
 
-`GET /healthz` is not end-to-end enveloped, contains no secret values, and still
+`GET /healthz` returns `ready`, `provider_id`, `key_id`, `platform`, `ckks`, and
+`zkp`. It is not end-to-end enveloped, contains no secret values, and still
 requires Access at the Worker plus Worker-to-origin mTLS and the origin bearer
 token.
+
+The gateway validates JSON content types and the documented top-level response
+shape before forwarding a successful response. It creates a fresh
+`X-Request-ID` for each request, includes it in the origin call and client
+response, and never accepts a caller-supplied value as the trusted request ID.

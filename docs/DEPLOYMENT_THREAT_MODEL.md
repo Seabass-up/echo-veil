@@ -73,5 +73,8 @@ a production blocker until an independent reviewer is recorded.
 - Access assertions and request/response streams are byte-bounded before they
   can be fully buffered. Worker-to-origin health and protocol requests have a
   fixed deadline, and upstream error bodies are not propagated to clients.
+- Successful origin responses must use JSON and match the documented endpoint
+  envelope shape. Gateway errors include a generated request ID; structured
+  logs contain fixed reason codes rather than assertions, secrets, or bodies.
 - `enclave-origin.algo-cli.com` remains DNS-only. Proxying that hostname through
   Cloudflare would invalidate the Worker mTLS origin design.

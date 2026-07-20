@@ -148,7 +148,12 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Type check
-        run: npm run check
+        env:
+          CF_ACCESS_AUD: 0000000000000000000000000000000000000000000000000000000000000000
+          CF_MTLS_CERTIFICATE_ID: 00000000-0000-0000-0000-000000000000
+        run: |
+          npm run types:check
+          npm run check
 
       - name: Test bounded gateway behavior
         run: npm test

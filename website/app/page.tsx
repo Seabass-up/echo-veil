@@ -347,8 +347,8 @@ export default function Home() {
         <h2>Give your agent<br /><em>a wiser memory.</em></h2>
         <p>Open source under MIT. Free for personal and commercial use.</p>
         <div className="cta-actions">
-          <a className="button button-primary" href="https://algo-cli.com">Visit Algo-cli.com <span aria-hidden="true">↗</span></a>
-          <a className="text-link" href="#system">Review the architecture <span aria-hidden="true">↑</span></a>
+          <a className="button button-primary" href="https://github.com/Seabass-up/echo-veil">View source on GitHub <span aria-hidden="true">↗</span></a>
+          <a className="text-link" href="https://github.com/Seabass-up/echo-veil/blob/master/docs/AGENT_INTEGRATION.md">Read the integration guide <span aria-hidden="true">→</span></a>
         </div>
       </section>
 
@@ -358,7 +358,7 @@ export default function Home() {
           <span>Echo Veil</span>
         </a>
         <p>A privacy-first memory system for AI agents, by <a href="https://algo-cli.com">Algo-cli.com</a>.</p>
-        <div><span>MIT LICENSE</span><span>© 2026 ALGO-CLI.COM</span></div>
+        <div><a href="https://github.com/Seabass-up/echo-veil">GITHUB</a><a href="https://github.com/Seabass-up/echo-veil/security/policy">SECURITY</a><span>MIT LICENSE</span><span>© 2026 ALGO-CLI.COM</span></div>
       </footer>
       </main>
     </>

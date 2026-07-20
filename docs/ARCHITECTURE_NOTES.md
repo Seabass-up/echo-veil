@@ -36,6 +36,8 @@ Implemented and tested:
   payload reconstruction, and durable topic/lifecycle metadata.
 - Transactional active-workspace checkpoints and startup restoration, including
   twilight counters, Amber Locks, and focal crests.
+- Fail-closed per-vine deletion across managed L1/L2/L3 state, with durable
+  transaction rollback and best-effort release of material on live Vine objects.
 - Persisted random-projection LSH candidate lookup with exact reranking.
 - A fail-closed CKKS enclave provider boundary with attestation policy and a
   zero-knowledge access-proof exchange.
@@ -131,6 +133,10 @@ Deployment-provided:
   coordinates L2/L3 writes across processes, but L1 objects remain process-local;
   other backend implementations must provide equivalent coordination. Use the
   public mutation methods rather than editing returned Vines concurrently.
+- **Managed deletion is not physical erasure.** `Oracle.forget()` coordinates
+  deletion of one vine across Echo Veil's managed tiers, and SQLite enables
+  `secure_delete`. Host payloads, conflict/fossil records, WAL remnants,
+  backups, and storage-media retention remain deployment responsibilities.
 - **Custom crypto shields are not automatically trusted.** The Oracle rejects
   objects that do not implement `protect()` and `similarity()`, rejects
   non-serializable protected payloads, and requires an explicit readiness marker
@@ -195,6 +201,9 @@ small multi-process deployment:
   the Oracle leaves affected vines pending for retry.
 - WAL mode, `synchronous=FULL`, a busy timeout, and SQLite locking provide crash
   recovery and cross-process writer serialization.
+- `Oracle.forget()` uses one `BEGIN IMMEDIATE` transaction to remove matching
+  active, index, archive, ANN, and eviction-metadata records. Failures roll back
+  before a live Vine is released, allowing the caller to retry.
 - Database files are created with owner-only permissions, versioned with
   `PRAGMA user_version`, and checked with `PRAGMA quick_check` on open by
   default. Unknown future schema versions fail closed.

@@ -10,7 +10,8 @@ const config = {
   $schema: "node_modules/wrangler/config-schema.json",
   name: "echo-veil-enclave-gateway",
   main: "src/index.ts",
-  compatibility_date: "2026-07-15",
+  compatibility_date: "2026-07-19",
+  compatibility_flags: ["nodejs_compat"],
   workers_dev: false,
   routes: [{ pattern: "memory.algo-cli.com", custom_domain: true }],
   vars: {
@@ -28,6 +29,11 @@ const config = {
       certificate_id: required("CF_MTLS_CERTIFICATE_ID"),
     },
   ],
+  observability: {
+    enabled: true,
+    logs: { enabled: true, head_sampling_rate: 1, invocation_logs: true },
+    traces: { enabled: true, head_sampling_rate: 0.01 },
+  },
 };
 
 writeFileSync(

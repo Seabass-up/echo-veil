@@ -8,6 +8,8 @@
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test src/index.test.mjs",
     "render-config": "node scripts/render-config.mjs",
+    "types": "npm run render-config && wrangler types --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
+    "types:check": "npm run render-config && wrangler types --check --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
     "deploy": "npm run render-config && wrangler deploy --config .wrangler.generated.json",
     "deploy:dry-run": "npm run render-config && wrangler deploy --dry-run --config .wrangler.generated.json",
     "dev": "npm run render-config && wrangler dev --config .wrangler.generated.json"

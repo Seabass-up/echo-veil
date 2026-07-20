@@ -111,6 +111,16 @@ class Workspace:
         with self._lock:
             return self._vines.get(vine_id)
 
+    def remove(self, vine_id: str) -> Vine | None:
+        """Remove one vine and its lifecycle bookkeeping from live memory."""
+        if not isinstance(vine_id, str) or not vine_id.strip():
+            raise ValueError("vine_id must be a non-empty string")
+        with self._lock:
+            vine = self._vines.pop(vine_id, None)
+            self._twilight_cycles.pop(vine_id, None)
+            self._crests = [crest for crest in self._crests if crest != vine_id]
+            return vine
+
     @property
     def vines(self) -> list[Vine]:
         with self._lock:

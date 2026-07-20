@@ -69,7 +69,8 @@ if candidates:
 
 The example reads the exported `Workspace` collaborator to rank active vines
 after `observe()`. Do not mutate returned `Vine` instances. Lifecycle mutations
-must go through `Oracle.reinforce()`, `lock()`, `unlock()`, and `set_crests()`.
+must go through `Oracle.reinforce()`, `lock()`, `unlock()`, `set_crests()`, and
+`forget()`.
 
 ## Security modes
 
@@ -120,9 +121,17 @@ secrets, raw protected vectors, proofs, or attestation credentials.
   new store when changing dimensions unless a reviewed migration exists.
 - Treat every query as tenant-scoped. Do not share an Oracle or payload lookup
   across authorization boundaries without explicit tenant isolation.
-- Apply payload deletion and retention to both the host content store and the
-  corresponding Echo Veil state. The current public API does not provide a
-  complete end-user erasure workflow; hosts needing one must implement and test
-  coordinated deletion before production use.
+- Call `oracle.forget(vine_id)` to remove the matching Echo Veil-managed
+  L1/L2/L3 state. `SQLiteStore` performs that deletion atomically and leaves a
+  live vine retryable when the transaction fails.
+- Treat `forget()` as one step in the host's erasure workflow, not a complete
+  erasure claim. Delete the authorized payload, tenant mapping, separately
+  managed conflict/fossil artifacts, and applicable backups under host policy.
+  SQLite `secure_delete` reduces ordinary page remnants, but Python memory,
+  WAL files, backups, and storage media do not provide guaranteed physical
+  erasure through this API.
+- For user-requested erasure, revoke payload access first, enqueue an auditable
+  deletion job, idempotently retry both `forget()` and host-store deletion, and
+  verify every in-scope system before marking the request complete.
 - Benchmark SQLite/LSH latency and recall on the real corpus. Its local durable
   behavior is not a distributed or exabyte-scale storage guarantee.

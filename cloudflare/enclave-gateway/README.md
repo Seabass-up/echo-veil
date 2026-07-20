@@ -26,7 +26,15 @@ currently require a non-proxied destination.
 The enclave origin must implement the envelope protocol documented in
 `docs/CLOUDFLARE_ENCLAVE_PROTOCOL.md`.
 
-Before deployment, run `npm run check` and `npm test`. The Worker streams
-request and response bodies through hard byte limits, applies a deadline to
-origin calls, rejects unexpected query strings and team domains, and returns
-sanitized errors with no upstream body content.
+Before deployment, run `npm run types:check`, `npm run check`, and `npm test`
+with the required deployment variables set. Wrangler-generated bindings are
+checked into `worker-configuration.d.ts` so binding drift fails CI.
+
+The Worker streams request and response bodies through hard byte limits,
+applies a deadline to origin calls, validates endpoint-specific JSON response
+shapes, rejects unexpected query strings and team domains, and returns
+sanitized errors with no upstream body content. Every response carries a fresh
+`X-Request-ID`; structured failure logs contain only that ID, the bounded route,
+and a fixed reason code. Invocation logs and sampled traces are enabled in the
+generated deployment configuration. Treat Cloudflare logs as operational data
+and apply an appropriate retention policy.

@@ -87,6 +87,18 @@ def test_crest_cap_enforced():
         ws.set_crests(ids)
 
 
+def test_remove_cleans_lifecycle_bookkeeping_without_resetting_dimension():
+    ws = _ws()
+    vine = ws.add(Vine("primary", np.array([1.0, 0.0])))
+    ws.set_crests([vine.vine_id])
+
+    assert ws.remove(vine.vine_id) is vine
+    assert ws.remove(vine.vine_id) is None
+    assert ws.tidal_split() == {}
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        ws.add(Vine("wrong dimension", np.array([1.0, 0.0, 0.0])))
+
+
 def test_tidal_split_normal_and_pressure():
     ws = Workspace(WorkspaceConfig(capacity=10))
     ids = [ws.add(Vine(f"v{i}", np.array([1.0, 0.0]))).vine_id for i in range(3)]

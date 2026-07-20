@@ -214,6 +214,12 @@ def test_database_file_permissions_are_owner_only(tmp_path: Path) -> None:
         assert mode == 0o600
 
 
+def test_sqlite_secure_delete_is_enabled(tmp_path: Path) -> None:
+    with SQLiteStore(tmp_path / "secure-delete.db") as store:
+        row = store._connection.execute("PRAGMA secure_delete").fetchone()
+        assert row == (1,)
+
+
 def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "future.db"
     connection = sqlite3.connect(path)
@@ -244,8 +250,88 @@ def test_closed_store_rejects_access(tmp_path: Path) -> None:
 
 
 def test_oracle_rejects_incomplete_storage_backend() -> None:
-    with pytest.raises(TypeError, match="commit_evictions"):
+    with pytest.raises(TypeError, match="deletion APIs"):
         Oracle(storage=object())  # type: ignore[arg-type]
+
+
+def test_forget_deletes_active_protected_memory_and_clears_live_material(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "forget-active.db"
+    key = AesGcmCryptoShield.generate_key()
+    with SQLiteStore(path) as store:
+        oracle = Oracle(
+            shield=AesGcmCryptoShield(key),
+            environment="staging",
+            storage=store,
+        )
+        vine = oracle.sprout("forget me", np.array([1.0, 0.0]))
+        assert vine.protected_anchor is not None
+
+        assert oracle.forget(vine.vine_id) is True
+        assert oracle.forget(vine.vine_id) is False
+        assert oracle.workspace.get(vine.vine_id) is None
+        assert vine.anchor.size == 0
+        assert vine.protected_anchor is None
+
+    with SQLiteStore(path) as restored_store:
+        restored = Oracle(
+            shield=AesGcmCryptoShield(key),
+            environment="staging",
+            storage=restored_store,
+        )
+        assert restored.workspace.get(vine.vine_id) is None
+
+
+def test_forget_atomically_deletes_archived_memory_across_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "forget-archived.db"
+    with SQLiteStore(path) as store:
+        oracle = Oracle(
+            WorkspaceConfig(capacity=2, pressure_evict_at=0.0),
+            storage=store,
+        )
+        vine = oracle.sprout("archived", np.array([0.0, 1.0]))
+        now = time.time()
+        oracle.observe(np.array([1.0, 0.0]), now=now)
+        oracle.observe(
+            np.array([1.0, 0.0]),
+            now=now + 31 * 60,
+            cycles_since_twilight={vine.vine_id: 5},
+        )
+        assert store.archive.get(vine.vine_id) is not None
+        assert oracle.archived_metadata(vine.vine_id) is not None
+
+        assert oracle.forget(vine.vine_id) is True
+        assert oracle.search_index(np.array([0.0, 1.0]), top_k=5) == []
+        assert store.archive.get(vine.vine_id) is None
+        assert oracle.archived_metadata(vine.vine_id) is None
+
+    with SQLiteStore(path) as restored_store:
+        restored = Oracle(storage=restored_store)
+        assert restored.search_index(np.array([0.0, 1.0]), top_k=5) == []
+        assert restored_store.archive.get(vine.vine_id) is None
+
+
+def test_forget_rolls_back_durable_deletion_before_releasing_live_vine(
+    tmp_path: Path,
+) -> None:
+    with SQLiteStore(tmp_path / "forget-rollback.db") as store:
+        oracle = Oracle(storage=store)
+        vine = oracle.sprout("retry deletion", np.array([1.0, 0.0]))
+        store._connection.execute(
+            "CREATE TRIGGER fail_active_delete BEFORE DELETE ON active_workspace "
+            "BEGIN SELECT RAISE(ABORT, 'simulated deletion failure'); END"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="deletion failure"):
+            oracle.forget(vine.vine_id)
+
+        assert oracle.workspace.get(vine.vine_id) is vine
+        persisted = store.load_workspace()[0]
+        assert [item.vine_id for item in persisted] == [vine.vine_id]
+        assert vine.anchor.size == 2
 
 
 def test_active_workspace_is_checkpointed_and_restored(tmp_path: Path) -> None:

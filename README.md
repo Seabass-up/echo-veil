@@ -65,8 +65,10 @@ oracle = Oracle(
 )
 
 # Add active memories (anchor vectors come from your embedding model).
-oracle.sprout("estimate: Topping Ave", embed("200A service upgrade quote"))
-oracle.sprout("family: school pickup", embed("Jaxen pickup at 3pm"))
+estimate = oracle.sprout(
+    "estimate: Riverside project", embed("service upgrade quote")
+)
+oracle.sprout("schedule: school pickup", embed("school pickup at 3pm"))
 
 # Each user turn: feed the current intent vector.
 report = oracle.observe(embed("what was the labor rate on that estimate?"))
@@ -76,6 +78,10 @@ print(oracle.report().as_dict())
 
 # Defensive readiness / production-gap report.
 print(oracle.capability_report().as_dict())
+
+# Delete Echo Veil-managed L1/L2/L3 state for one vine. The host must also
+# delete its authorized payload, backups, and separately managed artifacts.
+oracle.forget(estimate.vine_id)
 
 # Checkpoint WAL state and close the database during application shutdown.
 store.close()

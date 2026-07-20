@@ -36,6 +36,8 @@ test("server-renders the complete Echo Veil product page", async () => {
   assert.match(html, /Customer &amp; field copilots/);
   assert.match(html, /The policy layer between/);
   assert.match(html, /Attested enclave \+ ZKP gate/);
+  assert.match(html, /View source on GitHub/);
+  assert.match(html, /docs\/AGENT_INTEGRATION\.md/);
   assert.match(html, /Skip to main content/);
   assert.match(html, /rel="canonical" href="https:\/\/echo\.algo-cli\.com\/"/);
   assert.ok(html.includes("https://echo.algo-cli.com/og.png"));

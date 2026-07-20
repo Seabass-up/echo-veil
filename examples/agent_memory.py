@@ -91,7 +91,7 @@ class ApplicationMemory:
 def run_demo() -> RecallResult:
     memory = ApplicationMemory(demo_embedding)
     memory.remember(
-        "Topping Avenue service estimate labor rate",
+        "Riverside project service estimate labor rate",
         "The approved labor rate is 125 dollars per hour.",
     )
     memory.remember(

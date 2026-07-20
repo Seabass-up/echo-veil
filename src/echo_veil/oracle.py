@@ -7,6 +7,7 @@ operations a host application actually performs:
   - sprout(topic, anchor)          add an active vine
   - observe(intent)                run a query cycle (decay + drift)
   - reinforce(vine_id)             snap a twilight vine back
+  - forget(vine_id)                delete managed L1/L2/L3 state
   - report()                       the Gardener's Report
 
 Confidence classification and the crypto shield are provided as collaborators
@@ -105,7 +106,7 @@ class Oracle:
             )
         if storage is not None and not is_transactional_eviction_store(storage):
             raise TypeError(
-                "storage must expose index, archive, and commit_evictions(records)"
+                "storage must expose coordinated workspace, eviction, and deletion APIs"
             )
         if normalized_environment == "production" and not isinstance(
             shield, EnclaveCryptoShield
@@ -407,6 +408,27 @@ class Oracle:
             if result is not None and not isinstance(result, dict):
                 raise TypeError("storage metadata getter must return a dict or None")
             return cast(dict[str, object] | None, result)
+
+    def forget(self, vine_id: str) -> bool:
+        """Delete one memory from Echo Veil's managed L1/L2/L3 tiers.
+
+        Durable backends delete their records before the live Vine is released,
+        so a storage failure leaves a retryable in-memory object. Host payloads,
+        backups, and separately managed conflict artifacts remain caller-owned.
+        """
+        MetadataIndex._validate_key(vine_id)
+        with self._lock:
+            live = self.workspace.get(vine_id)
+            if self.storage is not None:
+                deleted = self.storage.delete_memory(vine_id)
+            else:
+                removed_index = self.index.remove(vine_id)
+                removed_archive = self.archive.remove(vine_id)
+                deleted = removed_index or removed_archive
+            removed = self.workspace.remove(vine_id)
+            if removed is not None:
+                removed.clear_material()
+            return deleted or live is not None
 
     def reinforce(self, vine_id: str, now: float | None = None) -> None:
         with self._lock:

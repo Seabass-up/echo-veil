@@ -5,26 +5,24 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-19
+
 ### Changed
 
 - Added a keyboard skip link, visible focus states, canonical metadata, and a
   non-repeating screen-reader description to the product site.
 - Added deterministic gateway unit tests and sanitized, status-aware Python
   gateway errors for easier integration troubleshooting.
-
-### Security
-
-- Enforced request and response limits while streaming at both the Cloudflare
-  gateway and enclave origin, rather than after unbounded buffering.
-- Added a deadline to authenticated health forwarding, bounded Access JWTs,
-  stricter Cloudflare team-domain validation, and defensive API headers.
-- Removed upstream response bodies from Python client exceptions so enclave or
-  proxy details cannot be copied into application logs.
-
-## [0.4.0] - 2026-07-15
+- Added Wrangler-generated binding drift checks, request IDs, structured safe
+  failure telemetry, endpoint response validation, and sampled Worker tracing.
+- Added direct source and integration-guide links to the product site.
+- Replaced project-specific names in public examples with neutral fixtures.
 
 ### Added
 
+- Added `Oracle.forget()` for fail-closed deletion across Echo Veil-managed
+  L1/L2/L3 state, including atomic SQLite rollback and best-effort
+  live-material release.
 - Durable transactional SQLite storage for the L1/L2/L3 memory tiers.
 - Indexed approximate retrieval with exact shield-aware reranking.
 - AES-GCM protection for development and staging deployments.
@@ -40,6 +38,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Enforced request and response limits while streaming at both the Cloudflare
+  gateway and enclave origin, rather than after unbounded buffering.
+- Added a deadline to authenticated health forwarding, bounded Access JWTs,
+  stricter Cloudflare team-domain validation, and defensive API headers.
+- Removed upstream response bodies from Python client exceptions so enclave or
+  proxy details cannot be copied into application logs.
 - Production startup requires the enclave shield and fails closed when
   attestation, measurement, CKKS, hardware isolation, or the ZKP gate is absent.
 - Secret generation, replay controls, bounded inputs, and encrypted key-transfer

@@ -167,6 +167,7 @@ class SQLiteStore:
         timeout_ms = max(1, int(timeout_seconds * 1_000))
         self._connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA secure_delete = ON")
         self._connection.execute("PRAGMA trusted_schema = OFF")
         self._connection.execute("PRAGMA synchronous = FULL")
         self._connection.execute(
@@ -366,6 +367,32 @@ class SQLiteStore:
                 self._rollback_locked()
                 raise
 
+    def delete_memory(self, key: str) -> bool:
+        """Atomically delete one memory from active, index, and archive tables.
+
+        ``secure_delete`` reduces ordinary SQLite page remnants, but this does
+        not promise physical erasure from WAL files, backups, or storage media.
+        """
+        MetadataIndex._validate_key(key)
+        with self._lock:
+            self._ensure_open_locked()
+            self._begin_locked()
+            try:
+                metadata = self._connection.execute(
+                    "DELETE FROM metadata_index WHERE key = ?", (key,)
+                ).rowcount
+                archived = self._connection.execute(
+                    "DELETE FROM cold_archive WHERE key = ?", (key,)
+                ).rowcount
+                active = self._connection.execute(
+                    "DELETE FROM active_workspace WHERE key = ?", (key,)
+                ).rowcount
+                self._commit_locked()
+            except Exception:
+                self._rollback_locked()
+                raise
+        return any(count > 0 for count in (metadata, archived, active))
+
     def _prepare_eviction(
         self,
         record: EvictionRecord,
@@ -432,11 +459,14 @@ class SQLiteStore:
                 self._rollback_locked()
                 raise
 
-    def _remove_index(self, key: str) -> None:
+    def _remove_index(self, key: str) -> bool:
         MetadataIndex._validate_key(key)
         with self._lock:
             self._ensure_open_locked()
-            self._connection.execute("DELETE FROM metadata_index WHERE key = ?", (key,))
+            result = self._connection.execute(
+                "DELETE FROM metadata_index WHERE key = ?", (key,)
+            )
+            return result.rowcount > 0
 
     def _index_rows(self, query: Vector) -> list[tuple[str, str, bytes, int]]:
         signatures = self._lsh.signatures(query)
@@ -526,6 +556,15 @@ class SQLiteStore:
                 (key,),
             ).fetchone()
         return None if row is None else bytes(row[0])
+
+    def _remove_archive(self, key: str) -> bool:
+        MetadataIndex._validate_key(key)
+        with self._lock:
+            self._ensure_open_locked()
+            result = self._connection.execute(
+                "DELETE FROM cold_archive WHERE key = ?", (key,)
+            )
+            return result.rowcount > 0
 
     def _archive_length(self) -> int:
         return self._table_length("cold_archive")
@@ -943,8 +982,8 @@ class SQLiteMetadataIndex:
     def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None:
         self._store._upsert_index(key, anchor, kind)
 
-    def remove(self, key: str) -> None:
-        self._store._remove_index(key)
+    def remove(self, key: str) -> bool:
+        return self._store._remove_index(key)
 
     def search(
         self,
@@ -1010,6 +1049,9 @@ class SQLiteColdArchive:
 
     def get(self, key: str) -> bytes | None:
         return self._store._get_archive(key)
+
+    def remove(self, key: str) -> bool:
+        return self._store._remove_archive(key)
 
     def __len__(self) -> int:
         return self._store._archive_length()
