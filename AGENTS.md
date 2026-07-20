@@ -40,7 +40,7 @@ npm --prefix website run lint
 npm --prefix website test
 
 npm --prefix integrations/openclaw ci --ignore-scripts
-npm --prefix integrations/openclaw run plugin:validate
+npm --prefix integrations/openclaw run check
 npm --prefix integrations/openclaw test
 
 npm --prefix integrations/pi ci --ignore-scripts

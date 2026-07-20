@@ -54,6 +54,9 @@ All notable changes to Echo Veil are documented here. The project follows
   returns to their topic before eviction.
 - Updated the website's locked `brace-expansion` transitive dependencies to
   patched versions after a high-severity denial-of-service advisory.
+- Removed the OpenClaw host runtime from the plugin's development lockfile after
+  its published shrinkwrap introduced a vulnerable transitive parser; OpenClaw
+  remains a peer and the real CLI is still required for release validation.
 
 ### Security
 

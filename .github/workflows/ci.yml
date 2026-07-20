@@ -133,7 +133,7 @@ jobs:
       - name: Validate adapter contracts
         run: |
           uv run --locked pytest -q tests/test_agent_memory.py tests/test_agent_adapters.py
-          npm --prefix integrations/openclaw run plugin:validate
+          npm --prefix integrations/openclaw run check
           npm --prefix integrations/openclaw test
           npm --prefix integrations/pi run check
           npm --prefix integrations/pi test

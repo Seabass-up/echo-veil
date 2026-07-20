@@ -14,6 +14,11 @@ openclaw plugins enable echo-veil
 openclaw plugins doctor
 ```
 
+The package keeps OpenClaw as a peer rather than vendoring the host runtime or
+its dependency tree. Run `npm run plugin:validate` with the supported OpenClaw
+CLI installed before a release; CI compiles and tests the same SDK contract
+without adding the host itself to Echo Veil's lockfile.
+
 For a copied or packaged install, either install the `echo-veil-agent` console
 script or set `plugins.entries.echo-veil.config.projectPath` to an Echo Veil
 checkout. `stateDir` and `profile` select the encrypted local profile. Codex and

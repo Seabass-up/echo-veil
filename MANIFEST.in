@@ -15,6 +15,8 @@ include integrations/openclaw/tsconfig.json
 include integrations/openclaw/vitest.config.ts
 recursive-include integrations/openclaw/src *.ts
 recursive-include integrations/openclaw/dist *.js *.d.ts
+recursive-include integrations/openclaw/tests *.ts
+recursive-include integrations/openclaw/types *.d.ts
 include integrations/README.md
 include integrations/claude-code/.claude-plugin/plugin.json
 include integrations/claude-code/.mcp.json

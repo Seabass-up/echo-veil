@@ -64,6 +64,7 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    npm --prefix website test
    npm --prefix integrations/openclaw ci --ignore-scripts
    npm --prefix integrations/openclaw audit --audit-level=high
+   npm --prefix integrations/openclaw run check
    npm --prefix integrations/openclaw run plugin:validate
    npm --prefix integrations/openclaw test
    npm --prefix integrations/pi ci --ignore-scripts
