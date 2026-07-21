@@ -17,9 +17,19 @@ const remember = defineTool({
   parameters: Type.Object({
     topic: Type.String({ minLength: 1, maxLength: 512 }),
     payload: Type.String({ minLength: 1, maxLength: 100_000 }),
+    effectiveAt: Type.Optional(Type.Number({ minimum: 0 })),
+    supersedes: Type.Optional(Type.Array(
+      Type.String({ minLength: 1, maxLength: 128 }),
+      { maxItems: 20, uniqueItems: true },
+    )),
   }),
   async execute(_id, params, signal) {
-    return result(await runEchoVeilRpc("remember", params, signal));
+    return result(await runEchoVeilRpc("remember", {
+      topic: params.topic,
+      payload: params.payload,
+      ...(params.effectiveAt === undefined ? {} : { effective_at: params.effectiveAt }),
+      ...(params.supersedes === undefined ? {} : { supersedes: params.supersedes }),
+    }, signal));
   },
 });
 
@@ -31,6 +41,7 @@ const recall = defineTool({
     query: Type.String({ minLength: 1, maxLength: 20_000 }),
     topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
     minScore: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    asOf: Type.Optional(Type.Number({ minimum: 0 })),
     allowInferential: Type.Optional(Type.Boolean({
       description: "Use only after explicit user authorization for inferential recall.",
     })),
@@ -39,7 +50,8 @@ const recall = defineTool({
     return result(await runEchoVeilRpc("recall", {
       query: params.query,
       top_k: params.topK ?? 5,
-      min_score: params.minScore ?? 0.35,
+      ...(params.minScore === undefined ? {} : { min_score: params.minScore }),
+      ...(params.asOf === undefined ? {} : { as_of: params.asOf }),
       allow_inferential: params.allowInferential ?? false,
     }, signal));
   },
@@ -67,7 +79,17 @@ const doctor = defineTool({
   },
 });
 
-export const echoVeilTools = [remember, recall, forget, doctor];
+const reindex = defineTool({
+  name: "echo_veil_reindex",
+  label: "Echo Veil Reindex",
+  description: "Rebuild protected semantic and keyed lexical retrieval data after confirmation.",
+  parameters: Type.Object({ confirm: Type.Literal(true) }),
+  async execute(_id, params, signal) {
+    return result(await runEchoVeilRpc("reindex", { confirm: params.confirm }, signal));
+  },
+});
+
+export const echoVeilTools = [remember, recall, forget, doctor, reindex];
 
 export default function echoVeilExtension(pi: ExtensionAPI) {
   for (const tool of echoVeilTools) pi.registerTool(tool);

@@ -5,6 +5,29 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Switched bundled full agent adapters to versioned local
+  `qwen3-embedding:latest` profiles with instruction-aware queries,
+  1,024-dimensional output, and a calibrated `0.50` recall threshold.
+- Persisted model digest, dimension, and query-instruction identity per profile
+  so hashing, model updates, and incompatible dimensions cannot mix silently.
+- Replaced single-vector adapter retrieval with AES-GCM-protected passage
+  vectors, MaxSim scoring, keyed lexical matching, and topic-aware MMR.
+- Added explicit fact supersession and point-in-time recall while preserving
+  corrected and conflicting history.
+
+### Added
+
+- Added a loopback-only, bounded Ollama embedding client and a neutral semantic
+  qualification covering keyword recall, paraphrase recall, and distractor
+  rejection.
+- Added a 42-query quality gate with long-memory, correction, temporal, restart,
+  cold-start, latency, and distractor coverage plus a same-corpus memory-core
+  comparison harness.
+- Added confirmed protected reindexing and an in-process hashing-to-Qwen profile
+  migration that creates no plaintext export.
+
 ## [0.4.0] - 2026-07-20
 
 ### Changed

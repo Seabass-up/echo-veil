@@ -25,7 +25,7 @@ temporary files, URLs, logs, or environment variables.
 When the user asks to check Echo Veil, run exactly:
 
 ```text
-echo-veil-agent --profile mercury doctor
+echo-veil-agent --profile mercury-qwen3 --embedder ollama --embedding-model qwen3-embedding:latest --embedding-dimension 1024 doctor
 ```
 
 Explain that full remember, recall, and forget operations are unavailable in

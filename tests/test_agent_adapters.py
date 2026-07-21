@@ -43,13 +43,33 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
         _mapping(_json("integrations/opencode/opencode.json")["mcp"])["echo_veil"]
     )
 
-    assert codex["env"]["ECHO_VEIL_PROFILE"] == "codex"
-    assert claude["env"]["ECHO_VEIL_PROFILE"] == "claude-code"
-    assert droid["args"] == ["--profile", "droid", "mcp"]
+    assert codex["env"]["ECHO_VEIL_PROFILE"] == "codex-qwen3"
+    assert claude["env"]["ECHO_VEIL_PROFILE"] == "claude-code-qwen3"
+    for config in (codex, claude):
+        assert config["env"]["ECHO_VEIL_EMBEDDER"] == "ollama"
+        assert config["env"]["ECHO_VEIL_EMBEDDING_MODEL"] == ("qwen3-embedding:latest")
+        assert config["env"]["ECHO_VEIL_EMBEDDING_DIMENSION"] == "1024"
+    assert droid["args"] == [
+        "--profile",
+        "droid-qwen3",
+        "--embedder",
+        "ollama",
+        "--embedding-model",
+        "qwen3-embedding:latest",
+        "--embedding-dimension",
+        "1024",
+        "mcp",
+    ]
     assert opencode["command"] == [
         "echo-veil-agent",
         "--profile",
-        "opencode",
+        "opencode-qwen3",
+        "--embedder",
+        "ollama",
+        "--embedding-model",
+        "qwen3-embedding:latest",
+        "--embedding-dimension",
+        "1024",
         "mcp",
     ]
 
@@ -71,8 +91,9 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     hermes = (ROOT / "integrations/hermes/config.yaml").read_text(encoding="utf-8")
     goose = (ROOT / "integrations/goose/echo-veil.yaml").read_text(encoding="utf-8")
     mercury = (ROOT / "integrations/mercury/SKILL.md").read_text(encoding="utf-8")
-    assert 'args: ["--profile", "hermes", "mcp"]' in hermes
-    assert 'args: ["--profile", "goose", "mcp"]' in goose
+    for text, profile in ((hermes, "hermes-qwen3"), (goose, "goose-qwen3")):
+        assert f'args: ["--profile", "{profile}", "--embedder", "ollama"' in text
+        assert '"qwen3-embedding:latest"' in text
     assert "allowed-tools:\n  - run_command" in mercury
     assert "must not send memory topics, payloads, queries" in mercury
     assert "full remember, recall, and forget operations are unavailable" in mercury

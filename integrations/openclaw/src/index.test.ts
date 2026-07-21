@@ -10,6 +10,7 @@ describe("echo-veil OpenClaw plugin", () => {
       "echo_veil_recall",
       "echo_veil_forget",
       "echo_veil_doctor",
+      "echo_veil_reindex",
     ]);
   });
 
@@ -25,6 +26,9 @@ describe("echo-veil OpenClaw plugin", () => {
     expect(invocation.args).toEqual(["rpc"]);
     expect(invocation.env.ECHO_VEIL_STATE_DIR).toBe("/private/state");
     expect(invocation.env.ECHO_VEIL_PROFILE).toBe("shared");
+    expect(invocation.env.ECHO_VEIL_EMBEDDER).toBe("ollama");
+    expect(invocation.env.ECHO_VEIL_EMBEDDING_MODEL).toBe("qwen3-embedding:latest");
+    expect(invocation.env.ECHO_VEIL_EMBEDDING_DIMENSION).toBe("1024");
     expect(invocation.timeoutMs).toBe(12_000);
   });
 
@@ -40,6 +44,6 @@ describe("echo-veil OpenClaw plugin", () => {
       "echo-veil-agent",
       "rpc",
     ]);
-    expect(invocation.env.ECHO_VEIL_PROFILE).toBe("openclaw");
+    expect(invocation.env.ECHO_VEIL_PROFILE).toBe("openclaw-qwen3");
   });
 });

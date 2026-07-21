@@ -11,7 +11,17 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from . import __version__
-from .agent_memory import AgentMemory, DEFAULT_CAPACITY
+from .agent_memory import (
+    AgentMemory,
+    DEFAULT_CAPACITY,
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
+    HashingTextEmbedder,
+    OllamaTextEmbedder,
+    TextEmbedder,
+)
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MAX_REQUEST_BYTES = 1_048_576
@@ -47,6 +57,20 @@ TOOLS: tuple[dict[str, Any], ...] = (
                     "maxLength": 100000,
                     "description": "Authorized memory content to encrypt and retain.",
                 },
+                "effective_at": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Optional Unix timestamp when this fact became valid.",
+                },
+                "supersedes": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "description": (
+                        "Prior vine IDs this fact explicitly replaces. History is preserved."
+                    ),
+                },
             },
         },
         "annotations": {
@@ -69,11 +93,26 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 20000},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
-                "min_score": {"type": "number", "minimum": 0, "maximum": 1},
+                "min_score": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": (
+                        "Optional override. When omitted, the selected embedding "
+                        "backend's calibrated threshold is used."
+                    ),
+                },
                 "allow_inferential": {
                     "type": "boolean",
                     "description": (
                         "Use only after the user explicitly authorizes inferential recall."
+                    ),
+                },
+                "as_of": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": (
+                        "Optional Unix timestamp for point-in-time fact retrieval."
                     ),
                 },
             },
@@ -124,6 +163,25 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "openWorldHint": False,
         },
     },
+    {
+        "name": "echo_veil_reindex",
+        "description": (
+            "Rebuild protected multi-vector and keyed lexical retrieval data for "
+            "the current profile. Requires explicit confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["confirm"],
+            "properties": {"confirm": {"const": True}},
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
 )
 
 
@@ -136,18 +194,24 @@ def dispatch(
         raise TypeError("arguments must be an object")
     supplied = dict(arguments)
     if action in {"remember", "echo_veil_remember"}:
-        _require_only(supplied, {"topic", "payload"})
+        _require_only(supplied, {"topic", "payload", "effective_at", "supersedes"})
         return memory.remember(
             topic=_required_string(supplied, "topic"),
             payload=_required_string(supplied, "payload"),
+            effective_at=supplied.get("effective_at"),  # type: ignore[arg-type]
+            supersedes=supplied.get("supersedes"),  # type: ignore[arg-type]
         )
     if action in {"recall", "echo_veil_recall"}:
-        _require_only(supplied, {"query", "top_k", "min_score", "allow_inferential"})
+        _require_only(
+            supplied,
+            {"query", "top_k", "min_score", "allow_inferential", "as_of"},
+        )
         return memory.recall(
             query=_required_string(supplied, "query"),
             top_k=supplied.get("top_k", 5),  # type: ignore[arg-type]
-            min_score=supplied.get("min_score", 0.35),  # type: ignore[arg-type]
+            min_score=supplied.get("min_score"),  # type: ignore[arg-type]
             allow_inferential=supplied.get("allow_inferential", False),  # type: ignore[arg-type]
+            as_of=supplied.get("as_of"),  # type: ignore[arg-type]
         )
     if action in {"forget", "echo_veil_forget"}:
         _require_only(supplied, {"vine_id"})
@@ -155,6 +219,11 @@ def dispatch(
     if action in {"doctor", "echo_veil_doctor"}:
         _require_only(supplied, set())
         return memory.doctor()
+    if action in {"reindex", "echo_veil_reindex"}:
+        _require_only(supplied, {"confirm"})
+        if supplied.get("confirm") is not True:
+            raise ValueError("reindex requires confirm=true")
+        return memory.reindex()
     raise ValueError(f"unknown Echo Veil action: {action}")
 
 
@@ -282,6 +351,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", default=os.environ.get("ECHO_VEIL_PROFILE", "default")
     )
     parser.add_argument("--capacity", type=int, default=_capacity_from_env())
+    parser.add_argument(
+        "--embedder",
+        choices=("hashing", "ollama"),
+        default=os.environ.get("ECHO_VEIL_EMBEDDER", "hashing"),
+        help="text embedding backend (bundled host configs use local Ollama)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=os.environ.get("ECHO_VEIL_EMBEDDING_MODEL", DEFAULT_OLLAMA_MODEL),
+    )
+    parser.add_argument(
+        "--embedding-dimension",
+        type=int,
+        default=_int_from_env(
+            "ECHO_VEIL_EMBEDDING_DIMENSION",
+            DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
+        ),
+    )
+    parser.add_argument(
+        "--ollama-url",
+        default=os.environ.get("ECHO_VEIL_OLLAMA_URL", DEFAULT_OLLAMA_URL),
+    )
+    parser.add_argument(
+        "--embedding-timeout",
+        type=float,
+        default=_float_from_env(
+            "ECHO_VEIL_EMBEDDING_TIMEOUT",
+            DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+        ),
+    )
     parser.add_argument("mode", choices=("rpc", "mcp", "doctor"))
     return parser
 
@@ -289,10 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        embedder = _build_embedder(args)
         with AgentMemory(
             args.state_dir,
             profile=args.profile,
             capacity=args.capacity,
+            embed=embedder,
         ) as memory:
             if args.mode == "mcp":
                 return run_mcp(memory)
@@ -310,13 +411,38 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _capacity_from_env() -> int:
-    raw = os.environ.get("ECHO_VEIL_CAPACITY")
+    return _int_from_env("ECHO_VEIL_CAPACITY", DEFAULT_CAPACITY)
+
+
+def _int_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
     if raw is None:
-        return DEFAULT_CAPACITY
+        return default
     try:
         return int(raw)
     except ValueError as exc:
-        raise ValueError("ECHO_VEIL_CAPACITY must be an integer") from exc
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _float_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
+def _build_embedder(args: argparse.Namespace) -> TextEmbedder:
+    if args.embedder == "hashing":
+        return HashingTextEmbedder()
+    return OllamaTextEmbedder(
+        model=args.embedding_model,
+        base_url=args.ollama_url,
+        dimension=args.embedding_dimension,
+        timeout_seconds=args.embedding_timeout,
+    )
 
 
 def _require_only(arguments: Mapping[str, Any], allowed: set[str]) -> None:

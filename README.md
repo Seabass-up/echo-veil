@@ -43,16 +43,45 @@ pip install -e ".[dev]"
 ## Agent runtime adapters
 
 Echo Veil includes one local encrypted host adapter used across supported runtimes. It
-provides four opt-in operations: remember, recall, forget, and doctor. The
-adapter uses a deterministic local hashing embedder, AES-GCM protected anchors,
-an encrypted payload sidecar, durable SQLite lifecycle state, and Echo Veil's
-confidence gate. It does not silently capture conversations.
+provides five opt-in operations: remember, recall, forget, doctor, and protected
+retrieval reindexing. The
+bundled host configurations use the locally installed
+`qwen3-embedding:latest` model through loopback-only Ollama, 1,024-dimensional
+MRL output, AES-GCM protected anchors, an encrypted payload sidecar, durable
+SQLite lifecycle state, and Echo Veil's confidence gate. It does not silently
+capture conversations or download a model at runtime.
+
+Install the model before starting a bundled adapter:
+
+```bash
+ollama pull qwen3-embedding:latest
+uv run --locked python scripts/quality_benchmark.py
+```
+
+The primary quality gate qualifies 42 keyword, paraphrase, update, temporal,
+and long-memory queries plus 10 unrelated distractors against a neutral
+synthetic corpus. It also measures cold start, restart restoration, and recall
+latency. It is a reproducible regression gate, not a universal recall claim.
+See [`docs/QUALITY.md`](docs/QUALITY.md) for methodology and the current
+same-corpus comparison. Echo Veil stores the resolved model digest, dimension,
+and query-instruction identity with each profile and refuses to mix incompatible
+vectors.
+
+Legacy hashing profiles can be rehydrated into a fresh Qwen3 profile without a
+plaintext export:
+
+```bash
+uv run --locked python scripts/migrate_hashing_profile.py \
+  --source-profile old-hashing --target-profile new-qwen3 --confirm
+```
 
 Codex can run the bundled stdio MCP server directly from a checkout:
 
 ```bash
 codex mcp add echo-veil -- \
-  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent mcp
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent \
+    --profile codex-qwen3 --embedder ollama \
+    --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
 ```
 
 The repository root is also a Codex plugin (`.codex-plugin/plugin.json` plus
@@ -105,7 +134,7 @@ oracle = Oracle(
 
 # Add active memories (anchor vectors come from your embedding model).
 estimate = oracle.sprout(
-    "estimate: Riverside project", embed("service upgrade quote")
+    "estimate: Harbor project", embed("service upgrade quote")
 )
 oracle.sprout("schedule: school pickup", embed("school pickup at 3pm"))
 
@@ -208,10 +237,14 @@ SBOM generation, and provenance requirements are documented in
 - **Twilight return-to-topic recall works automatically.** A relevant intent
   now rescores and reinforces a compressed twilight vine before eviction;
   callers no longer need to know its hidden vine id in advance.
-- **The bundled agent embedder is intentionally modest.** It is deterministic,
-  local, and dependency-free, but keyword-oriented rather than a production
-  semantic embedding model. Hosts can still supply a reviewed embedder to
-  `AgentMemory`.
+- **The adapter makes embedding selection explicit.** Bundled host profiles use
+  local Qwen3 semantic embeddings with instruction-aware queries, protected
+  multi-vector MaxSim over bounded live/LSH/lexical candidates, keyed lexical
+  matching, topic-aware MMR, and explicit supersession history. The
+  deterministic hashing backend remains available for offline tests and
+  keyword-oriented recall, but is not presented as semantic retrieval. The
+  Echo Veil core still accepts caller-owned stable embeddings and has no
+  implicit network embedding dependency.
 - **Eviction is retry-safe.** An archive/index failure leaves an evicted vine
   pending and retriable; pruning happens only after both lower-tier writes have
   succeeded. Building the L2 entry no longer restores plaintext onto an

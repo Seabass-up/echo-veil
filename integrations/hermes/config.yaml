@@ -1,7 +1,7 @@
 mcp_servers:
   echo-veil:
     command: "echo-veil-agent"
-    args: ["--profile", "hermes", "mcp"]
+    args: ["--profile", "hermes-qwen3", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "mcp"]
     tools:
       include:
         - echo_veil_remember

@@ -10,6 +10,7 @@ describe("Echo Veil Pi extension", () => {
       "echo_veil_recall",
       "echo_veil_forget",
       "echo_veil_doctor",
+      "echo_veil_reindex",
     ]);
   });
 
@@ -18,7 +19,10 @@ describe("Echo Veil Pi extension", () => {
     delete process.env.ECHO_VEIL_PROFILE;
     try {
       const invocation = buildInvocation();
-      expect(invocation.env.ECHO_VEIL_PROFILE).toBe("pi");
+      expect(invocation.env.ECHO_VEIL_PROFILE).toBe("pi-qwen3");
+      expect(invocation.env.ECHO_VEIL_EMBEDDER).toBe("ollama");
+      expect(invocation.env.ECHO_VEIL_EMBEDDING_MODEL).toBe("qwen3-embedding:latest");
+      expect(invocation.env.ECHO_VEIL_EMBEDDING_DIMENSION).toBe("1024");
       expect(invocation.command).not.toMatch(/[;&|]/);
       expect(invocation.args.at(-1)).toBe("rpc");
     } finally {

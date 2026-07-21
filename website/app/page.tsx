@@ -311,7 +311,7 @@ export default function Home() {
           </div>
 
           <div className="integration-notes">
-            <div><span>INPUT</span><strong>Stable intent embeddings</strong><p>Your host chooses and versions the embedding model.</p></div>
+            <div><span>QUALITY</span><strong>42 / 42 retrieval gate</strong><p>Local Qwen3 passed the committed keyword, paraphrase, update, temporal, and long-memory suite.*</p></div>
             <div><span>OUTPUT</span><strong>Vine IDs + confidence</strong><p>Your host authorizes and loads the matching payload.</p></div>
             <div><span>BOUNDARY</span><strong>Fail-closed production</strong><p>Production requires the configured attested enclave shield.</p></div>
             <div className="host-support">
@@ -322,6 +322,7 @@ export default function Home() {
                 <span>DROID</span><span>GOOSE</span><span>MERCURY*</span>
               </div>
               <p>* Mercury readiness skill today; full structured tools await a documented host boundary.</p>
+              <p>* Neutral synthetic regression suite, not a universal product comparison.</p>
             </div>
           </div>
         </div>

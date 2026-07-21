@@ -32,7 +32,10 @@ const MAX_OUTPUT_BYTES = 1_048_576;
 export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
   const env = { ...process.env };
   if (config.stateDir?.trim()) env.ECHO_VEIL_STATE_DIR = config.stateDir.trim();
-  env.ECHO_VEIL_PROFILE = config.profile?.trim() || env.ECHO_VEIL_PROFILE || "openclaw";
+  env.ECHO_VEIL_PROFILE = config.profile?.trim() || env.ECHO_VEIL_PROFILE || "openclaw-qwen3";
+  env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
+  env.ECHO_VEIL_EMBEDDING_MODEL = env.ECHO_VEIL_EMBEDDING_MODEL || "qwen3-embedding:latest";
+  env.ECHO_VEIL_EMBEDDING_DIMENSION = env.ECHO_VEIL_EMBEDDING_DIMENSION || "1024";
 
   const executable = config.executable?.trim() || process.env.ECHO_VEIL_AGENT_COMMAND?.trim();
   if (executable) {
@@ -40,7 +43,7 @@ export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
       command: executable,
       args: ["rpc"],
       env,
-      timeoutMs: config.timeoutMs ?? 30_000,
+      timeoutMs: config.timeoutMs ?? 120_000,
     };
   }
 
@@ -61,7 +64,7 @@ export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
         "rpc",
       ],
       env,
-      timeoutMs: config.timeoutMs ?? 30_000,
+      timeoutMs: config.timeoutMs ?? 120_000,
     };
   }
 
@@ -69,7 +72,7 @@ export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
     command: "echo-veil-agent",
     args: ["rpc"],
     env,
-    timeoutMs: config.timeoutMs ?? 30_000,
+    timeoutMs: config.timeoutMs ?? 120_000,
   };
 }
 
@@ -164,9 +167,19 @@ export default defineToolPlugin({
       parameters: Type.Object({
         topic: Type.String({ minLength: 1, maxLength: 512 }),
         payload: Type.String({ minLength: 1, maxLength: 100_000 }),
+        effectiveAt: Type.Optional(Type.Number({ minimum: 0 })),
+        supersedes: Type.Optional(Type.Array(
+          Type.String({ minLength: 1, maxLength: 128 }),
+          { maxItems: 20, uniqueItems: true },
+        )),
       }),
-      execute: async ({ topic, payload }, config, context) =>
-        runEchoVeilRpc("remember", { topic, payload }, config, context.signal),
+      execute: async ({ topic, payload, effectiveAt, supersedes }, config, context) =>
+        runEchoVeilRpc("remember", {
+          topic,
+          payload,
+          ...(effectiveAt === undefined ? {} : { effective_at: effectiveAt }),
+          ...(supersedes === undefined ? {} : { supersedes }),
+        }, config, context.signal),
     }),
     tool({
       name: "echo_veil_recall",
@@ -176,12 +189,13 @@ export default defineToolPlugin({
         query: Type.String({ minLength: 1, maxLength: 20_000 }),
         topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
         minScore: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        asOf: Type.Optional(Type.Number({ minimum: 0 })),
         allowInferential: Type.Optional(Type.Boolean({
           description: "Set only after explicit user authorization for inferential recall.",
         })),
       }),
       execute: async (
-        { query, topK = 5, minScore = 0.35, allowInferential = false },
+        { query, topK = 5, minScore, asOf, allowInferential = false },
         config,
         context,
       ) => runEchoVeilRpc(
@@ -189,7 +203,8 @@ export default defineToolPlugin({
         {
           query,
           top_k: topK,
-          min_score: minScore,
+          ...(minScore === undefined ? {} : { min_score: minScore }),
+          ...(asOf === undefined ? {} : { as_of: asOf }),
           allow_inferential: allowInferential,
         },
         config,
@@ -214,6 +229,17 @@ export default defineToolPlugin({
       parameters: Type.Object({}),
       execute: async (_arguments, config, context) =>
         runEchoVeilRpc("doctor", {}, config, context.signal),
+    }),
+    tool({
+      name: "echo_veil_reindex",
+      label: "Echo Veil Reindex",
+      description: "Rebuild protected semantic and keyed lexical retrieval data after explicit confirmation.",
+      optional: true,
+      parameters: Type.Object({
+        confirm: Type.Literal(true),
+      }),
+      execute: async ({ confirm }, config, context) =>
+        runEchoVeilRpc("reindex", { confirm }, config, context.signal),
     }),
   ],
 });

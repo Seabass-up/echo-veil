@@ -18,6 +18,25 @@ database, and performs confidence-gated active/cold recall. Exact remember
 retries are deduplicated. Topics remain plaintext metadata and the local mode
 does not satisfy the production enclave profile.
 
+The bundled full adapters explicitly select `qwen3-embedding:latest` through a
+loopback-only Ollama client. Documents are embedded without a prefix; recall
+queries use Qwen3's retrieval-instruction format. The default output dimension
+is 1,024 and the calibrated minimum recall score is `0.50`. The adapter never
+auto-pulls a model, follows redirects, contacts a non-loopback origin, or falls
+back silently to hashing.
+
+```bash
+ollama pull qwen3-embedding:latest
+uv run --locked python scripts/quality_benchmark.py
+```
+
+Qwen3 supports instruction-aware retrieval and Matryoshka Representation
+Learning dimensions; see the
+[official model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B) and
+[Ollama embed API](https://docs.ollama.com/api/embed). Model quality, footprint,
+and latency remain deployment tradeoffs, so qualify the real corpus before
+making a profile primary.
+
 The console entry point accepts payload-bearing requests only through stdin:
 
 ```bash
@@ -31,7 +50,9 @@ Codex plugin. For a direct local setup:
 
 ```bash
 codex mcp add echo-veil -- \
-  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent mcp
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent \
+    --profile codex-qwen3 --embedder ollama \
+    --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
 ```
 
 OpenClaw loads `integrations/openclaw` as a native tool plugin. Pi loads a
@@ -41,18 +62,45 @@ stdio MCP configuration surfaces. Every full adapter exposes:
 
 - `echo_veil_remember` — opt-in durable capture;
 - `echo_veil_recall` — lifecycle-mutating, confidence-gated retrieval;
-- `echo_veil_forget` — payload-first local erasure; and
-- `echo_veil_doctor` — adapter and core readiness reporting.
+- `echo_veil_forget` — payload-first local erasure;
+- `echo_veil_doctor` — adapter and core readiness reporting; and
+- `echo_veil_reindex` — explicitly confirmed protected retrieval-index rebuilds.
 
 Existing host memory providers and context engines remain unchanged. Echo Veil
 is not injected into every prompt and does not replace host-native memory. This
 avoids duplicate automatic recall while the policy layer is evaluated.
 
-`ECHO_VEIL_STATE_DIR` and `ECHO_VEIL_PROFILE` select storage. Bundled adapters
-use a distinct profile per host. Profiles are authorization and concurrency
+`ECHO_VEIL_STATE_DIR` and `ECHO_VEIL_PROFILE` select storage. The embedding
+backend is selected with `ECHO_VEIL_EMBEDDER`; Ollama model, dimension, URL, and
+timeout use the corresponding `ECHO_VEIL_EMBEDDING_*` and
+`ECHO_VEIL_OLLAMA_URL` variables. Bundled adapters use a versioned Qwen3 profile
+per host. Profiles are authorization and concurrency
 boundaries: share one only when the hosts represent the same local user and
 authorization domain, and avoid simultaneous writers because live L1 remains
 process memory even though SQLite persistence is cross-process safe.
+
+Embedding identity is immutable for a non-empty profile. To move a hashing
+profile to Qwen3, use the explicit in-process migration below. It decrypts one
+source record at a time, re-embeds it into an empty target profile, preserves
+explicit supersession links, and creates no plaintext export file. It does not
+modify the source profile. It creates new vine IDs and fresh lifecycle state;
+scores, reinforcement age, locks, and archive position are not copied.
+
+```bash
+uv run --locked python scripts/migrate_hashing_profile.py \
+  --source-profile old-hashing --target-profile new-qwen3 --confirm
+```
+
+Do not copy or mix old vectors. If the resolved `latest` tag digest changes,
+review the model change and migrate to a new profile instead of weakening the
+mismatch check.
+
+The bundled adapter's retrieval path uses encrypted passage vectors with
+MaxSim, keyed-hash lexical features, topic-aware MMR diversity, and explicit
+`effective_at`/`supersedes` metadata. `recall(as_of=...)` can select the fact
+valid at a historical point without discarding later corrections. Run
+`echo_veil_reindex` after upgrading an existing profile so its derived protected
+retrieval data matches the current schema.
 
 Mercury is intentionally readiness-only. Its current public documentation
 supports Agent Skills but not arbitrary MCP or structured custom-tool
@@ -105,7 +153,7 @@ payloads: dict[str, str] = {}
 
 anchor = np.array([1.0, 0.0, 0.0])  # replace with your embedding model
 vine = oracle.sprout("estimate labor rate", anchor)
-payloads[vine.vine_id] = "Labor rate is $125/hour."
+payloads[vine.vine_id] = "Synthetic example labor rate is $137/hour."
 
 intent = np.array([1.0, 0.0, 0.0])
 oracle.observe(intent)
@@ -174,7 +222,8 @@ secrets, raw protected vectors, proofs, or attestation credentials.
 - Call `oracle.capability_report().as_dict()` at startup and surface blockers in
   readiness/health reporting.
 - Keep one embedding model/version and dimension per Oracle/store. Migrate to a
-  new store when changing dimensions unless a reviewed migration exists.
+  new profile when changing dimensions or model identity; use only the reviewed
+  hashing-to-Qwen migration above for legacy adapter profiles.
 - Treat every query as tenant-scoped. Do not share an Oracle or payload lookup
   across authorization boundaries without explicit tenant isolation.
 - Call `oracle.forget(vine_id)` to remove the matching Echo Veil-managed

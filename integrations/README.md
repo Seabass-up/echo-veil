@@ -1,8 +1,9 @@
 # Agent runtime adapters
 
 Echo Veil exposes one bounded local tool contract to every supported host:
-`echo_veil_remember`, `echo_veil_recall`, `echo_veil_forget`, and
-`echo_veil_doctor`. Remember and forget are always explicit operations. Recall
+`echo_veil_remember`, `echo_veil_recall`, `echo_veil_forget`,
+`echo_veil_doctor`, and explicitly confirmed `echo_veil_reindex`. Remember and
+forget are always explicit operations. Recall
 advances the memory lifecycle and can return confidence-gated metadata without
 revealing a payload.
 
@@ -10,7 +11,9 @@ Install the Python command before using a standalone host configuration:
 
 ```bash
 uv tool install --from /absolute/path/to/echo-veil echo-veil
-echo-veil-agent --profile smoke-test doctor
+ollama pull qwen3-embedding:latest
+echo-veil-agent --profile smoke-test-qwen3 --embedder ollama \
+  --embedding-model qwen3-embedding:latest --embedding-dimension 1024 doctor
 ```
 
 For checkout development, the Codex and Claude Code bundles run the locked
@@ -29,13 +32,22 @@ when loaded from this repository.
 | Goose | Portable recipe with stdio extension | `goose recipe validate integrations/goose/echo-veil.yaml` |
 | Mercury | Guarded Agent Skill | Install `integrations/mercury/SKILL.md`; see its explicit host limitation |
 
-Each adapter defaults to a host-specific profile. This is intentional: profiles
-are authorization and concurrency boundaries. Set the same profile only when
+Each full adapter defaults to a versioned, host-specific Qwen3 profile. This is
+intentional: profiles are embedding-identity, authorization, and concurrency
+boundaries. Set the same profile only when
 the hosts represent the same local user and authorization domain, and do not
 run simultaneous writers against a shared live-L1 profile. SQLite safely
 persists checkpoints and lower tiers, but live L1 remains process memory.
 
-The local adapter uses AES-GCM staging protection and a deterministic
-keyword-oriented embedder. It is not the production CKKS/enclave/ZKP profile,
-does not silently capture conversations, and does not replace a host's payload
-authorization policy.
+The full adapters use `qwen3-embedding:latest` through loopback-only Ollama with
+1,024-dimensional output and instruction-aware recall queries. The model is not
+downloaded automatically. The deterministic hashing backend remains an
+explicit offline, keyword-oriented fallback. Neither mode is the production
+CKKS/enclave/ZKP profile, silently captures conversations, or replaces a host's
+payload authorization policy.
+
+Run `uv run --locked python scripts/quality_benchmark.py` before primary use,
+then benchmark the real authorized corpus. Existing hashing profiles must stay
+on hashing or use `scripts/migrate_hashing_profile.py` to re-embed into an empty
+Qwen3 profile without a plaintext export; incompatible embedding identities
+fail closed.

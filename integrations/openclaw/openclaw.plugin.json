@@ -35,7 +35,8 @@
       "echo_veil_remember",
       "echo_veil_recall",
       "echo_veil_forget",
-      "echo_veil_doctor"
+      "echo_veil_doctor",
+      "echo_veil_reindex"
     ]
   },
   "toolMetadata": {
@@ -47,6 +48,9 @@
     },
     "echo_veil_doctor": {
       "replaySafe": true
+    },
+    "echo_veil_reindex": {
+      "optional": true
     }
   }
 }

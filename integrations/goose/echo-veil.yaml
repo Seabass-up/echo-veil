@@ -10,6 +10,6 @@ extensions:
   - type: stdio
     name: echo-veil
     cmd: echo-veil-agent
-    args: ["--profile", "goose", "mcp"]
+    args: ["--profile", "goose-qwen3", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "mcp"]
 prompt: |
   Echo Veil is ready. Wait for a user request before remembering or forgetting.

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const MAX_OUTPUT_BYTES = 1_048_576;
 const MAX_ERROR_BYTES = 16_384;
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 export type EchoVeilInvocation = {
   command: string;
@@ -14,7 +14,10 @@ export type EchoVeilInvocation = {
 
 export function buildInvocation(): EchoVeilInvocation {
   const env = { ...process.env };
-  env.ECHO_VEIL_PROFILE = env.ECHO_VEIL_PROFILE || "pi";
+  env.ECHO_VEIL_PROFILE = env.ECHO_VEIL_PROFILE || "pi-qwen3";
+  env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
+  env.ECHO_VEIL_EMBEDDING_MODEL = env.ECHO_VEIL_EMBEDDING_MODEL || "qwen3-embedding:latest";
+  env.ECHO_VEIL_EMBEDDING_DIMENSION = env.ECHO_VEIL_EMBEDDING_DIMENSION || "1024";
   const executable = env.ECHO_VEIL_AGENT_COMMAND?.trim();
   if (executable) return { command: executable, args: ["rpc"], env };
 

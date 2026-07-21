@@ -35,6 +35,8 @@ test("server-renders the complete Echo Veil product page", async () => {
   assert.match(html, /A memory garden/);
   assert.match(html, /Customer &amp; field copilots/);
   assert.match(html, /The policy layer between/);
+  assert.match(html, /42 \/ 42 retrieval gate/);
+  assert.match(html, /not a universal product comparison/);
   assert.match(html, /OPENCLAW/);
   assert.match(html, /CLAUDE CODE/);
   assert.match(html, /MERCURY\*/);
