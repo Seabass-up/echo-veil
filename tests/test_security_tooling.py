@@ -44,9 +44,9 @@ def test_workflow_scanner_requires_immutable_action_refs(tmp_path: Path) -> None
 def test_release_metadata_is_consistent() -> None:
     root = Path(__file__).resolve().parents[1]
 
-    version, errors = check_metadata(root, "v0.4.0")
+    version, errors = check_metadata(root, "v0.5.0")
 
-    assert version == "0.4.0"
+    assert version == "0.5.0"
     assert errors == []
 
 

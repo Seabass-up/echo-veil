@@ -18,3 +18,6 @@ The linked checkout is detected automatically. For a standalone package,
 install the `echo-veil-agent` command or set `ECHO_VEIL_AGENT_COMMAND` to its
 executable path. Remember and forget remain explicit user-authorized actions;
 the extension does not capture prompts automatically or replace Pi's context.
+Recall preserves both leading candidates when `ranking_ambiguous=true`.
+Responses marked `degraded=true` are conservative lexical availability hints,
+not semantic or authoritative recall.

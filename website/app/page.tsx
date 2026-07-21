@@ -93,6 +93,7 @@ export default function Home() {
           <a href="#system">System</a>
           <a href="#use-cases">Use cases</a>
           <a href="#stack">Stack fit</a>
+          <a href="https://github.com/Seabass-up/echo-veil">GitHub ↗</a>
           <a className="nav-cta" href="#start">
             Explore Echo Veil <span aria-hidden="true">↗</span>
           </a>
@@ -102,7 +103,7 @@ export default function Home() {
       <section className="hero shell" id="top">
         <div className="hero-copy">
           <div className="eyebrow">
-            <span className="status-dot" /> Privacy-first memory for AI agents
+            <span className="status-dot" /> v0.5.0 · Protected semantic memory
           </div>
           <h1>
             Memory that knows
@@ -110,9 +111,10 @@ export default function Home() {
             <em>what to keep.</em>
           </h1>
           <p className="hero-lede">
-            Echo Veil is a living memory layer for AI systems—designed to keep
-            active context sharp, let stale knowledge rest, preserve
-            contradictions, and make uncertainty impossible to hide.
+            Echo Veil gives AI agents encrypted semantic recall with an
+            answerability check, visible ranking ambiguity, and a conservative
+            read-only layer that stays available when the embedding service does
+            not—without turning guesses into facts.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href="#system">
@@ -123,6 +125,7 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-proof" aria-label="Product attributes">
+            <span>Release v0.5.0</span>
             <span>Open source</span>
             <span>Commercial use free</span>
             <span>Fail-closed production mode</span>
@@ -312,7 +315,7 @@ export default function Home() {
 
           <div className="integration-notes">
             <div><span>QUALITY</span><strong>42 / 42 retrieval gate</strong><p>Local Qwen3 passed the committed keyword, paraphrase, update, temporal, and long-memory suite.*</p></div>
-            <div><span>OUTPUT</span><strong>Vine IDs + confidence</strong><p>Your host authorizes and loads the matching payload.</p></div>
+            <div><span>OUTPUT</span><strong>Answerable, not just similar</strong><p>Predicate matching rejects same-person records that do not answer the requested fact.</p></div>
             <div><span>BOUNDARY</span><strong>Fail-closed production</strong><p>Production requires the configured attested enclave shield.</p></div>
             <div className="host-support">
               <strong>Adapters for the agents you already use.</strong>
@@ -355,7 +358,7 @@ export default function Home() {
         <div className="cta-orbit" aria-hidden="true"><i /><i /><i /></div>
         <span className="section-index">MEMORY, WITH BETTER JUDGMENT</span>
         <h2>Give your agent<br /><em>a wiser memory.</em></h2>
-        <p>Open source under MIT. Free for personal and commercial use.</p>
+        <p>Echo Veil v0.5.0 · Open source under MIT · Free for personal and commercial use.</p>
         <div className="cta-actions">
           <a className="button button-primary" href="https://github.com/Seabass-up/echo-veil">View source on GitHub <span aria-hidden="true">↗</span></a>
           <a className="text-link" href="https://github.com/Seabass-up/echo-veil/blob/master/docs/AGENT_INTEGRATION.md">Read the integration guide <span aria-hidden="true">→</span></a>

@@ -51,9 +51,10 @@ Implemented and tested:
 - Reentrant locking around Oracle, Workspace, MetadataIndex, ColdArchive, and
   DriftDetector operations.
 - Automatic return-to-topic scoring and reinforcement for twilight vines.
-- A concrete local `AgentMemory` host adapter with stable hashing embeddings,
+- A concrete local `AgentMemory` host adapter with caller-selected embeddings,
   AES-GCM protected anchors, encrypted payload storage, exact-write
-  deduplication, and confidence-gated active/cold recall.
+  deduplication, confidence-gated active/cold recall, ambiguity telemetry, and
+  a read-only keyed availability floor for local embedding outages.
 - A bounded stdio MCP server for Codex, Claude Code, Hermes, OpenCode, Droid,
   and Goose, plus native OpenClaw and Pi packages. Every full adapter shares the
   same `AgentMemory` policy instead of reimplementing lifecycle rules per host.
@@ -167,6 +168,15 @@ Deployment-provided:
   `memory-core`, Active Memory, or Lossless Claw. A future automatic hook must
   define precedence, tenant boundaries, latency budgets, and deduplication
   before activation. Do not run two processes against one profile concurrently.
+- **The local availability layer is degraded recall, not a crypto or semantic
+  fallback.** It opens only an existing owner-protected payload database in
+  SQLite read-only mode, uses subject-masked keyed term overlap, and returns a
+  fixed degraded marker. Qualified raw overlap is mapped only into the
+  non-authoritative Fragmented Synthesis band and can never claim Coherent or
+  Solid confidence. It cannot write, forget, reindex, lower its calibrated
+  threshold, perform inferential recall, or mutate lifecycle state. Only local
+  Ollama service/model unavailability activates it; integrity, identity, key,
+  schema, and malformed-response failures remain hard stops.
 
 ## 5. Crypto shield: trust boundary
 

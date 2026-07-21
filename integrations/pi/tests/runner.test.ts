@@ -12,6 +12,9 @@ describe("Echo Veil Pi extension", () => {
       "echo_veil_doctor",
       "echo_veil_reindex",
     ]);
+    const recall = echoVeilTools.find((tool) => tool.name === "echo_veil_recall");
+    expect(JSON.stringify(recall?.parameters)).toContain('"minimum":2');
+    expect(recall?.description).toContain("not semantic or authoritative recall");
   });
 
   it("uses an isolated Pi profile and a shell-free invocation", () => {
@@ -23,6 +26,7 @@ describe("Echo Veil Pi extension", () => {
       expect(invocation.env.ECHO_VEIL_EMBEDDER).toBe("ollama");
       expect(invocation.env.ECHO_VEIL_EMBEDDING_MODEL).toBe("qwen3-embedding:latest");
       expect(invocation.env.ECHO_VEIL_EMBEDDING_DIMENSION).toBe("1024");
+      expect(invocation.env.ECHO_VEIL_AVAILABILITY_LAYER).toBe("true");
       expect(invocation.command).not.toMatch(/[;&|]/);
       expect(invocation.args.at(-1)).toBe("rpc");
     } finally {

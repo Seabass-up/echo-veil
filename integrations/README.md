@@ -7,6 +7,16 @@ forget are always explicit operations. Recall
 advances the memory lifecycle and can return confidence-gated metadata without
 revealing a payload.
 
+If local Ollama or the configured model is unavailable, every full adapter can
+use the same existing profile through an explicitly degraded read-only layer.
+It returns only strong encrypted keyed-term matches, marks
+`semantic_available=false`, and disables remember, forget, reindex,
+inferential recall, and lifecycle mutation until semantic service is restored.
+These results are lexical availability hints, not semantic or authoritative
+recall. Full callers preserve both leading candidates whenever
+`ranking_ambiguous=true`; the common RPC/MCP boundary enforces at least two
+recall slots for legacy callers.
+
 Install the Python command before using a standalone host configuration:
 
 ```bash
@@ -42,9 +52,11 @@ persists checkpoints and lower tiers, but live L1 remains process memory.
 The full adapters use `qwen3-embedding:latest` through loopback-only Ollama with
 1,024-dimensional output and instruction-aware recall queries. The model is not
 downloaded automatically. The deterministic hashing backend remains an
-explicit offline, keyword-oriented fallback. Neither mode is the production
-CKKS/enclave/ZKP profile, silently captures conversations, or replaces a host's
-payload authorization policy.
+explicit test/legacy keyword backend; it is not the outage layer. The outage
+layer reads the existing keyed index and never substitutes incompatible
+vectors. None of these modes is the production CKKS/enclave/ZKP profile,
+silently captures conversations, or replaces a host's payload authorization
+policy.
 
 Run `uv run --locked python scripts/quality_benchmark.py` before primary use,
 then benchmark the real authorized corpus. Existing hashing profiles must stay

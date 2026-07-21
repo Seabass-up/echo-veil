@@ -11,6 +11,7 @@
         "qwen3-embedding:latest",
         "--embedding-dimension",
         "1024",
+        "--availability-layer",
         "mcp"
       ],
       "env": {}

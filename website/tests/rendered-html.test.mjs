@@ -29,19 +29,25 @@ test("server-renders the complete Echo Veil product page", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>Echo Veil — A Wiser Memory for AI Agents<\/title>/i);
+  assert.match(
+    html,
+    /<title>Echo Veil v0\.5\.0 — Protected Semantic Memory for AI Agents<\/title>/i,
+  );
   assert.match(html, /Memory that knows/);
   assert.match(html, /what to keep\./);
   assert.match(html, /A memory garden/);
   assert.match(html, /Customer &amp; field copilots/);
   assert.match(html, /The policy layer between/);
   assert.match(html, /42 \/ 42 retrieval gate/);
+  assert.match(html, /Answerable, not just similar/);
   assert.match(html, /not a universal product comparison/);
   assert.match(html, /OPENCLAW/);
   assert.match(html, /CLAUDE CODE/);
   assert.match(html, /MERCURY\*/);
   assert.match(html, /Attested enclave \+ ZKP gate/);
   assert.match(html, /View source on GitHub/);
+  assert.match(html, /href="https:\/\/github\.com\/Seabass-up\/echo-veil">GitHub ↗<\/a>/);
+  assert.match(html, /Release v0\.5\.0/);
   assert.match(html, /docs\/AGENT_INTEGRATION\.md/);
   assert.match(html, /Skip to main content/);
   assert.match(html, /rel="canonical" href="https:\/\/echo\.algo-cli\.com\/"/);

@@ -5,11 +5,14 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-21
+
 ### Changed
 
 - Switched bundled full agent adapters to versioned local
   `qwen3-embedding:latest` profiles with instruction-aware queries,
-  1,024-dimensional output, and a calibrated `0.50` recall threshold.
+  1,024-dimensional output, a calibrated `0.44` broad-recall threshold, and a
+  separate `0.42` predicate-answerability threshold.
 - Persisted model digest, dimension, and query-instruction identity per profile
   so hashing, model updates, and incompatible dimensions cannot mix silently.
 - Replaced single-vector adapter retrieval with AES-GCM-protected passage
@@ -27,6 +30,18 @@ All notable changes to Echo Veil are documented here. The project follows
   comparison harness.
 - Added confirmed protected reindexing and an in-process hashing-to-Qwen profile
   migration that creates no plaintext export.
+- Added a subject-masked semantic answerability gate, batched broad/predicate
+  Ollama queries, per-result answerability diagnostics, and same-subject
+  absent-fact regression cases.
+- Added an encrypted read-only always-available recall layer for local Ollama
+  service/model outages, with conservative keyed predicate matching, explicit
+  degraded telemetry, disabled mutations, and outage coverage in the quality
+  gate.
+- Added ranking margin and ambiguity telemetry so close, relevant top results
+  remain visible instead of being forced through corpus-specific reranking.
+- Enforced two-candidate preservation at agent RPC/MCP boundaries, documented
+  degraded recall as non-semantic and non-authoritative in every full adapter,
+  and added OpenClaw fresh-process RPC latency telemetry.
 
 ## [0.4.0] - 2026-07-20
 
@@ -94,5 +109,6 @@ All notable changes to Echo Veil are documented here. The project follows
 - Secret generation, replay controls, bounded inputs, and encrypted key-transfer
   tooling are included and tested.
 
-[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/Seabass-up/echo-veil/releases/tag/v0.4.0
+[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Seabass-up/echo-veil/compare/v0.3.0...v0.5.0
+[0.4.0]: https://github.com/Seabass-up/echo-veil/tree/08de0b2de7d5e63c82209c9afaa54450a2aaec15

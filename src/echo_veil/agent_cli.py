@@ -13,11 +13,13 @@ from typing import Any, BinaryIO
 from . import __version__
 from .agent_memory import (
     AgentMemory,
+    AlwaysAvailableMemory,
     DEFAULT_CAPACITY,
     DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
     DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
+    EmbeddingUnavailable,
     HashingTextEmbedder,
     OllamaTextEmbedder,
     TextEmbedder,
@@ -25,12 +27,19 @@ from .agent_memory import (
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MAX_REQUEST_BYTES = 1_048_576
+MIN_HOST_RECALL_RESULTS = 2
 SERVER_INSTRUCTIONS = (
     "Echo Veil is opt-in agent memory. Call echo_veil_remember only for durable "
     "facts the user intends to retain. Call echo_veil_recall before relying on "
     "stored facts, respect gated results, and use echo_veil_forget for explicit "
-    "erasure. Do not treat this local adapter as a production enclave."
+    "erasure. When ranking_ambiguous=true, preserve both leading candidates and "
+    "do not collapse them into one asserted fact. A recall response with "
+    "degraded=true came from the conservative read-only availability layer, not "
+    "semantic or authoritative retrieval. Do not treat this local adapter as a "
+    "production enclave."
 )
+
+MemoryAdapter = AgentMemory | AlwaysAvailableMemory
 
 
 TOOLS: tuple[dict[str, Any], ...] = (
@@ -84,7 +93,11 @@ TOOLS: tuple[dict[str, Any], ...] = (
         "name": "echo_veil_recall",
         "description": (
             "Recall relevant local Echo Veil memories and advance their decay "
-            "lifecycle. Payloads are withheld when confidence policy gates them."
+            "lifecycle. During an embedding outage, an explicitly marked read-only "
+            "availability layer can return only strong keyed lexical matches. "
+            "Payloads are withheld when confidence policy gates them. Preserve "
+            "both leading results when ranking_ambiguous=true; degraded results "
+            "are neither semantic nor authoritative."
         ),
         "inputSchema": {
             "type": "object",
@@ -92,7 +105,15 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "required": ["query"],
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 20000},
-                "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                "top_k": {
+                    "type": "integer",
+                    "minimum": MIN_HOST_RECALL_RESULTS,
+                    "maximum": 20,
+                    "description": (
+                        "At least two candidates are retained so ranking ambiguity "
+                        "cannot be hidden by the caller."
+                    ),
+                },
                 "min_score": {
                     "type": "number",
                     "minimum": 0,
@@ -186,7 +207,7 @@ TOOLS: tuple[dict[str, Any], ...] = (
 
 
 def dispatch(
-    memory: AgentMemory, action: str, arguments: Mapping[str, Any]
+    memory: MemoryAdapter, action: str, arguments: Mapping[str, Any]
 ) -> dict[str, Any]:
     if not isinstance(action, str):
         raise TypeError("action must be a string")
@@ -206,13 +227,23 @@ def dispatch(
             supplied,
             {"query", "top_k", "min_score", "allow_inferential", "as_of"},
         )
-        return memory.recall(
+        requested_top_k = supplied.get("top_k", 5)
+        if isinstance(requested_top_k, bool) or not isinstance(requested_top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= requested_top_k <= 20:
+            raise ValueError("top_k must be between 1 and 20")
+        effective_top_k = max(MIN_HOST_RECALL_RESULTS, requested_top_k)
+        response = memory.recall(
             query=_required_string(supplied, "query"),
-            top_k=supplied.get("top_k", 5),  # type: ignore[arg-type]
+            top_k=effective_top_k,
             min_score=supplied.get("min_score"),  # type: ignore[arg-type]
             allow_inferential=supplied.get("allow_inferential", False),  # type: ignore[arg-type]
             as_of=supplied.get("as_of"),  # type: ignore[arg-type]
         )
+        response["requested_top_k"] = requested_top_k
+        response["effective_top_k"] = effective_top_k
+        response["ambiguity_candidates_preserved"] = effective_top_k >= 2
+        return response
     if action in {"forget", "echo_veil_forget"}:
         _require_only(supplied, {"vine_id"})
         return memory.forget(_required_string(supplied, "vine_id"))
@@ -228,7 +259,7 @@ def dispatch(
 
 
 class McpServer:
-    def __init__(self, memory: AgentMemory) -> None:
+    def __init__(self, memory: MemoryAdapter) -> None:
         self.memory = memory
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -288,7 +319,7 @@ class McpServer:
         )
 
 
-def run_mcp(memory: AgentMemory) -> int:
+def run_mcp(memory: MemoryAdapter) -> int:
     server = McpServer(memory)
     while True:
         raw_line, oversized = _read_mcp_line(sys.stdin.buffer)
@@ -327,7 +358,7 @@ def _read_mcp_line(stream: BinaryIO) -> tuple[bytes, bool]:
     return raw_line, oversized
 
 
-def run_rpc(memory: AgentMemory) -> int:
+def run_rpc(memory: MemoryAdapter) -> int:
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds size limit")
@@ -381,6 +412,15 @@ def build_parser() -> argparse.ArgumentParser:
             DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
         ),
     )
+    parser.add_argument(
+        "--availability-layer",
+        action=argparse.BooleanOptionalAction,
+        default=_bool_from_env("ECHO_VEIL_AVAILABILITY_LAYER", True),
+        help=(
+            "use explicit read-only keyed recall when local semantic embeddings "
+            "are unavailable (enabled by default)"
+        ),
+    )
     parser.add_argument("mode", choices=("rpc", "mcp", "doctor"))
     return parser
 
@@ -388,13 +428,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        embedder = _build_embedder(args)
-        with AgentMemory(
-            args.state_dir,
-            profile=args.profile,
-            capacity=args.capacity,
-            embed=embedder,
-        ) as memory:
+        try:
+            embedder = _build_embedder(args)
+            memory: MemoryAdapter = AgentMemory(
+                args.state_dir,
+                profile=args.profile,
+                capacity=args.capacity,
+                embed=embedder,
+            )
+        except EmbeddingUnavailable:
+            if args.embedder != "ollama" or not args.availability_layer:
+                raise
+            memory = AlwaysAvailableMemory(
+                args.state_dir,
+                profile=args.profile,
+            )
+        with memory:
             if args.mode == "mcp":
                 return run_mcp(memory)
             if args.mode == "rpc":
@@ -432,6 +481,18 @@ def _float_from_env(name: str, default: float) -> float:
         return float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number") from exc
+
+
+def _bool_from_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 def _build_embedder(args: argparse.Namespace) -> TextEmbedder:

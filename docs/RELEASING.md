@@ -83,8 +83,8 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
 6. Create and push an annotated tag from the protected release commit:
 
    ```bash
-   git tag -a v0.4.0 -m "Echo Veil v0.4.0"
-   git push origin v0.4.0
+   git tag -a v0.5.0 -m "Echo Veil v0.5.0"
+   git push origin v0.5.0
    ```
 
 7. Manually run the `Release` workflow with that exact tag.
@@ -104,6 +104,6 @@ sha256sum --check SHA256SUMS
 For a public repository, verify GitHub provenance with the GitHub CLI:
 
 ```bash
-gh attestation verify echo_veil-0.4.0-py3-none-any.whl \
+gh attestation verify echo_veil-0.5.0-py3-none-any.whl \
   --repo Seabass-up/echo-veil
 ```

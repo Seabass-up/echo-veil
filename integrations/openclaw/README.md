@@ -26,3 +26,8 @@ OpenClaw share memories only when both are configured with the same values.
 
 The integration is opt-in: it does not capture every message or replace
 OpenClaw's configured memory provider/context engine.
+
+Recall preserves both leading candidates when `ranking_ambiguous=true` and
+labels `degraded=true` results as non-semantic, non-authoritative availability
+hints. Each response includes `host_transport.elapsed_ms` so fresh-process RPC
+overhead can be tracked separately from Echo Veil's in-process recall time.

@@ -1,7 +1,7 @@
 ---
 name: echo-veil
 description: Check Echo Veil readiness and explain its safe memory boundary in Mercury.
-version: 0.4.0
+version: 0.5.0
 category: developer-tools
 intents:
   - echo veil memory

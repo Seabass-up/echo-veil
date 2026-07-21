@@ -10,7 +10,7 @@ eventually archived, and contradictory information is preserved as structured
 tension rather than overwritten. This repository implements the core of the
 Echo Veil v1.0 specification (`docs/SPEC.md`).
 
-> **Status: 0.4.0 — durable active memory, indexed retrieval, and deployable confidential compute.**
+> **Status: 0.5.0 — protected semantic recall with a conservative availability floor.**
 > The memory lifecycle, conflict handling, drift detection, capability reporting,
 > confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
 > and tested. The repository includes an Azure SEV-SNP origin using OpenFHE CKKS,
@@ -59,13 +59,30 @@ uv run --locked python scripts/quality_benchmark.py
 ```
 
 The primary quality gate qualifies 42 keyword, paraphrase, update, temporal,
-and long-memory queries plus 10 unrelated distractors against a neutral
-synthetic corpus. It also measures cold start, restart restoration, and recall
-latency. It is a reproducible regression gate, not a universal recall claim.
+and long-memory queries plus 14 unrelated and same-subject/absent-fact
+distractors against a neutral synthetic corpus. Semantic recall uses a second
+predicate-focused answerability gate to reject records that mention the right
+subject but do not contain the requested fact. The gate also measures cold
+start, restart restoration, and recall latency. It is a reproducible regression
+gate, not a universal recall claim.
 See [`docs/QUALITY.md`](docs/QUALITY.md) for methodology and the current
 same-corpus comparison. Echo Veil stores the resolved model digest, dimension,
 and query-instruction identity with each profile and refuses to mix incompatible
 vectors.
+
+If the configured local Ollama service or model is unavailable, the executable
+adapter can open an existing profile through an always-available read-only
+layer. It uses only the encrypted keyed predicate index, requires conservative
+term coverage, returns `degraded=true`, and disables remember, forget, reindex,
+inferential recall, and lifecycle mutation. It never substitutes hashing
+vectors or describes the result as semantic retrieval. Disable this path with
+`--no-availability-layer` or `ECHO_VEIL_AVAILABILITY_LAYER=false`.
+
+Agent-facing recall keeps at least two candidates so a close ranking cannot be
+hidden by `top_k=1`. When `ranking_ambiguous=true`, callers must preserve both
+leading records. OpenClaw responses include `host_transport.elapsed_ms` for the
+fresh-process RPC boundary; this operational latency is reported separately
+from the in-process semantic-recall benchmark.
 
 Legacy hashing profiles can be rehydrated into a fresh Qwen3 profile without a
 plaintext export:
@@ -245,6 +262,11 @@ SBOM generation, and provenance requirements are documented in
   keyword-oriented recall, but is not presented as semantic retrieval. The
   Echo Veil core still accepts caller-owned stable embeddings and has no
   implicit network embedding dependency.
+- **Local recall has a bounded availability floor.** A pre-existing adapter
+  profile can be opened read-only when Ollama or its configured model is
+  unavailable. Only strong subject-masked keyed-term matches are returned;
+  every response is marked degraded, semantic/answerability claims are absent,
+  and all writes and lifecycle mutation remain disabled.
 - **Eviction is retry-safe.** An archive/index failure leaves an evicted vine
   pending and retriable; pruning happens only after both lower-tier writes have
   succeeded. Building the L2 entry no longer restores plaintext onto an

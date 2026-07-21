@@ -78,3 +78,15 @@ a production blocker until an independent reviewer is recorded.
   logs contain fixed reason codes rather than assertions, secrets, or bodies.
 - `enclave-origin.algo-cli.com` remains DNS-only. Proxying that hostname through
   Cloudflare would invalidate the Worker mTLS origin design.
+
+## Local adapter availability boundary
+
+The local staging adapter has a separate, non-production availability path for
+an unavailable local Ollama service or configured model. It can read an existing
+owner-only encrypted payload database and keyed term index, but it does not run
+semantic embeddings, answerability verification, CKKS, enclave operations, or
+the ZKP gate. Every response is marked degraded and read-only; writes,
+inferential recall, reindexing, erasure, and lifecycle mutation are disabled.
+Availability confidence is capped below the Coherent Assembly threshold.
+This path does not satisfy or weaken any production invariant above and is not
+used by the confidential origin.

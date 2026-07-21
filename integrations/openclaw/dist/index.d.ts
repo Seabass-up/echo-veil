@@ -13,6 +13,7 @@ export type EchoVeilInvocation = {
     env: NodeJS.ProcessEnv;
     timeoutMs: number;
 };
+export declare function addRpcTelemetry(value: unknown, elapsedMs: number): unknown;
 export declare function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation;
 export declare function runEchoVeilRpc(action: string, argumentsValue: Record<string, unknown>, config: EchoVeilConfig, signal?: AbortSignal): Promise<unknown>;
 declare const _default: import("openclaw/plugin-sdk/tool-plugin").DefinedToolPluginEntry;

@@ -20,10 +20,39 @@ does not satisfy the production enclave profile.
 
 The bundled full adapters explicitly select `qwen3-embedding:latest` through a
 loopback-only Ollama client. Documents are embedded without a prefix; recall
-queries use Qwen3's retrieval-instruction format. The default output dimension
-is 1,024 and the calibrated minimum recall score is `0.50`. The adapter never
-auto-pulls a model, follows redirects, contacts a non-loopback origin, or falls
-back silently to hashing.
+queries use Qwen3's retrieval-instruction format. Each recall also creates a
+subject-masked, predicate-focused query and requires its best protected passage
+match to reach `0.42`. Both query vectors are generated in one bounded local
+Ollama request. The default output dimension is 1,024 and the calibrated broad
+recall minimum is `0.44`. The adapter never auto-pulls a model, follows
+redirects, contacts a non-loopback origin, or falls back silently to hashing.
+
+Recall responses expose `answerability_min_score`,
+`answerability_rejected_count`, and a per-result `answerability_score` for
+diagnosis. `echo_veil_doctor` reports `semantic-predicate-v1` when the gate is
+active and `unavailable` for hashing or custom embedders that do not implement
+it. The transform is syntax-based and contains no person names, domain-specific
+terms, or lists of sensitive attributes.
+
+### Always-available read-only recall
+
+The executable adapter enables a conservative availability layer by default.
+When the local Ollama service or configured model cannot run, it opens only an
+existing owner-protected profile and queries the persisted keyed lexical index
+at a minimum predicate score of `0.45` with at least two matched features.
+Responses set `mode=always-available-read-only`, `degraded=true`,
+`semantic_available=false`, and `lifecycle_mutated=false`. Per-result confidence
+is capped in `fragmented_synthesis`; `availability_score` exposes the raw keyed
+overlap separately. Callers must not describe it as semantic recall, coherent
+assembly, or authoritative delivery.
+
+The layer is SQLite read-only and cannot create a profile, remember, forget,
+reindex, lower its safe threshold, authorize inferential recall, or mutate decay
+and reinforcement state. Paraphrases may be missed. Corrupt storage, invalid
+keys, model-identity mismatch, malformed embedding responses, and other trust
+failures still stop the adapter rather than entering degraded mode. Disable the
+outage path with `--no-availability-layer` or
+`ECHO_VEIL_AVAILABILITY_LAYER=false`.
 
 ```bash
 ollama pull qwen3-embedding:latest
@@ -73,8 +102,9 @@ avoids duplicate automatic recall while the policy layer is evaluated.
 `ECHO_VEIL_STATE_DIR` and `ECHO_VEIL_PROFILE` select storage. The embedding
 backend is selected with `ECHO_VEIL_EMBEDDER`; Ollama model, dimension, URL, and
 timeout use the corresponding `ECHO_VEIL_EMBEDDING_*` and
-`ECHO_VEIL_OLLAMA_URL` variables. Bundled adapters use a versioned Qwen3 profile
-per host. Profiles are authorization and concurrency
+`ECHO_VEIL_OLLAMA_URL` variables. `ECHO_VEIL_AVAILABILITY_LAYER` controls the
+read-only outage path. Bundled adapters use a versioned Qwen3 profile per host.
+Profiles are authorization and concurrency
 boundaries: share one only when the hosts represent the same local user and
 authorization domain, and avoid simultaneous writers because live L1 remains
 process memory even though SQLite persistence is cross-process safe.
@@ -98,9 +128,19 @@ mismatch check.
 The bundled adapter's retrieval path uses encrypted passage vectors with
 MaxSim, keyed-hash lexical features, topic-aware MMR diversity, and explicit
 `effective_at`/`supersedes` metadata. `recall(as_of=...)` can select the fact
-valid at a historical point without discarding later corrections. Run
+valid at a historical point without discarding later corrections. Responses
+also report `ranking_margin` and `ranking_ambiguous`; callers should retain both
+leading records when the margin is at most `0.05` instead of pretending an
+adjacent policy or responsibility record is a certain winner. Run
 `echo_veil_reindex` after upgrading an existing profile so its derived protected
 retrieval data matches the current schema.
+
+The RPC/MCP boundary defensively uses at least two recall slots even if a legacy
+caller requests `top_k=1`; the response reports `requested_top_k`,
+`effective_top_k`, and `ambiguity_candidates_preserved`. Native OpenClaw and Pi
+schemas require a minimum of two. OpenClaw also reports the measured
+fresh-process boundary as `host_transport.elapsed_ms`; do not compare that host
+and process startup number directly with in-process retrieval latency.
 
 Mercury is intentionally readiness-only. Its current public documentation
 supports Agent Skills but not arbitrary MCP or structured custom-tool

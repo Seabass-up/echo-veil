@@ -10,11 +10,14 @@ from typing import Any
 import numpy as np
 import pytest
 
+import echo_veil.agent_cli as agent_cli
 from echo_veil.agent_cli import MAX_REQUEST_BYTES, McpServer, TOOLS, _read_mcp_line
 import echo_veil.agent_memory as agent_memory
 from echo_veil.agent_memory import (
     AgentMemory,
+    AlwaysAvailableMemory,
     DEFAULT_SEMANTIC_MIN_SCORE,
+    EmbeddingUnavailable,
     HashingTextEmbedder,
     OllamaTextEmbedder,
 )
@@ -68,6 +71,73 @@ def test_semantic_embedder_uses_calibrated_default_and_rejects_distractor(
         "Current project documents live here."
     )
     assert distractor["results"] == []
+
+
+def test_semantic_answerability_rejects_same_subject_absent_fact(
+    tmp_path: Path,
+) -> None:
+    class AnswerabilityEmbedder(_SemanticTestEmbedder):
+        identity = "test:answerability:v1:dimension:32"
+
+        def embed_query(self, _text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[0] = 1.0
+            return vector
+
+        def embed_answerability_query(
+            self, text: str
+        ) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[1 if "passport" in text else 0] = 1.0
+            return vector
+
+    with AgentMemory(tmp_path, embed=AnswerabilityEmbedder()) as memory:
+        memory.remember(
+            "Taylor family",
+            "Taylor's children are Morgan, Riley, and Casey.",
+        )
+
+        answerable = memory.recall("Who are Taylor's children?")
+        absent = memory.recall("What is Taylor's passport number?")
+        report = memory.doctor()
+
+    assert answerable["results"][0]["answerability_score"] == 1.0
+    assert absent["results"] == []
+    assert absent["answerability_rejected_count"] == 1
+    assert report["retrieval"]["answerability_gate"] == "semantic-predicate-v1"
+
+
+def test_close_semantic_results_are_reported_as_ranking_ambiguity(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        memory.remember("first policy", "The first policy applies.")
+        memory.remember("second policy", "The second policy applies.")
+
+        recalled = memory.recall("Which rule applies?", top_k=2)
+
+    assert [item["rank"] for item in recalled["results"]] == [1, 2]
+    assert recalled["ranking_margin"] == 0.0
+    assert recalled["ranking_ambiguous"] is True
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("What is Taylor's passport number?", "What is passport number?"),
+        ("Which team does Taylor support?", "Which team does support?"),
+        ("Does the family have a dog?", "is there a dog?"),
+        (
+            "How should J-space ideas be treated?",
+            "How should J-space ideas be treated?",
+        ),
+    ],
+)
+def test_predicate_query_masks_subject_without_domain_rules(
+    query: str,
+    expected: str,
+) -> None:
+    assert agent_memory._predicate_query(query) == expected
 
 
 def test_profile_rejects_embedding_identity_changes(tmp_path: Path) -> None:
@@ -136,7 +206,8 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
                 )
             vector = [0.0] * 32
             vector[0] = 2.0
-            return Response({"embeddings": [vector]})
+            body = json.loads(requests[-1][2] or b"{}")
+            return Response({"embeddings": [vector for _ in body["input"]]})
 
         def close(self) -> None:
             return None
@@ -144,16 +215,21 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
     embedder = OllamaTextEmbedder(dimension=32, timeout_seconds=2)
     document = embedder.embed_document("The launch code is blue.")
-    query = embedder.embed_query("What color is the launch code?")
+    query, answerability = embedder.embed_retrieval_queries(
+        "What is Taylor's passport number?"
+    )
 
     assert f"@sha256:{digest}" in embedder.identity
     assert np.linalg.norm(document) == pytest.approx(1.0)
     assert np.linalg.norm(query) == pytest.approx(1.0)
+    assert np.linalg.norm(answerability) == pytest.approx(1.0)
     document_body = json.loads(requests[-2][2] or b"{}")
     query_body = json.loads(requests[-1][2] or b"{}")
     assert document_body["input"] == ["The launch code is blue."]
     assert query_body["input"][0].startswith("Instruct: ")
-    assert query_body["input"][0].endswith("Query: What color is the launch code?")
+    assert "Taylor" not in query_body["input"][1]
+    assert query_body["input"][1].endswith("Query: What is passport number?")
+    assert query_body["input"][0].endswith("Query: What is Taylor's passport number?")
 
     with pytest.raises(ValueError, match="loopback IP literal"):
         OllamaTextEmbedder(base_url="http://localhost:11434", dimension=32)
@@ -177,6 +253,107 @@ def test_ollama_unavailable_fails_closed_without_hashing_fallback(
     monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
     with pytest.raises(RuntimeError, match="service is unavailable"):
         OllamaTextEmbedder(dimension=32)
+
+
+def test_always_available_layer_is_read_only_explicit_and_conservative(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        created = memory.remember(
+            "deployment recovery procedure",
+            "Use the opal harbor recovery procedure during a deployment outage.",
+        )
+        memory.remember(
+            "Taylor family",
+            "Taylor's children are Morgan, Riley, and Casey.",
+        )
+    payload_database = tmp_path / "default" / "payloads.db"
+    before = payload_database.read_bytes()
+    lifecycle_database = tmp_path / "default" / "echo-veil.db"
+    lifecycle_before = lifecycle_database.read_bytes()
+
+    with AlwaysAvailableMemory(
+        tmp_path,
+        reason="synthetic_embedding_outage",
+    ) as available:
+        recalled = available.recall("deployment recovery procedure opal harbor outage")
+        paraphrase = available.recall("How should we get the service working again?")
+        absent = available.recall("What is Taylor's passport number?")
+        doctor = available.doctor()
+
+        assert recalled["results"][0]["vine_id"] == created["vine_id"]
+        assert recalled["degraded"] is True
+        assert recalled["semantic_available"] is False
+        assert recalled["lifecycle_mutated"] is False
+        assert recalled["results"][0]["confidence_band"] == ("fragmented_synthesis")
+        assert recalled["results"][0]["score"] < 0.70
+        assert recalled["results"][0]["availability_score"] >= 0.45
+        assert paraphrase["results"] == []
+        assert absent["results"] == []
+        assert doctor["mode"] == "always-available-read-only"
+        assert doctor["writes_available"] is False
+        with pytest.raises(ValueError, match="safe default"):
+            available.recall("deployment recovery", min_score=0.44)
+        with pytest.raises(RuntimeError, match="read-only"):
+            available.remember("new", "not allowed")
+        with pytest.raises(RuntimeError, match="read-only"):
+            available.forget(str(created["vine_id"]))
+        with pytest.raises(RuntimeError, match="read-only"):
+            available.reindex()
+
+    assert payload_database.read_bytes() == before
+    assert lifecycle_database.read_bytes() == lifecycle_before
+
+
+def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with AgentMemory(
+        tmp_path, profile="semantic", embed=_SemanticTestEmbedder()
+    ) as memory:
+        memory.remember("offline runbook", "Use the offline runbook during outage.")
+
+    def unavailable(_args: object) -> object:
+        raise EmbeddingUnavailable("synthetic outage")
+
+    observed: dict[str, object] = {}
+
+    def run_rpc(memory: object) -> int:
+        observed["memory"] = memory
+        return 0
+
+    monkeypatch.setattr(agent_cli, "_build_embedder", unavailable)
+    monkeypatch.setattr(agent_cli, "run_rpc", run_rpc)
+
+    result = agent_cli.main(
+        [
+            "--state-dir",
+            str(tmp_path),
+            "--profile",
+            "semantic",
+            "--embedder",
+            "ollama",
+            "rpc",
+        ]
+    )
+
+    assert result == 0
+    assert isinstance(observed["memory"], AlwaysAvailableMemory)
+
+    disabled = agent_cli.main(
+        [
+            "--state-dir",
+            str(tmp_path),
+            "--profile",
+            "semantic",
+            "--embedder",
+            "ollama",
+            "--no-availability-layer",
+            "rpc",
+        ]
+    )
+    assert disabled == 1
 
 
 def test_agent_memory_persists_deduplicates_recalls_and_forgets(tmp_path: Path) -> None:
@@ -338,6 +515,8 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
     assert report["profile"] == "default"
     assert "profile_dir" not in report
     assert report["key_owner_only"] is True
+    assert report["retrieval"]["answerability_gate"] == "unavailable"
+    assert report["retrieval"]["answerability_min_score"] is None
     assert report["capability_report"]["overall_status"] == "blocked"
     assert any("not the production enclave" in item for item in report["limitations"])
 
@@ -429,6 +608,11 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
     assert initialized["result"]["serverInfo"]["name"] == "echo-veil"
     assert listed is not None
     assert len(listed["result"]["tools"]) == 5
+    recall_tool = next(
+        tool for tool in listed["result"]["tools"] if tool["name"] == "echo_veil_recall"
+    )
+    assert recall_tool["inputSchema"]["properties"]["top_k"]["minimum"] == 2
+    assert "not semantic or authoritative" in initialized["result"]["instructions"]
     assert remembered is not None
     assert remembered["result"]["isError"] is False
     assert remembered["result"]["structuredContent"]["created"] is True
@@ -437,6 +621,26 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
     assert reindexed is not None
     assert reindexed["result"]["isError"] is False
     assert reindexed["result"]["structuredContent"]["reindexed"] == 1
+
+
+def test_rpc_recall_preserves_ambiguous_pair_when_one_result_requested(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        memory.remember("first policy", "The first policy applies.")
+        memory.remember("second policy", "The second policy applies.")
+
+        recalled = agent_cli.dispatch(
+            memory,
+            "recall",
+            {"query": "Which rule applies?", "top_k": 1},
+        )
+
+    assert len(recalled["results"]) == 2
+    assert recalled["ranking_ambiguous"] is True
+    assert recalled["requested_top_k"] == 1
+    assert recalled["effective_top_k"] == 2
+    assert recalled["ambiguity_candidates_preserved"] is True
 
 
 def test_mcp_line_reader_bounds_and_drains_oversized_requests() -> None:

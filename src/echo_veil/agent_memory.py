@@ -52,7 +52,9 @@ DEFAULT_EMBEDDING_DIMENSION = 384
 DEFAULT_OLLAMA_EMBEDDING_DIMENSION = 1024
 DEFAULT_OLLAMA_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_SEMANTIC_MIN_SCORE = 0.50
+DEFAULT_SEMANTIC_MIN_SCORE = 0.44
+DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
+DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
 DEFAULT_HASHING_MIN_SCORE = 0.35
 DEFAULT_CAPACITY = 400
 MAX_TOPIC_CHARS = 512
@@ -67,11 +69,18 @@ MAX_LEXICAL_FEATURES = 4_096
 MAX_QUERY_FEATURES = 256
 MAX_RETRIEVAL_CANDIDATES = 900
 LEXICAL_BOOST = 0.35
+ANSWERABILITY_BOOST = 0.20
+MIN_AVAILABILITY_FEATURES = 2
+AMBIGUOUS_RANKING_MARGIN = 0.05
 MMR_RELEVANCE_WEIGHT = 0.88
 RETRIEVAL_SCHEMA_VERSION = "protected-hybrid-maxsim-v1"
 MEMORY_QUERY_INSTRUCTION = (
     "Given a memory recall query, retrieve the stored personal or operational "
     "memory that answers it"
+)
+ANSWERABILITY_QUERY_INSTRUCTION = (
+    "Retrieve a stored memory passage only when it explicitly contains the answer "
+    "to the requested attribute or predicate. Ignore subject-only similarity."
 )
 _PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
@@ -116,6 +125,7 @@ _STOPWORDS = frozenset(
 class _StoredCandidate:
     vine_id: str
     semantic_score: float | None
+    answerability_score: float | None
     lexical_score: float
     best_vector: NDArray[np.float64] | None
     topic: str
@@ -131,6 +141,7 @@ class _RankedCandidate:
     source: str
     relevance_score: float
     semantic_score: float | None
+    answerability_score: float | None
     lexical_score: float
     lifecycle_score: float | None
     best_vector: NDArray[np.float64] | None
@@ -138,6 +149,24 @@ class _RankedCandidate:
     superseded_by: str | None
     superseded_at: float | None
     temporal_current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AvailabilityCandidate:
+    vine_id: str
+    topic: str
+    score: float
+    lexical_score: float
+    predicate_score: float
+    matched_features: int
+    effective_at: float
+    superseded_by: str | None
+    superseded_at: float | None
+    temporal_current: bool
+
+
+class EmbeddingUnavailable(RuntimeError):
+    """The configured local embedding service or model cannot currently run."""
 
 
 @dataclass(frozen=True)
@@ -324,6 +353,28 @@ class OllamaTextEmbedder:
         instructed = f"Instruct: {self._query_instruction}\nQuery: {clean}"
         return self._embed(instructed)
 
+    def embed_retrieval_queries(
+        self, text: str
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Batch broad-recall and predicate-focused queries in one local request."""
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        predicate_query = _predicate_query(clean)
+        broad = f"Instruct: {self._query_instruction}\nQuery: {clean}"
+        answerability = (
+            f"Instruct: {ANSWERABILITY_QUERY_INSTRUCTION}\nQuery: {predicate_query}"
+        )
+        broad_vector, answerability_vector = self._embed_batch([broad, answerability])
+        return broad_vector, answerability_vector
+
+    def embed_answerability_query(self, text: str) -> NDArray[np.float64]:
+        """Embed the requested predicate without letting subject identity dominate."""
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        predicate_query = _predicate_query(clean)
+        instructed = (
+            f"Instruct: {ANSWERABILITY_QUERY_INSTRUCTION}\nQuery: {predicate_query}"
+        )
+        return self._embed(instructed)
+
     def __call__(self, text: str) -> NDArray[np.float64]:
         return self.embed_document(text)
 
@@ -388,7 +439,7 @@ class OllamaTextEmbedder:
             ):
                 raise RuntimeError("local Ollama model metadata is incomplete")
             return digest, maximum_dimension
-        raise RuntimeError(
+        raise EmbeddingUnavailable(
             f"required local Ollama model is not installed: {self.model}"
         )
 
@@ -420,11 +471,16 @@ class OllamaTextEmbedder:
             status = response.status
             encoded = response.read(MAX_EMBEDDING_RESPONSE_BYTES + 1)
         except (OSError, http.client.HTTPException) as exc:
-            raise RuntimeError("local Ollama embedding service is unavailable") from exc
+            raise EmbeddingUnavailable(
+                "local Ollama embedding service is unavailable"
+            ) from exc
         finally:
             connection.close()
         if status != 200:
-            raise RuntimeError(
+            error_type = (
+                EmbeddingUnavailable if status in {502, 503, 504} else RuntimeError
+            )
+            raise error_type(
                 f"local Ollama embedding request failed with HTTP {status}"
             )
         if len(encoded) > MAX_EMBEDDING_RESPONSE_BYTES:
@@ -476,18 +532,32 @@ class _CallableTextEmbedder:
 class _EncryptedPayloadStore:
     """Caller-owned encrypted content store keyed by Echo Veil vine id."""
 
-    def __init__(self, path: Path, key: bytes) -> None:
+    def __init__(self, path: Path, key: bytes, *, read_only: bool = False) -> None:
         self.path = path
-        _secure_regular_file(path)
+        self._read_only = read_only
+        if read_only:
+            _require_secure_regular_file(path, "payload database")
+            database = f"{path.resolve().as_uri()}?mode=ro"
+        else:
+            _secure_regular_file(path)
+            database = str(path)
         self._cipher = AESGCM(key)
         self._dedupe_key = key
         self._connection = sqlite3.connect(
-            str(path), timeout=5.0, isolation_level=None, check_same_thread=False
+            database,
+            timeout=5.0,
+            isolation_level=None,
+            check_same_thread=False,
+            uri=read_only,
         )
         try:
             self._connection.execute("PRAGMA busy_timeout = 5000")
-            self._connection.execute("PRAGMA secure_delete = ON")
             self._connection.execute("PRAGMA trusted_schema = OFF")
+            if read_only:
+                self._connection.execute("PRAGMA query_only = ON")
+                self._validate_existing_schema()
+                return
+            self._connection.execute("PRAGMA secure_delete = ON")
             self._connection.execute("PRAGMA synchronous = FULL")
             mode = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
             if mode is None or str(mode[0]).lower() != "wal":
@@ -547,6 +617,15 @@ class _EncryptedPayloadStore:
         except Exception:
             self._connection.close()
             raise
+
+    def _validate_existing_schema(self) -> None:
+        required = {"payloads", "adapter_metadata", "memory_terms"}
+        rows = self._connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table'"
+        ).fetchall()
+        present = {str(row[0]) for row in rows}
+        if not required.issubset(present):
+            raise RuntimeError("payload database is missing availability index data")
 
     def _ensure_payload_column(self, name: str, declaration: str) -> None:
         columns = {
@@ -723,8 +802,18 @@ class _EncryptedPayloadStore:
         intent: NDArray[np.float64],
         query: str,
         semantic_candidate_ids: list[str],
+        answerability_intent: NDArray[np.float64] | None = None,
     ) -> dict[str, _StoredCandidate]:
         query_vector = _normalize_embedding_vector(intent)
+        answerability_vector = (
+            None
+            if answerability_intent is None
+            else _normalize_embedding_vector(
+                answerability_intent,
+                expected_dimension=query_vector.size,
+                source="answerability embedder",
+            )
+        )
         lexical = self._lexical_scores(query)
         ordered_ids = list(dict.fromkeys(semantic_candidate_ids))[
             :MAX_RETRIEVAL_CANDIDATES
@@ -744,6 +833,7 @@ class _EncryptedPayloadStore:
         placeholders = ",".join("?" for _ in candidate_ids)
         parameters = tuple(sorted(candidate_ids))
         semantic: dict[str, tuple[float, NDArray[np.float64]]] = {}
+        answerability: dict[str, float] = {}
         cursor = self._connection.execute(
             f"""
             SELECT vine_id, ordinal, nonce, ciphertext, dimension
@@ -782,6 +872,14 @@ class _EncryptedPayloadStore:
             current = semantic.get(vine_id)
             if current is None or score > current[0]:
                 semantic[vine_id] = (score, vector)
+            if answerability_vector is not None:
+                answerability_score = cosine_similarity(answerability_vector, vector)
+                current_answerability = answerability.get(vine_id)
+                if (
+                    current_answerability is None
+                    or answerability_score > current_answerability
+                ):
+                    answerability[vine_id] = answerability_score
 
         rows = self._connection.execute(
             f"""
@@ -798,6 +896,7 @@ class _EncryptedPayloadStore:
             candidates[vine_id] = _StoredCandidate(
                 vine_id=vine_id,
                 semantic_score=None if semantic_entry is None else semantic_entry[0],
+                answerability_score=answerability.get(vine_id),
                 lexical_score=lexical.get(vine_id, 0.0),
                 best_vector=None if semantic_entry is None else semantic_entry[1],
                 topic=str(row[1]),
@@ -911,7 +1010,7 @@ class _EncryptedPayloadStore:
             for feature, count in raw.items()
         }
 
-    def _lexical_scores(self, query: str) -> dict[str, float]:
+    def _lexical_matches(self, query: str) -> dict[str, tuple[float, int]]:
         query_terms = self._term_features(query, MAX_QUERY_FEATURES)
         if not query_terms:
             return {}
@@ -936,13 +1035,81 @@ class _EncryptedPayloadStore:
         query_count = sum(query_terms.values())
         query_unique = len(query_terms)
         return {
-            vine_id: min(
-                1.0,
-                0.7 * (matched_counts[vine_id] / query_count)
-                + 0.3 * (matched_unique[vine_id] / query_unique),
+            vine_id: (
+                min(
+                    1.0,
+                    0.7 * (matched_counts[vine_id] / query_count)
+                    + 0.3 * (matched_unique[vine_id] / query_unique),
+                ),
+                matched_unique[vine_id],
             )
             for vine_id in matched_counts
         }
+
+    def _lexical_scores(self, query: str) -> dict[str, float]:
+        return {
+            vine_id: score
+            for vine_id, (score, _matched) in self._lexical_matches(query).items()
+        }
+
+    def availability_candidates(
+        self,
+        query: str,
+        *,
+        as_of: float | None,
+    ) -> list[_AvailabilityCandidate]:
+        broad = self._lexical_matches(query)
+        predicate = self._lexical_matches(_predicate_query(query))
+        if not predicate:
+            return []
+        placeholders = ",".join("?" for _ in predicate)
+        rows = self._connection.execute(
+            f"""
+            SELECT vine_id, topic, effective_at, superseded_by, superseded_at
+            FROM payloads
+            WHERE vine_id IN ({placeholders})
+            """,
+            tuple(sorted(predicate)),
+        ).fetchall()
+        candidates: list[_AvailabilityCandidate] = []
+        for row in rows:
+            vine_id = str(row[0])
+            effective_at = float(row[2])
+            superseded_at = None if row[4] is None else float(row[4])
+            if as_of is not None and effective_at > as_of:
+                continue
+            temporal_current = row[3] is None
+            if as_of is not None:
+                temporal_current = superseded_at is None or as_of < superseded_at
+                if not temporal_current:
+                    continue
+            predicate_score, matched_features = predicate[vine_id]
+            lexical_score = broad.get(vine_id, (0.0, 0))[0]
+            score = min(1.0, 0.85 * predicate_score + 0.15 * lexical_score)
+            candidates.append(
+                _AvailabilityCandidate(
+                    vine_id=vine_id,
+                    topic=str(row[1]),
+                    score=score,
+                    lexical_score=lexical_score,
+                    predicate_score=predicate_score,
+                    matched_features=matched_features,
+                    effective_at=effective_at,
+                    superseded_by=None if row[3] is None else str(row[3]),
+                    superseded_at=superseded_at,
+                    temporal_current=temporal_current,
+                )
+            )
+        return sorted(
+            candidates,
+            key=lambda item: (
+                1 if item.temporal_current else 0,
+                item.score,
+                item.effective_at,
+                item.vine_id,
+            ),
+            reverse=True,
+        )
 
     def __len__(self) -> int:
         row = self._connection.execute("SELECT COUNT(*) FROM payloads").fetchone()
@@ -1093,7 +1260,22 @@ class AgentMemory:
             raise TypeError("allow_inferential must be a bool")
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
 
-        intent = self._embedder.embed_query(clean_query)
+        retrieval_query_embed = getattr(self._embedder, "embed_retrieval_queries", None)
+        answerability_embed = getattr(self._embedder, "embed_answerability_query", None)
+        if self._embedder.semantic and callable(retrieval_query_embed):
+            intent, answerability_intent = retrieval_query_embed(clean_query)
+        else:
+            intent = self._embedder.embed_query(clean_query)
+            answerability_intent = (
+                answerability_embed(clean_query)
+                if self._embedder.semantic and callable(answerability_embed)
+                else None
+            )
+        answerability_threshold = (
+            DEFAULT_ANSWERABILITY_MIN_SCORE
+            if answerability_intent is not None
+            else None
+        )
         lifecycle = self.oracle.observe(intent)
         active = {vine.vine_id: vine for vine in self.oracle.workspace.active()}
         cold_limit = min(MAX_RECALL_RESULTS * 3, max(top_k * 3, 10))
@@ -1118,8 +1300,10 @@ class AgentMemory:
             intent,
             clean_query,
             semantic_candidates,
+            answerability_intent,
         )
         candidates: list[_RankedCandidate] = []
+        answerability_rejected_count = 0
         for vine_id, item in stored.items():
             if point_in_time is not None and item.effective_at > point_in_time:
                 continue
@@ -1146,9 +1330,19 @@ class AgentMemory:
                     semantic_score = cold_scores.get(vine_id)
             else:
                 continue
-            relevance = _hybrid_relevance(semantic_score, item.lexical_score)
-            if relevance < threshold:
+            base_relevance = _hybrid_relevance(semantic_score, item.lexical_score)
+            if base_relevance < threshold:
                 continue
+            if answerability_threshold is not None and (
+                item.answerability_score is None
+                or item.answerability_score < answerability_threshold
+            ):
+                answerability_rejected_count += 1
+                continue
+            relevance = _answerability_relevance(
+                base_relevance,
+                item.answerability_score,
+            )
             candidates.append(
                 _RankedCandidate(
                     vine_id=vine_id,
@@ -1156,6 +1350,7 @@ class AgentMemory:
                     source=source,
                     relevance_score=relevance,
                     semantic_score=semantic_score,
+                    answerability_score=item.answerability_score,
                     lexical_score=item.lexical_score,
                     lifecycle_score=lifecycle_score,
                     best_vector=item.best_vector,
@@ -1184,6 +1379,9 @@ class AgentMemory:
                         "topic": candidate.topic,
                         "score": round(score, 6),
                         "semantic_score": _round_optional(candidate.semantic_score),
+                        "answerability_score": _round_optional(
+                            candidate.answerability_score
+                        ),
                         "lexical_score": round(candidate.lexical_score, 6),
                         "lifecycle_score": _round_optional(candidate.lifecycle_score),
                         "source": candidate.source,
@@ -1217,6 +1415,9 @@ class AgentMemory:
                         "topic": candidate.topic,
                         "score": round(score, 6),
                         "semantic_score": _round_optional(candidate.semantic_score),
+                        "answerability_score": _round_optional(
+                            candidate.answerability_score
+                        ),
                         "lexical_score": round(candidate.lexical_score, 6),
                         "lifecycle_score": _round_optional(candidate.lifecycle_score),
                         "source": candidate.source,
@@ -1241,12 +1442,29 @@ class AgentMemory:
             if len(results) >= top_k:
                 break
 
+        for rank, result in enumerate(results, start=1):
+            result["rank"] = rank
+        ranking_margin = (
+            None
+            if len(results) < 2
+            else round(float(results[0]["score"]) - float(results[1]["score"]), 6)
+        )
+        ranking_ambiguous = (
+            ranking_margin is not None
+            and ranking_margin <= AMBIGUOUS_RANKING_MARGIN
+            and results[0]["topic"].casefold() != results[1]["topic"].casefold()
+        )
+
         return {
             "query": clean_query,
             "as_of": point_in_time,
             "min_score": threshold,
+            "answerability_min_score": answerability_threshold,
+            "answerability_rejected_count": answerability_rejected_count,
             "results": results,
             "gated_count": gated_count,
+            "ranking_margin": ranking_margin,
+            "ranking_ambiguous": ranking_ambiguous,
             "lifecycle": lifecycle,
         }
 
@@ -1368,6 +1586,10 @@ class AgentMemory:
         capability = self.oracle.capability_report().as_dict()
         key_mode = stat.S_IMODE((self.profile_dir / "agent.key").stat().st_mode)
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        answerability_ready = self._embedder.semantic and (
+            callable(getattr(self._embedder, "embed_retrieval_queries", None))
+            or callable(getattr(self._embedder, "embed_answerability_query", None))
+        )
         return {
             "adapter_ready": True,
             "mode": "local-staging",
@@ -1384,6 +1606,12 @@ class AgentMemory:
                 "lexical_terms": "keyed-hash",
                 "diversity_ranking": "topic-aware-mmr",
                 "temporal_history": "explicit-supersession",
+                "answerability_gate": (
+                    "semantic-predicate-v1" if answerability_ready else "unavailable"
+                ),
+                "answerability_min_score": (
+                    DEFAULT_ANSWERABILITY_MIN_SCORE if answerability_ready else None
+                ),
             },
             "embedding": {
                 "backend": self._embedder.name,
@@ -1445,6 +1673,203 @@ class AgentMemory:
             self._store.close()
 
     def __enter__(self) -> AgentMemory:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+class AlwaysAvailableMemory:
+    """Read-only encrypted lexical recall for a pre-existing local profile.
+
+    This layer never creates a profile, embeds text, mutates lifecycle state, or
+    presents lexical overlap as semantic recall. It is intended only for bounded
+    degraded operation while the configured embedding service is unavailable.
+    """
+
+    def __init__(
+        self,
+        state_dir: str | os.PathLike[str] | None = None,
+        *,
+        profile: str = "default",
+        reason: str = "embedding_service_unavailable",
+    ) -> None:
+        profile_name = _validate_profile(profile)
+        self.reason = _validate_text(reason, "availability reason", 128)
+        base = (
+            default_state_dir() if state_dir is None else Path(state_dir).expanduser()
+        )
+        profile_dir = base / profile_name
+        if profile_dir.is_symlink() or not profile_dir.is_dir():
+            raise RuntimeError(
+                "always-available recall requires an existing local profile"
+            )
+        if os.name != "nt" and stat.S_IMODE(profile_dir.stat().st_mode) & 0o077:
+            raise RuntimeError("availability profile directory must be owner-only")
+        self.profile_dir = profile_dir.absolute()
+        key = _load_existing_key(self.profile_dir / "agent.key")
+        self._payloads = _EncryptedPayloadStore(
+            self.profile_dir / "payloads.db",
+            key,
+            read_only=True,
+        )
+
+    def remember(
+        self,
+        topic: str,
+        payload: str,
+        *,
+        effective_at: float | None = None,
+        supersedes: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        del topic, payload, effective_at, supersedes
+        raise RuntimeError("remember is unavailable in read-only always-available mode")
+
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+    ) -> dict[str, Any]:
+        clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= top_k <= MAX_RECALL_RESULTS:
+            raise ValueError(f"top_k must be between 1 and {MAX_RECALL_RESULTS}")
+        if min_score is None:
+            threshold = DEFAULT_AVAILABILITY_MIN_SCORE
+        elif isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise TypeError("min_score must be a finite number or None")
+        else:
+            threshold = float(min_score)
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+        if threshold < DEFAULT_AVAILABILITY_MIN_SCORE:
+            raise ValueError(
+                "always-available min_score cannot be lower than the safe default"
+            )
+        if allow_inferential is not False:
+            raise ValueError(
+                "inferential recall is unavailable without semantic verification"
+            )
+        point_in_time = _validate_optional_timestamp(as_of, "as_of")
+        candidates = self._payloads.availability_candidates(
+            clean_query,
+            as_of=point_in_time,
+        )
+        results: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if candidate.predicate_score < threshold:
+                continue
+            if candidate.matched_features < MIN_AVAILABILITY_FEATURES:
+                continue
+            payload = self._payloads.get(candidate.vine_id)
+            if payload is None:
+                continue
+            confidence_score = _availability_confidence(candidate.score)
+            policy = classify(confidence_score)
+            results.append(
+                {
+                    "rank": len(results) + 1,
+                    "vine_id": candidate.vine_id,
+                    "topic": candidate.topic,
+                    "score": round(confidence_score, 6),
+                    "availability_score": round(candidate.score, 6),
+                    "semantic_score": None,
+                    "answerability_score": None,
+                    "lexical_score": round(candidate.lexical_score, 6),
+                    "predicate_score": round(candidate.predicate_score, 6),
+                    "matched_features": candidate.matched_features,
+                    "source": "encrypted-keyed-index",
+                    "temporal_status": (
+                        "valid_at_as_of"
+                        if point_in_time is not None
+                        else ("current" if candidate.temporal_current else "superseded")
+                    ),
+                    "effective_at": candidate.effective_at,
+                    "superseded_by": candidate.superseded_by,
+                    "superseded_at": candidate.superseded_at,
+                    "confidence_band": policy.band.value,
+                    "confidence_indicator": (
+                        "Degraded keyed match; semantic verification offline."
+                    ),
+                    "gated": False,
+                    "payload": payload,
+                }
+            )
+            if len(results) >= top_k:
+                break
+        return {
+            "query": clean_query,
+            "as_of": point_in_time,
+            "mode": "always-available-read-only",
+            "degraded": True,
+            "degraded_reason": self.reason,
+            "semantic_available": False,
+            "lifecycle_mutated": False,
+            "availability_strategy": "encrypted-keyed-predicate-v1",
+            "min_score": threshold,
+            "minimum_matched_features": MIN_AVAILABILITY_FEATURES,
+            "results": results,
+            "gated_count": 0,
+            "ranking_margin": None,
+            "ranking_ambiguous": False,
+            "limitations": [
+                "Only strong keyed lexical and predicate overlap is available.",
+                "Paraphrases may be missed until semantic recall is restored.",
+                "Recall does not mutate Echo Veil lifecycle state in this mode.",
+            ],
+        }
+
+    def forget(self, vine_id: str) -> dict[str, Any]:
+        del vine_id
+        raise RuntimeError("forget is unavailable in read-only always-available mode")
+
+    def reindex(self) -> dict[str, Any]:
+        raise RuntimeError("reindex is unavailable in read-only always-available mode")
+
+    def doctor(self) -> dict[str, Any]:
+        indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        key_mode = stat.S_IMODE((self.profile_dir / "agent.key").stat().st_mode)
+        return {
+            "adapter_ready": True,
+            "mode": "always-available-read-only",
+            "degraded": True,
+            "degraded_reason": self.reason,
+            "profile": self.profile_dir.name,
+            "payload_count": len(self._payloads),
+            "key_owner_only": key_mode == 0o600,
+            "semantic_available": False,
+            "writes_available": False,
+            "lifecycle_mutation_available": False,
+            "retrieval": {
+                "strategy": "encrypted-keyed-predicate-v1",
+                "protected_multivector_count": indexed_count,
+                "unindexed_payload_count": unindexed_count,
+                "lexical_terms": "keyed-hash",
+                "minimum_score": DEFAULT_AVAILABILITY_MIN_SCORE,
+                "minimum_matched_features": MIN_AVAILABILITY_FEATURES,
+            },
+            "limitations": [
+                "Semantic embeddings and answerability verification are offline.",
+                "Only conservative keyed lexical recall is available.",
+                "Remember, forget, reindex, and lifecycle mutation are disabled.",
+                "Restart the adapter after the embedding service is restored.",
+            ],
+        }
+
+    def close(self) -> None:
+        self._payloads.close()
+
+    def __enter__(self) -> AlwaysAvailableMemory:
         return self
 
     def __exit__(
@@ -1605,6 +2030,62 @@ def _hybrid_relevance(semantic_score: float | None, lexical_score: float) -> flo
     return min(1.0, semantic + LEXICAL_BOOST * lexical * (1.0 - semantic))
 
 
+def _answerability_relevance(
+    relevance_score: float,
+    answerability_score: float | None,
+) -> float:
+    """Add bounded confidence only after an independent answerability pass."""
+    relevance = min(1.0, max(0.0, relevance_score))
+    if answerability_score is None:
+        return relevance
+    answerability = min(1.0, max(0.0, answerability_score))
+    return min(
+        1.0,
+        relevance + ANSWERABILITY_BOOST * answerability * (1.0 - relevance),
+    )
+
+
+def _availability_confidence(availability_score: float) -> float:
+    """Map a qualified raw lexical score into the non-authoritative safe band."""
+    bounded = min(1.0, max(DEFAULT_AVAILABILITY_MIN_SCORE, availability_score))
+    progress = (bounded - DEFAULT_AVAILABILITY_MIN_SCORE) / (
+        1.0 - DEFAULT_AVAILABILITY_MIN_SCORE
+    )
+    return 0.50 + 0.19 * progress
+
+
+def _predicate_query(query: str) -> str:
+    """Mask grammatical subjects while retaining the requested fact or rule.
+
+    The transform is deliberately syntax-only: it does not contain user names,
+    domain vocabularies, or sensitive-attribute lists. This prevents a common
+    failure where a person's identity dominates a query about an absent fact.
+    """
+    focused = re.sub(
+        r"\b(?i:does|do|did)\s+(?:the\s+)?(?:[\w'’-]+\s+){0,3}(?i:have)\b",
+        "is there",
+        query,
+    )
+    focused = re.sub(
+        r"\b[^\W\d_]+(?:-[^\W\d_]+)*(?:['’]s)\b",
+        "",
+        focused,
+    )
+    focused = re.sub(
+        r"\b((?i:does|do|did|is|was|has))\s+([A-Z][\w'’-]*)\b",
+        r"\1",
+        focused,
+    )
+    focused = re.sub(
+        r"(^|[.!?]\s+)((?i:may|should|can|would|will))\s+"
+        r"([A-Z][\w'’-]*)\b",
+        r"\1\2",
+        focused,
+    )
+    focused = re.sub(r"\s+", " ", focused).replace(" ?", "?").strip()
+    return focused or query
+
+
 def _mmr_rank(candidates: list[_RankedCandidate]) -> list[_RankedCandidate]:
     remaining = list(candidates)
     selected: list[_RankedCandidate] = []
@@ -1719,6 +2200,13 @@ def _secure_regular_file(path: Path) -> None:
         os.close(descriptor)
 
 
+def _require_secure_regular_file(path: Path, label: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{label} must be an existing regular file")
+    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RuntimeError(f"{label} must be owner-only")
+
+
 def _load_or_create_key(path: Path) -> bytes:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -1738,6 +2226,12 @@ def _load_or_create_key(path: Path) -> bytes:
         finally:
             os.close(descriptor)
         return key
+
+    return _load_existing_key(path)
+
+
+def _load_existing_key(path: Path) -> bytes:
+    _require_secure_regular_file(path, "agent key")
 
     read_flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):

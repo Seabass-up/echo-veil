@@ -1,6 +1,6 @@
 {
   "name": "echo-veil",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Local encrypted, decay-driven memory tools for Claude Code.",
   "author": {
     "name": "Algo-cli.com",

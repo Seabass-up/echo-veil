@@ -29,6 +29,18 @@ export type EchoVeilInvocation = {
 
 const MAX_OUTPUT_BYTES = 1_048_576;
 
+export function addRpcTelemetry(value: unknown, elapsedMs: number): unknown {
+  if (value === null || Array.isArray(value) || typeof value !== "object") return value;
+  return {
+    ...value,
+    host_transport: {
+      host: "openclaw",
+      invocation: "fresh-process-rpc",
+      elapsed_ms: Math.round(elapsedMs * 100) / 100,
+    },
+  };
+}
+
 export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
   const env = { ...process.env };
   if (config.stateDir?.trim()) env.ECHO_VEIL_STATE_DIR = config.stateDir.trim();
@@ -36,6 +48,7 @@ export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
   env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
   env.ECHO_VEIL_EMBEDDING_MODEL = env.ECHO_VEIL_EMBEDDING_MODEL || "qwen3-embedding:latest";
   env.ECHO_VEIL_EMBEDDING_DIMENSION = env.ECHO_VEIL_EMBEDDING_DIMENSION || "1024";
+  env.ECHO_VEIL_AVAILABILITY_LAYER = env.ECHO_VEIL_AVAILABILITY_LAYER || "true";
 
   const executable = config.executable?.trim() || process.env.ECHO_VEIL_AGENT_COMMAND?.trim();
   if (executable) {
@@ -83,6 +96,7 @@ export async function runEchoVeilRpc(
   signal?: AbortSignal,
 ): Promise<unknown> {
   const invocation = buildInvocation(config);
+  const startedAt = process.hrtime.bigint();
   return new Promise((resolve, reject) => {
     const child = spawn(invocation.command, invocation.args, {
       env: invocation.env,
@@ -143,7 +157,8 @@ export async function runEchoVeilRpc(
           return;
         }
         try {
-          resolve(JSON.parse(output));
+          const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+          resolve(addRpcTelemetry(JSON.parse(output), elapsedMs));
         } catch {
           reject(new Error("Echo Veil returned invalid JSON"));
         }
@@ -184,10 +199,10 @@ export default defineToolPlugin({
     tool({
       name: "echo_veil_recall",
       label: "Echo Veil Recall",
-      description: "Recall relevant local memories, advance decay, and withhold confidence-gated payloads.",
+      description: "Recall relevant local memories and preserve both leading candidates when ranking_ambiguous=true. Responses with degraded=true are conservative lexical hints, not semantic or authoritative recall.",
       parameters: Type.Object({
         query: Type.String({ minLength: 1, maxLength: 20_000 }),
-        topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+        topK: Type.Optional(Type.Integer({ minimum: 2, maximum: 20 })),
         minScore: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
         asOf: Type.Optional(Type.Number({ minimum: 0 })),
         allowInferential: Type.Optional(Type.Boolean({

@@ -14,6 +14,7 @@ from typing import Any
 
 from echo_veil.agent_memory import (
     AgentMemory,
+    AlwaysAvailableMemory,
     DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
@@ -123,6 +124,36 @@ def main(argv: list[str] | None = None) -> int:
                 recall_ms.append((time.perf_counter() - started) * 1000.0)
                 distractor_passes += int(not response["results"])
 
+        availability_keyword_passes = 0
+        availability_keyword_total = 0
+        availability_distractor_passes = 0
+        availability_failures: list[dict[str, Any]] = []
+        with AlwaysAvailableMemory(
+            state_dir,
+            profile="quality-qwen3",
+            reason="quality_gate_simulated_outage",
+        ) as available:
+            for item in cases["queries"]:
+                if item["category"] != "keyword":
+                    continue
+                availability_keyword_total += 1
+                response = available.recall(item["query"], top_k=1)
+                top = response["results"][0] if response["results"] else None
+                passed = top is not None and top["vine_id"] == ids[item["expected"]]
+                availability_keyword_passes += int(passed)
+                if not passed:
+                    availability_failures.append(
+                        {
+                            "query": item["query"],
+                            "expected": item["expected"],
+                            "actual_topic": None if top is None else top["topic"],
+                            "score": None if top is None else top["score"],
+                        }
+                    )
+            for query in cases["distractors"]:
+                response = available.recall(query, top_k=1)
+                availability_distractor_passes += int(not response["results"])
+
     category_counts: dict[str, list[bool]] = defaultdict(list)
     for outcome in outcomes:
         category_counts[str(outcome["category"])].append(bool(outcome["passed"]))
@@ -136,10 +167,16 @@ def main(argv: list[str] | None = None) -> int:
     }
     all_queries_passed = all(bool(item["passed"]) for item in outcomes)
     all_distractors_passed = distractor_passes == len(cases["distractors"])
+    availability_passed = (
+        availability_keyword_passes == availability_keyword_total
+        and availability_distractor_passes == len(cases["distractors"])
+    )
     retrieval_index = doctor["retrieval"]
     report = {
         "verdict": (
-            "pass" if all_queries_passed and all_distractors_passed else "fail"
+            "pass"
+            if all_queries_passed and all_distractors_passed and availability_passed
+            else "fail"
         ),
         "model": embedder.model,
         "dimension": embedder.dimension,
@@ -149,6 +186,14 @@ def main(argv: list[str] | None = None) -> int:
         "distractor_rejection": {
             "passed": distractor_passes,
             "total": len(cases["distractors"]),
+        },
+        "always_available": {
+            "keyword_passed": availability_keyword_passes,
+            "keyword_total": availability_keyword_total,
+            "distractor_passed": availability_distractor_passes,
+            "distractor_total": len(cases["distractors"]),
+            "failures": availability_failures,
+            "mode": "encrypted-keyed-predicate-v1",
         },
         "model_resolution_ms": round(model_resolution_ms, 2),
         "first_remember_ms": round(remember_ms[0], 2),

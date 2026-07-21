@@ -36,10 +36,10 @@ const remember = defineTool({
 const recall = defineTool({
   name: "echo_veil_recall",
   label: "Echo Veil Recall",
-  description: "Recall relevant local memories and respect confidence-gated results.",
+  description: "Recall relevant local memories and preserve both leading candidates when ranking_ambiguous=true. Responses with degraded=true are conservative lexical hints, not semantic or authoritative recall.",
   parameters: Type.Object({
     query: Type.String({ minLength: 1, maxLength: 20_000 }),
-    topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+    topK: Type.Optional(Type.Integer({ minimum: 2, maximum: 20 })),
     minScore: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
     asOf: Type.Optional(Type.Number({ minimum: 0 })),
     allowInferential: Type.Optional(Type.Boolean({

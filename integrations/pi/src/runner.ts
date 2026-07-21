@@ -18,6 +18,7 @@ export function buildInvocation(): EchoVeilInvocation {
   env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
   env.ECHO_VEIL_EMBEDDING_MODEL = env.ECHO_VEIL_EMBEDDING_MODEL || "qwen3-embedding:latest";
   env.ECHO_VEIL_EMBEDDING_DIMENSION = env.ECHO_VEIL_EMBEDDING_DIMENSION || "1024";
+  env.ECHO_VEIL_AVAILABILITY_LAYER = env.ECHO_VEIL_AVAILABILITY_LAYER || "true";
   const executable = env.ECHO_VEIL_AGENT_COMMAND?.trim();
   if (executable) return { command: executable, args: ["rpc"], env };
 

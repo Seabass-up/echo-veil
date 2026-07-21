@@ -7,7 +7,7 @@ from typing import Any, cast
 
 
 ROOT = Path(__file__).parents[1]
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 HOSTS = (
     "openclaw",
     "hermes",
@@ -49,6 +49,7 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
         assert config["env"]["ECHO_VEIL_EMBEDDER"] == "ollama"
         assert config["env"]["ECHO_VEIL_EMBEDDING_MODEL"] == ("qwen3-embedding:latest")
         assert config["env"]["ECHO_VEIL_EMBEDDING_DIMENSION"] == "1024"
+        assert config["env"]["ECHO_VEIL_AVAILABILITY_LAYER"] == "true"
     assert droid["args"] == [
         "--profile",
         "droid-qwen3",
@@ -58,6 +59,7 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
         "qwen3-embedding:latest",
         "--embedding-dimension",
         "1024",
+        "--availability-layer",
         "mcp",
     ]
     assert opencode["command"] == [
@@ -70,6 +72,7 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
         "qwen3-embedding:latest",
         "--embedding-dimension",
         "1024",
+        "--availability-layer",
         "mcp",
     ]
 
@@ -94,6 +97,10 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     for text, profile in ((hermes, "hermes-qwen3"), (goose, "goose-qwen3")):
         assert f'args: ["--profile", "{profile}", "--embedder", "ollama"' in text
         assert '"qwen3-embedding:latest"' in text
+        assert '"--availability-layer"' in text
+    assert "ranking_ambiguous=true" in goose
+    assert "never as\n" in goose
+    assert "semantic or authoritative recall" in goose
     assert "allowed-tools:\n  - run_command" in mercury
     assert "must not send memory topics, payloads, queries" in mercury
     assert "full remember, recall, and forget operations are unavailable" in mercury
