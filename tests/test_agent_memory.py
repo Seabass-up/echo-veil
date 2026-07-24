@@ -184,6 +184,21 @@ def test_profile_writer_lease_serializes_fresh_process_snapshots(
         assert reopened.doctor()["writer_serialization"] == "profile-sqlite-lease"
 
 
+def test_sqlite_lock_detection_supports_legacy_and_extended_errors() -> None:
+    legacy = sqlite3.OperationalError("database is locked")
+    extended = sqlite3.OperationalError("synthetic extended busy result")
+    extended.sqlite_errorcode = 773  # type: ignore[attr-defined]
+
+    assert agent_memory._is_sqlite_lock_error(legacy) is True
+    assert agent_memory._is_sqlite_lock_error(extended) is True
+    assert (
+        agent_memory._is_sqlite_lock_error(
+            sqlite3.OperationalError("database disk image is malformed")
+        )
+        is False
+    )
+
+
 def test_profile_startup_repairs_lifecycle_record_without_payload(
     tmp_path: Path,
 ) -> None:
@@ -239,6 +254,37 @@ def test_payload_database_rejects_unexpected_schema_objects(tmp_path: Path) -> N
 
     with pytest.raises(RuntimeError, match="schema validation"):
         AgentMemory(tmp_path)
+
+
+def test_unversioned_legacy_payload_database_uses_compatibility_path(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "default"
+    profile.mkdir(mode=0o700)
+    key = b"k" * 32
+    key_path = profile / "agent.key"
+    key_path.write_bytes(key)
+    key_path.chmod(0o600)
+    store = agent_memory._LegacyEncryptedPayloadStore(
+        profile / "payloads.db",
+        key,
+    )
+    store.close()
+    connection = sqlite3.connect(profile / "payloads.db")
+    try:
+        connection.execute("PRAGMA user_version = 0")
+    finally:
+        connection.close()
+
+    with AgentMemory(tmp_path) as memory:
+        report = memory.doctor()
+
+    assert report["security_schema"] == "legacy-v1"
+    connection = sqlite3.connect(profile / "payloads.db")
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        connection.close()
 
 
 def test_payload_database_rejects_foreign_key_orphans(tmp_path: Path) -> None:

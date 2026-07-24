@@ -78,6 +78,15 @@ DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 30.0
 MAX_MEMORY_PASSAGES = 12
 MAX_PASSAGE_CHARS = 1_600
 MAX_LEXICAL_FEATURES = 4_096
+_SQLITE_BUSY_CODE = int(getattr(sqlite3, "SQLITE_BUSY", 5))
+_SQLITE_LOCKED_CODE = int(getattr(sqlite3, "SQLITE_LOCKED", 6))
+_SQLITE_LOCK_MESSAGES = frozenset(
+    {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+)
 MAX_QUERY_FEATURES = 256
 MAX_RETRIEVAL_CANDIDATES = 900
 PAYLOAD_SCHEMA_VERSION = 2
@@ -184,6 +193,13 @@ class EmbeddingUnavailable(RuntimeError):
     """The configured local embedding service or model cannot currently run."""
 
 
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code & 0xFF in {_SQLITE_BUSY_CODE, _SQLITE_LOCKED_CODE}
+    return str(exc).strip().casefold() in _SQLITE_LOCK_MESSAGES
+
+
 class _ProfileWriterLease:
     """Serialize one profile's process-local L1 snapshot through SQLite locking."""
 
@@ -210,10 +226,7 @@ class _ProfileWriterLease:
             self._connection.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             self._connection.close()
-            if getattr(exc, "sqlite_errorcode", None) in {
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-            }:
+            if _is_sqlite_lock_error(exc):
                 raise RuntimeError(
                     "memory profile is already in use by another writer"
                 ) from exc
@@ -2524,17 +2537,14 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
     def key_usage(self, key_id: str) -> int:
         if not self._secure_schema:
             return 0
+        queries = (
+            "SELECT COUNT(*) FROM payloads WHERE key_id = ?",
+            "SELECT COUNT(*) FROM memory_vectors WHERE key_id = ?",
+            "SELECT COUNT(*) FROM memory_terms WHERE key_id = ?",
+            "SELECT COUNT(*) FROM deletion_tombstones WHERE key_id = ?",
+        )
         counts = [
-            self._connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE key_id = ?",
-                (key_id,),
-            ).fetchone()
-            for table in (
-                "payloads",
-                "memory_vectors",
-                "memory_terms",
-                "deletion_tombstones",
-            )
+            self._connection.execute(query, (key_id,)).fetchone() for query in queries
         ]
         return sum(0 if row is None else int(row[0]) for row in counts)
 
@@ -4478,9 +4488,40 @@ def _payload_database_version(path: Path) -> int:
         connection.execute("PRAGMA query_only = ON")
         connection.execute("PRAGMA trusted_schema = OFF")
         row = connection.execute("PRAGMA user_version").fetchone()
+        version = 0 if row is None else int(row[0])
+        if version != 0:
+            return version
+
+        # Profiles created before schema versioning have user_version=0.  They
+        # must stay on the legacy compatibility path until an explicit profile
+        # migration; treating them as a fresh scoped-v2 database would mix the
+        # new schema and keyring into the existing encrypted payload store.
+        columns = tuple(
+            (str(item[1]), str(item[2]).upper(), int(item[3]), int(item[5]))
+            for item in connection.execute("PRAGMA table_xinfo(payloads)")
+            if int(item[6]) == 0
+        )
+        legacy_columns = (
+            ("vine_id", "TEXT", 1, 1),
+            ("topic", "TEXT", 1, 0),
+            ("nonce", "BLOB", 1, 0),
+            ("ciphertext", "BLOB", 1, 0),
+            ("content_hash", "TEXT", 1, 0),
+            ("created_at", "REAL", 1, 0),
+            ("effective_at", "REAL", 0, 0),
+            ("superseded_by", "TEXT", 0, 0),
+            ("superseded_at", "REAL", 0, 0),
+        )
+        if columns and columns == legacy_columns[: len(columns)]:
+            return LEGACY_PAYLOAD_SCHEMA_VERSION
+        object_count_row = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchone()
+        if columns or (object_count_row is not None and int(object_count_row[0]) > 0):
+            raise RuntimeError("unversioned payload database schema is not recognized")
+        return 0
     finally:
         connection.close()
-    return 0 if row is None else int(row[0])
 
 
 def _load_or_create_key(path: Path) -> bytes:
