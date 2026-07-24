@@ -257,9 +257,13 @@ class TextEmbedder(Protocol):
     semantic: bool
     default_min_score: float
 
-    def embed_document(self, text: str) -> NDArray[np.float64]: ...
+    def embed_document(self, text: str) -> NDArray[np.float64]:
+        """Embed text for durable document indexing."""
+        raise NotImplementedError
 
-    def embed_query(self, text: str) -> NDArray[np.float64]: ...
+    def embed_query(self, text: str) -> NDArray[np.float64]:
+        """Embed text for query-time retrieval."""
+        raise NotImplementedError
 
 
 class HashingTextEmbedder:

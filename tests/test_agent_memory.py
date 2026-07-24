@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 from io import BytesIO
 import json
 import math
@@ -10,17 +11,18 @@ from typing import Any
 import numpy as np
 import pytest
 
-import echo_veil.agent_cli as agent_cli
 import echo_veil.agent_security as agent_security
 from echo_veil.agent_cli import (
     MAX_REQUEST_BYTES,
     McpServer,
     TOOLS,
+    _RuntimeAvailabilityMemory,
     _public_error,
     _read_mcp_line,
+    dispatch,
+    main as agent_main,
 )
 from echo_veil._json import strict_json_loads
-import echo_veil.agent_memory as agent_memory
 from echo_veil.agent_memory import (
     AgentMemory,
     AlwaysAvailableMemory,
@@ -28,6 +30,9 @@ from echo_veil.agent_memory import (
     EmbeddingUnavailable,
     HashingTextEmbedder,
     OllamaTextEmbedder,
+    _is_sqlite_lock_error,
+    _LegacyEncryptedPayloadStore,
+    _predicate_query,
 )
 
 
@@ -145,7 +150,7 @@ def test_predicate_query_masks_subject_without_domain_rules(
     query: str,
     expected: str,
 ) -> None:
-    assert agent_memory._predicate_query(query) == expected
+    assert _predicate_query(query) == expected
 
 
 def test_profile_rejects_embedding_identity_changes(tmp_path: Path) -> None:
@@ -173,12 +178,9 @@ def test_profile_rejects_changed_model_digest(tmp_path: Path) -> None:
 def test_profile_writer_lease_serializes_fresh_process_snapshots(
     tmp_path: Path,
 ) -> None:
-    first = AgentMemory(tmp_path)
-    try:
+    with AgentMemory(tmp_path):
         with pytest.raises(RuntimeError, match="another writer"):
             AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01)
-    finally:
-        first.close()
 
     with AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01) as reopened:
         assert reopened.doctor()["writer_serialization"] == "profile-sqlite-lease"
@@ -189,10 +191,10 @@ def test_sqlite_lock_detection_supports_legacy_and_extended_errors() -> None:
     extended = sqlite3.OperationalError("synthetic extended busy result")
     extended.sqlite_errorcode = 773  # type: ignore[attr-defined]
 
-    assert agent_memory._is_sqlite_lock_error(legacy) is True
-    assert agent_memory._is_sqlite_lock_error(extended) is True
+    assert _is_sqlite_lock_error(legacy) is True
+    assert _is_sqlite_lock_error(extended) is True
     assert (
-        agent_memory._is_sqlite_lock_error(
+        _is_sqlite_lock_error(
             sqlite3.OperationalError("database disk image is malformed")
         )
         is False
@@ -265,7 +267,7 @@ def test_unversioned_legacy_payload_database_uses_compatibility_path(
     key_path = profile / "agent.key"
     key_path.write_bytes(key)
     key_path.chmod(0o600)
-    store = agent_memory._LegacyEncryptedPayloadStore(
+    store = _LegacyEncryptedPayloadStore(
         profile / "payloads.db",
         key,
     )
@@ -371,7 +373,7 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
     embedder = OllamaTextEmbedder(dimension=32, timeout_seconds=2)
     document = embedder.embed_document("The launch code is blue.")
     query, answerability = embedder.embed_retrieval_queries(
@@ -435,7 +437,7 @@ def test_ollama_embedder_rechecks_mutable_model_identity(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
     embedder = OllamaTextEmbedder(dimension=32)
 
     with pytest.raises(RuntimeError, match="identity changed"):
@@ -455,7 +457,7 @@ def test_ollama_unavailable_fails_closed_without_hashing_fallback(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
     with pytest.raises(RuntimeError, match="service is unavailable"):
         OllamaTextEmbedder(dimension=32)
 
@@ -526,12 +528,9 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
 
     embedder = RuntimeOutageEmbedder()
     primary = AgentMemory(tmp_path, embed=embedder)
-    memory = agent_cli._RuntimeAvailabilityMemory(  # noqa: SLF001 - failover contract
-        primary,
-        tmp_path,
-        "default",
-    )
-    try:
+    with _RuntimeAvailabilityMemory(  # noqa: SLF001 - failover contract
+        primary, tmp_path, "default"
+    ) as memory:
         memory.remember(
             "opal harbor recovery procedure",
             "Use the opal harbor recovery procedure during a deployment outage.",
@@ -548,8 +547,6 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
         assert doctor["runtime_failover_active"] is True
         with pytest.raises(RuntimeError, match="read-only"):
             memory.remember("blocked", "Writes stay blocked during the outage.")
-    finally:
-        memory.close()
 
 
 def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
@@ -570,10 +567,10 @@ def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
         observed["memory"] = memory
         return 0
 
-    monkeypatch.setattr(agent_cli, "_build_embedder", unavailable)
-    monkeypatch.setattr(agent_cli, "run_rpc", run_rpc)
+    monkeypatch.setattr("echo_veil.agent_cli._build_embedder", unavailable)
+    monkeypatch.setattr("echo_veil.agent_cli.run_rpc", run_rpc)
 
-    result = agent_cli.main(
+    result = agent_main(
         [
             "--state-dir",
             str(tmp_path),
@@ -588,7 +585,7 @@ def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
     assert result == 0
     assert isinstance(observed["memory"], AlwaysAvailableMemory)
 
-    disabled = agent_cli.main(
+    disabled = agent_main(
         [
             "--state-dir",
             str(tmp_path),
@@ -1107,7 +1104,7 @@ def test_rpc_recall_preserves_ambiguous_pair_when_one_result_requested(
         memory.remember("first policy", "The first policy applies.")
         memory.remember("second policy", "The second policy applies.")
 
-        recalled = agent_cli.dispatch(
+        recalled = dispatch(
             memory,
             "recall",
             {"query": "Which rule applies?", "top_k": 1},

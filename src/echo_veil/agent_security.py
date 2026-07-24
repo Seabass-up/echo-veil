@@ -207,6 +207,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         try:
             temporary.unlink()
         except FileNotFoundError:
+            # A successful replace already moved the temporary file.
             pass
 
 
@@ -315,6 +316,7 @@ class ProfileKeyring:
             try:
                 key_path.unlink()
             except OSError:
+                # Preserve the manifest failure; an orphan key is never activated.
                 pass
             raise
         self._manifest = manifest

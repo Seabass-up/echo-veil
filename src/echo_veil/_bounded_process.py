@@ -94,6 +94,7 @@ def run_bounded_process(
             if process.poll() is None:
                 process.kill()
         except OSError:
+            # The child may exit between poll and kill; wait still reaps it.
             pass
 
     def read_stdout() -> None:
@@ -117,6 +118,7 @@ def run_bounded_process(
             child_stdin.write(input_bytes)
             child_stdin.flush()
         except BrokenPipeError:
+            # Early child exit is represented by its return code below.
             pass
         except (OSError, ValueError):
             if process.poll() is None:
@@ -126,6 +128,7 @@ def run_bounded_process(
             try:
                 child_stdin.close()
             except (OSError, ValueError):
+                # Cleanup is best effort; thread liveness is checked below.
                 pass
 
     reader = threading.Thread(
@@ -154,6 +157,7 @@ def run_bounded_process(
             try:
                 child_stdin.close()
             except (OSError, ValueError):
+                # Cleanup is best effort; the live writer remains an error.
                 pass
             writer.join(timeout=1.0)
         if reader.is_alive():
