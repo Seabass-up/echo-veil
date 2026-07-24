@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import {
-  lstatSync,
+  closeSync,
+  constants,
+  fstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -25,9 +27,19 @@ test("generated config atomically replaces a symlink without following it", () =
     writeGeneratedConfig({ safe: "value" }, output);
 
     assert.equal(readFileSync(target, "utf8"), "sentinel\n");
-    assert.equal(lstatSync(output).isSymbolicLink(), false);
-    assert.equal(readFileSync(output, "utf8"), '{\n  "safe": "value"\n}\n');
-    assert.equal(statSync(output).mode & 0o777, 0o600);
+    const descriptor = openSync(
+      output,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    try {
+      assert.equal(
+        readFileSync(descriptor, "utf8"),
+        '{\n  "safe": "value"\n}\n',
+      );
+      assert.equal(fstatSync(descriptor).mode & 0o777, 0o600);
+    } finally {
+      closeSync(descriptor);
+    }
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
