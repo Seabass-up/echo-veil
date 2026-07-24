@@ -818,13 +818,16 @@ def test_corrupt_record_is_quarantined_without_hiding_healthy_records(
 
     connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
     try:
-        connection.execute(
-            """
-            UPDATE payloads
-            SET ciphertext = substr(ciphertext, 1, length(ciphertext) - 1) || x'00'
-            WHERE vine_id = ?
-            """,
+        row = connection.execute(
+            "SELECT ciphertext FROM payloads WHERE vine_id = ?",
             (corrupt["vine_id"],),
+        ).fetchone()
+        assert row is not None
+        ciphertext = bytes(row[0])
+        tampered = ciphertext[:-1] + bytes((ciphertext[-1] ^ 1,))
+        connection.execute(
+            "UPDATE payloads SET ciphertext = ? WHERE vine_id = ?",
+            (tampered, corrupt["vine_id"]),
         )
         connection.commit()
     finally:
