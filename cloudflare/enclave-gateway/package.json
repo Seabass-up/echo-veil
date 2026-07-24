@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/index.test.mjs",
+    "test": "node --experimental-strip-types --test scripts/render-config.test.mjs src/index.test.mjs",
     "render-config": "node scripts/render-config.mjs",
     "types": "npm run render-config && wrangler types --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
     "types:check": "npm run render-config && wrangler types --check --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
