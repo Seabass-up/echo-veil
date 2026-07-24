@@ -1,0 +1,18 @@
+version: 1.0.0
+title: Echo Veil memory
+description: Opt-in, encrypted, confidence-gated local memory tools.
+instructions: |
+  Use echo_veil_remember only when the user explicitly intends durable capture.
+  Use echo_veil_recall before relying on stored facts and respect gated results.
+  Preserve both leading recall candidates when ranking_ambiguous=true.
+  Treat degraded=true as conservative lexical availability only, never as
+  semantic or authoritative recall.
+  Use echo_veil_forget only for an explicit erasure request.
+  Do not describe the local staging adapter as a production enclave.
+extensions:
+  - type: stdio
+    name: echo-veil
+    cmd: echo-veil-agent
+    args: ["--profile", "goose-qwen3", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
+prompt: |
+  Echo Veil is ready. Wait for a user request before remembering or forgetting.

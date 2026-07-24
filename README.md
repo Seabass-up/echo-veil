@@ -10,7 +10,7 @@ eventually archived, and contradictory information is preserved as structured
 tension rather than overwritten. This repository implements the core of the
 Echo Veil v1.0 specification (`docs/SPEC.md`).
 
-> **Status: 0.4.0 — durable active memory, indexed retrieval, and deployable confidential compute.**
+> **Status: 0.6.0 — scoped protected memory with a conservative availability floor.**
 > The memory lifecycle, conflict handling, drift detection, capability reporting,
 > confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
 > and tested. The repository includes an Azure SEV-SNP origin using OpenFHE CKKS,
@@ -40,6 +40,109 @@ Echo Veil v1.0 specification (`docs/SPEC.md`).
 pip install -e ".[dev]"
 ```
 
+## Agent runtime adapters
+
+Echo Veil includes one local encrypted host adapter used across supported runtimes. It
+provides five core operations—remember, recall, forget, doctor, and protected
+retrieval reindexing—plus stdio maintenance operations for resumable key
+rotation and explicit old-key retirement. New scoped-v2 profiles bind each
+protected object to its authorization scope, record, schema, and key; encrypt
+topics and retrieval vectors; use keyed opaque index terms; reconcile
+interrupted writes; authenticate tombstones; and quarantine corrupt records
+without serving unauthenticated content. The
+bundled host configurations use the locally installed
+`qwen3-embedding:latest` model through loopback-only Ollama, 1,024-dimensional
+MRL output, AES-GCM protected anchors, an encrypted payload sidecar, durable
+SQLite lifecycle state, and Echo Veil's confidence gate. It does not silently
+capture conversations or download a model at runtime.
+
+This is a local staging boundary. Plaintext is still visible to the authorized
+process and embedding service, and Echo Veil does not automatically protect
+host logs, prompts, transcripts, wiki/graph stores, backups, swap, or physical
+media. The complete threat model and application entry-point contract are in
+[`docs/LOCAL_AGENT_SECURITY.md`](docs/LOCAL_AGENT_SECURITY.md).
+
+Install the model before starting a bundled adapter:
+
+```bash
+ollama pull qwen3-embedding:latest
+uv run --locked python scripts/quality_benchmark.py
+```
+
+The primary quality gate qualifies 42 keyword, paraphrase, update, temporal,
+and long-memory queries plus 14 unrelated and same-subject/absent-fact
+distractors against a neutral synthetic corpus. Semantic recall uses a second
+predicate-focused answerability gate to reject records that mention the right
+subject but do not contain the requested fact. The gate also measures cold
+start, restart restoration, and recall latency. It is a reproducible regression
+gate, not a universal recall claim.
+See [`docs/QUALITY.md`](docs/QUALITY.md) for methodology and the current
+same-corpus comparison. Echo Veil stores the resolved model digest, dimension,
+and query-instruction identity with each profile and refuses to mix incompatible
+vectors. Because `latest` is mutable, the adapter also re-resolves that identity
+before every embedding batch and stops if the artifact changes during a
+long-lived process.
+
+If the configured local Ollama service or model is unavailable, the executable
+adapter can open an existing profile through an always-available read-only
+layer. It uses only the encrypted keyed predicate index, requires conservative
+term coverage, returns `degraded=true`, and disables remember, forget, reindex,
+inferential recall, and lifecycle mutation. It never substitutes hashing
+vectors or describes the result as semantic retrieval. A long-lived CLI or MCP
+process makes the same one-way transition if the service becomes unavailable
+during a later embedding call. Disable this path with
+`--no-availability-layer` or `ECHO_VEIL_AVAILABILITY_LAYER=false`.
+
+Agent-facing recall keeps at least two candidates so a close ranking cannot be
+hidden by `top_k=1`. When `ranking_ambiguous=true`, callers must preserve both
+leading records. OpenClaw responses include `host_transport.elapsed_ms` for the
+fresh-process RPC boundary; this operational latency is reported separately
+from the in-process semantic-recall benchmark.
+
+Legacy hashing profiles can be rehydrated into a fresh Qwen3 profile without a
+plaintext export:
+
+```bash
+uv run --locked python scripts/migrate_hashing_profile.py \
+  --source-profile old-hashing --target-profile new-qwen3 --confirm
+```
+
+Codex can run the bundled stdio MCP server directly from a checkout:
+
+```bash
+codex mcp add echo-veil -- \
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent \
+    --profile codex-qwen3 --embedder ollama \
+    --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
+```
+
+The repository root is also a Codex plugin (`.codex-plugin/plugin.json` plus
+`.mcp.json`) for marketplace packaging. Native or MCP adapters are included for
+OpenClaw, Hermes, Claude Code, Pi, OpenCode, Droid, and Goose. Mercury receives
+a guarded Agent Skill that exposes readiness only because its documented
+extension surface does not yet provide arbitrary MCP or structured custom
+tools.
+
+OpenClaw uses the native tool plugin in `integrations/openclaw`:
+
+```bash
+npm --prefix integrations/openclaw ci --ignore-scripts
+npm --prefix integrations/openclaw run build
+openclaw plugins install -l ./integrations/openclaw
+openclaw plugins enable echo-veil
+openclaw plugins doctor
+```
+
+Linked development installs auto-detect the checkout. Packaged installs can set
+the plugin's `projectPath` or use an installed `echo-veil-agent` executable.
+Every host uses a distinct default profile to prevent accidental cross-agent
+sharing. Writable processes acquire a profile-wide lease before loading live L1
+state; a second writer waits for the configured timeout and then fails closed
+instead of overwriting a stale snapshot. See
+[`integrations/README.md`](integrations/README.md) for the adapter
+matrix and [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) for the
+security and usage contract.
+
 ## Quick start
 
 For a complete host-agent lifecycle, confidence-gating rules, security-mode
@@ -65,8 +168,10 @@ oracle = Oracle(
 )
 
 # Add active memories (anchor vectors come from your embedding model).
-oracle.sprout("estimate: Topping Ave", embed("200A service upgrade quote"))
-oracle.sprout("family: school pickup", embed("Jaxen pickup at 3pm"))
+estimate = oracle.sprout(
+    "estimate: Harbor project", embed("service upgrade quote")
+)
+oracle.sprout("schedule: school pickup", embed("school pickup at 3pm"))
 
 # Each user turn: feed the current intent vector.
 report = oracle.observe(embed("what was the labor rate on that estimate?"))
@@ -76,6 +181,10 @@ print(oracle.report().as_dict())
 
 # Defensive readiness / production-gap report.
 print(oracle.capability_report().as_dict())
+
+# Delete Echo Veil-managed L1/L2/L3 state for one vine. The host must also
+# delete its authorized payload, backups, and separately managed artifacts.
+oracle.forget(estimate.vine_id)
 
 # Checkpoint WAL state and close the database during application shutdown.
 store.close()
@@ -160,6 +269,22 @@ SBOM generation, and provenance requirements are documented in
   finite, and must keep one embedding dimension per Oracle/Workspace. Invalid
   capacities, decay constants, timestamps, cycle overrides, confidence scores,
   and index limits are rejected at their boundaries.
+- **Twilight return-to-topic recall works automatically.** A relevant intent
+  now rescores and reinforces a compressed twilight vine before eviction;
+  callers no longer need to know its hidden vine id in advance.
+- **The adapter makes embedding selection explicit.** Bundled host profiles use
+  local Qwen3 semantic embeddings with instruction-aware queries, protected
+  multi-vector MaxSim over bounded live/LSH/lexical candidates, keyed lexical
+  matching, topic-aware MMR, and explicit supersession history. The
+  deterministic hashing backend remains available for offline tests and
+  keyword-oriented recall, but is not presented as semantic retrieval. The
+  Echo Veil core still accepts caller-owned stable embeddings and has no
+  implicit network embedding dependency.
+- **Local recall has a bounded availability floor.** A pre-existing adapter
+  profile can be opened read-only when Ollama or its configured model is
+  unavailable. Only strong subject-masked keyed-term matches are returned;
+  every response is marked degraded, semantic/answerability claims are absent,
+  and all writes and lifecycle mutation remain disabled.
 - **Eviction is retry-safe.** An archive/index failure leaves an evicted vine
   pending and retriable; pruning happens only after both lower-tier writes have
   succeeded. Building the L2 entry no longer restores plaintext onto an
@@ -167,8 +292,11 @@ SBOM generation, and provenance requirements are documented in
 - **Durable storage is available without another dependency.** `SQLiteStore`
   checkpoints active L1 vines and commits each L2 index entry, L3 archive payload, and lifecycle/topic metadata
   in one crash-recoverable transaction. It enables WAL mode, full synchronous
-  durability, integrity checks, cross-process writer coordination, and owner-only
-  database-file permissions. Reopening the store restores active, twilight,
+  durability, integrity and foreign-key checks, schema-object validation,
+  cross-process writer coordination, and owner-only database-file permissions.
+  The host adapter additionally reconciles lifecycle records left by an
+  interrupted remember operation and refuses to delete an unexplained encrypted
+  payload orphan automatically. Reopening the store restores active, twilight,
   locked, and focal-crest state as well as searchable lower-tier memory.
 - **SQLite retrieval is indexed.** Stable random-projection LSH signatures are
   stored in indexed SQLite buckets. Lookup selects approximate cosine-neighbor

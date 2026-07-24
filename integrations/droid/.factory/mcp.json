@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "echo-veil": {
+      "command": "echo-veil-agent",
+      "args": [
+        "--profile",
+        "droid-qwen3",
+        "--embedder",
+        "ollama",
+        "--embedding-model",
+        "qwen3-embedding:latest",
+        "--embedding-dimension",
+        "1024",
+        "--availability-layer",
+        "mcp"
+      ],
+      "env": {}
+    }
+  }
+}

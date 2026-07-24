@@ -61,6 +61,29 @@ JS_BLOCKED = (
     (re.compile(r"\b(?:innerHTML|outerHTML)\s*="), "unsafe HTML injection sink"),
     (re.compile(r"\bdangerouslySetInnerHTML\b"), "unsafe HTML injection sink"),
     (re.compile(r"\bchild_process\.(?:exec|execSync)\s*\("), "shell command execution"),
+    (
+        re.compile(
+            r"\bimport\s*\{[^}]*\bexec(?:Sync)?\b[^}]*\}\s*from\s*"
+            r"[\"'](?:node:)?child_process[\"']"
+        ),
+        "shell command execution import",
+    ),
+    (
+        re.compile(
+            r"\b(?:const|let|var)\s*\{[^}]*\bexec(?:Sync)?\b[^}]*\}\s*=\s*"
+            r"require\s*\(\s*[\"'](?:node:)?child_process[\"']\s*\)"
+        ),
+        "shell command execution import",
+    ),
+    (re.compile(r"\bshell\s*:\s*true\b"), "subprocess shell enabled"),
+    (
+        re.compile(r"\.\.\.\s*process\.env\b"),
+        "unfiltered host environment inheritance",
+    ),
+    (
+        re.compile(r"\.startsWith\(\s*[\"']ECHO_VEIL_[\"']\s*\)"),
+        "blanket Echo Veil environment inheritance",
+    ),
 )
 
 SHELL_PIPE = re.compile(
@@ -254,15 +277,24 @@ def scan_dockerfile(path: Path, display: str) -> list[Finding]:
 def _candidate_files(root: Path) -> list[Path]:
     candidates: list[Path] = []
     for path in root.rglob("*"):
-        if not path.is_file() or any(part in SKIP_PARTS for part in path.parts):
+        if not path.is_file():
             continue
         relative = path.relative_to(root)
+        tracked_openclaw_dist = relative.parts[:3] == (
+            "integrations",
+            "openclaw",
+            "dist",
+        )
+        skipped_parts = SKIP_PARTS - {"dist"} if tracked_openclaw_dist else SKIP_PARTS
+        if any(part in skipped_parts for part in relative.parts):
+            continue
         if relative.parts[0] not in {
             ".github",
             "cloudflare",
             "crates",
             "deploy",
             "examples",
+            "integrations",
             "scripts",
             "src",
             "tests",

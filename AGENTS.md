@@ -38,6 +38,15 @@ npm --prefix website ci --ignore-scripts
 npm --prefix website audit --audit-level=high
 npm --prefix website run lint
 npm --prefix website test
+
+npm --prefix integrations/openclaw ci --ignore-scripts
+npm --prefix integrations/openclaw run check
+npm --prefix integrations/openclaw test
+
+npm --prefix integrations/pi ci --ignore-scripts
+npm --prefix integrations/pi audit --audit-level=high
+npm --prefix integrations/pi run check
+npm --prefix integrations/pi test
 ```
 
 For release, dependency, infrastructure, and image checks, follow
@@ -58,6 +67,8 @@ without reviewing the resulting dependency diff.
 - `src/echo_veil/zkp.py` and `crates/echo-veil-zkp/`: Ristretto proof client and
   helper.
 - `cloudflare/enclave-gateway/`: Access-authenticated, mTLS Worker gateway.
+- `integrations/`: host-specific MCP configs, native OpenClaw/Pi packages, and
+  the guarded Mercury readiness skill.
 - `deploy/`: Azure, Cloudflare, Caddy, container, and secret templates.
 - `website/`: public Echo Veil product site deployed to `echo.algo-cli.com`.
 - `scripts/security_scan.py`: deterministic repository security policy.

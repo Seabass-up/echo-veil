@@ -16,6 +16,7 @@ const TRANSCRIPT_LABEL: &[u8] = b"echo-veil-ristretto-schnorr-v1";
 const MAX_CHALLENGE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProofContext {
     pub provider_id: String,
     pub measurement: String,
@@ -29,7 +30,12 @@ impl ProofContext {
             ("measurement", self.measurement.as_str()),
             ("key_id", self.key_id.as_str()),
         ] {
-            if value.is_empty() || value.len() > 512 {
+            if value.is_empty()
+                || value.len() > 512
+                || value
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+            {
                 return Err(ProofError(format!("invalid {name}")));
             }
         }
@@ -38,6 +44,7 @@ impl ProofContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SchnorrProof {
     pub version: u8,
     pub challenge_b64: String,
@@ -74,6 +81,9 @@ fn decode_fixed(value: &str, field: &str) -> Result<[u8; 32], ProofError> {
     let bytes = URL_SAFE
         .decode(value)
         .map_err(|_| invalid_field(field, ""))?;
+    if URL_SAFE.encode(&bytes) != value {
+        return Err(invalid_field(field, ""));
+    }
     bytes
         .try_into()
         .map_err(|_| invalid_field(field, " length"))
@@ -83,7 +93,10 @@ fn decode_challenge(value: &str) -> Result<Vec<u8>, ProofError> {
     let challenge = URL_SAFE
         .decode(value)
         .map_err(|_| ProofError("invalid challenge_b64".into()))?;
-    if challenge.len() < 32 || challenge.len() > MAX_CHALLENGE_BYTES {
+    if URL_SAFE.encode(&challenge) != value
+        || challenge.len() < 32
+        || challenge.len() > MAX_CHALLENGE_BYTES
+    {
         return Err(ProofError("invalid challenge length".into()));
     }
     Ok(challenge)
@@ -224,7 +237,7 @@ pub fn decode_secret(value: &[u8]) -> Result<Zeroizing<[u8; 32]>, ProofError> {
     let mut raw = URL_SAFE
         .decode(encoded)
         .map_err(|_| ProofError("key file is not valid base64".into()))?;
-    if raw.len() != 32 {
+    if URL_SAFE.encode(&raw) != encoded || raw.len() != 32 {
         raw.zeroize();
         return Err(ProofError("key file must contain a 32-byte scalar".into()));
     }
@@ -272,5 +285,11 @@ mod tests {
         let mut tampered = proof;
         tampered.challenge_b64 = URL_SAFE.encode([8_u8; 32]);
         assert!(verify(&tampered, &context(), &[public_key(&secret).unwrap()]).is_err());
+    }
+
+    #[test]
+    fn proof_json_rejects_unknown_fields() {
+        let value = br#"{"version":1,"challenge_b64":"","public_key_b64":"","commitment_b64":"","response_b64":"","extra":true}"#;
+        assert!(decode_proof(value).is_err());
     }
 }

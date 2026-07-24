@@ -9,6 +9,174 @@ the host can use as payload keys.
 The runnable development example is
 [`examples/agent_memory.py`](../examples/agent_memory.py).
 
+## Ready-to-run agent adapters
+
+`echo_veil.agent_memory.AgentMemory` implements the host responsibilities for a
+single local OS user. It creates an owner-only profile directory, protects
+vectors with AES-GCM, encrypts authorized payloads in a separate SQLite
+database, and performs confidence-gated active/cold recall. Exact remember
+retries are deduplicated. New scoped-v2 profiles encrypt topics with their
+payloads, store only opaque keyed topic and lexical tokens, bind every encrypted
+object to its scope/record/schema/key metadata, and support resumable key
+rotation. Legacy-v1 profiles keep their original plaintext topic metadata until
+they are explicitly migrated; they are reported unhealthy rather than silently
+rewritten. The local mode does not satisfy the production enclave profile. See
+[`LOCAL_AGENT_SECURITY.md`](LOCAL_AGENT_SECURITY.md) for the complete boundary,
+entry-point matrix, and release gate.
+
+The bundled full adapters explicitly select `qwen3-embedding:latest` through a
+loopback-only Ollama client. Documents are embedded without a prefix; recall
+queries use Qwen3's retrieval-instruction format. Each recall also creates a
+subject-masked, predicate-focused query and requires its best protected passage
+match to reach `0.42`. Both query vectors are generated in one bounded local
+Ollama request. The default output dimension is 1,024 and the calibrated broad
+recall minimum is `0.44`. The adapter never auto-pulls a model, follows
+redirects, contacts a non-loopback origin, or falls back silently to hashing.
+
+Recall responses expose `answerability_min_score`,
+`answerability_rejected_count`, and a per-result `answerability_score` for
+diagnosis. `echo_veil_doctor` reports `semantic-predicate-v1` when the gate is
+active and `unavailable` for hashing or custom embedders that do not implement
+it. The transform is syntax-based and contains no person names, domain-specific
+terms, or lists of sensitive attributes.
+
+### Always-available read-only recall
+
+The executable adapter enables a conservative availability layer by default.
+When the local Ollama service or configured model cannot run, it opens only an
+existing owner-protected profile and queries the persisted keyed lexical index
+at a minimum predicate score of `0.45` with at least two matched features.
+Responses set `mode=always-available-read-only`, `degraded=true`,
+`semantic_available=false`, and `lifecycle_mutated=false`. Per-result confidence
+is capped in `fragmented_synthesis`; `availability_score` exposes the raw keyed
+overlap separately. Callers must not describe it as semantic recall, coherent
+assembly, or authoritative delivery.
+
+The layer is SQLite read-only and cannot create a profile, remember, forget,
+reindex, lower its safe threshold, authorize inferential recall, or mutate decay
+and reinforcement state. A long-lived CLI or MCP process makes a one-way
+transition into this mode if a later embedding call detects a service outage.
+Paraphrases may be missed. Corrupt storage, invalid keys, model-identity
+mismatch, malformed embedding responses, and other trust failures still stop
+the adapter rather than entering degraded mode. Disable the outage path with
+`--no-availability-layer` or
+`ECHO_VEIL_AVAILABILITY_LAYER=false`.
+
+```bash
+ollama pull qwen3-embedding:latest
+uv run --locked python scripts/quality_benchmark.py
+```
+
+Qwen3 supports instruction-aware retrieval and Matryoshka Representation
+Learning dimensions; see the
+[official model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B) and
+[Ollama embed API](https://docs.ollama.com/api/embed). Model quality, footprint,
+and latency remain deployment tradeoffs, so qualify the real corpus before
+making a profile primary.
+
+The console entry point accepts payload-bearing requests only through stdin:
+
+```bash
+printf '%s' '{"action":"doctor","arguments":{}}' | echo-veil-agent rpc
+echo-veil-agent mcp
+```
+
+Codex consumes `mcp` over stdio. The checked-in `.mcp.json` uses
+`uv run --locked echo-veil-agent mcp` when the repository is installed as a
+Codex plugin. For a direct local setup:
+
+```bash
+codex mcp add echo-veil -- \
+  uv run --project /absolute/path/to/echo-veil --locked echo-veil-agent \
+    --profile codex-qwen3 --embedder ollama \
+    --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
+```
+
+OpenClaw loads `integrations/openclaw` as a native tool plugin. Pi loads a
+native TypeScript extension package. Codex and Claude Code use plugin-bundled
+stdio MCP servers. Hermes, OpenCode, Droid, and Goose use their documented
+stdio MCP configuration surfaces. Every full adapter exposes:
+
+- `echo_veil_remember` — opt-in durable capture;
+- `echo_veil_recall` — lifecycle-mutating, confidence-gated retrieval;
+- `echo_veil_forget` — payload-first local erasure;
+- `echo_veil_doctor` — adapter and core readiness reporting; and
+- `echo_veil_reindex` — explicitly confirmed protected retrieval-index rebuilds.
+
+The stdio MCP/RPC server also exposes `echo_veil_rotate_key` for confirmed,
+bounded, resumable re-encryption and `echo_veil_retire_key` for separately
+confirmed old-key retirement after backup accounting. Native hosts that do not
+yet declare those maintenance schemas must use the same versioned CLI boundary;
+they must not implement rotation themselves.
+
+Existing host memory providers and context engines remain unchanged. Echo Veil
+is not injected into every prompt and does not replace host-native memory. This
+avoids duplicate automatic recall while the policy layer is evaluated.
+
+`ECHO_VEIL_STATE_DIR`, `ECHO_VEIL_PROFILE`, and `ECHO_VEIL_SCOPE` select the
+storage and authorization boundary. The embedding
+backend is selected with `ECHO_VEIL_EMBEDDER`; Ollama model, dimension, URL, and
+timeout use the corresponding `ECHO_VEIL_EMBEDDING_*` and
+`ECHO_VEIL_OLLAMA_URL` variables. `ECHO_VEIL_AVAILABILITY_LAYER` controls the
+read-only outage path. `ECHO_VEIL_PROFILE_LOCK_TIMEOUT` controls how long a
+writable process waits for the profile-wide lease. Bundled adapters use a
+versioned Qwen3 profile per host. Profiles are authorization and concurrency
+boundaries: share one only when the hosts represent the same local user and
+authorization domain. One writable process owns a profile at a time; a second
+writer waits and then fails closed rather than loading and later persisting a
+stale process-local L1 snapshot.
+
+The adapter payload and lifecycle databases cannot share one SQLite
+transaction. Startup therefore checks their ID sets before serving requests.
+Lifecycle state without an encrypted payload is treated as an interrupted
+remember and removed through `Oracle.forget()`. An encrypted payload without
+lifecycle state is preserved and blocks startup because automatic deletion
+would be ambiguous. Restore or audit that record explicitly; do not weaken the
+check.
+
+Embedding identity is immutable for a non-empty profile. To move a hashing
+profile to Qwen3, use the explicit in-process migration below. It decrypts one
+source record at a time, re-embeds it into an empty target profile, preserves
+explicit supersession links, and creates no plaintext export file. It does not
+modify the source profile. It creates new vine IDs and fresh lifecycle state;
+scores, reinforcement age, locks, and archive position are not copied.
+
+```bash
+uv run --locked python scripts/migrate_hashing_profile.py \
+  --source-profile old-hashing --target-profile new-qwen3 --confirm
+```
+
+Do not copy or mix old vectors. If the resolved `latest` tag digest changes,
+review the model change and migrate to a new profile instead of weakening the
+mismatch check. Long-lived processes recheck the resolved digest and maximum
+dimension before every embedding batch.
+
+The bundled adapter's retrieval path uses encrypted passage vectors with
+MaxSim, keyed-hash lexical features, topic-aware MMR diversity, and explicit
+`effective_at`/`supersedes` metadata. `recall(as_of=...)` can select the fact
+valid at a historical point without discarding later corrections. Responses
+also report `ranking_margin` and `ranking_ambiguous`; callers should retain both
+leading records when the margin is at most `0.05` instead of pretending an
+adjacent policy or responsibility record is a certain winner. Run
+`echo_veil_reindex` after upgrading an existing profile so its derived protected
+retrieval data matches the current schema.
+
+The RPC/MCP boundary defensively uses at least two recall slots even if a legacy
+caller requests `top_k=1`; the response reports `requested_top_k`,
+`effective_top_k`, and `ambiguity_candidates_preserved`. Native OpenClaw and Pi
+schemas require a minimum of two. OpenClaw also reports the measured
+fresh-process boundary as `host_transport.elapsed_ms`; do not compare that host
+and process startup number directly with in-process retrieval latency.
+
+Mercury is intentionally readiness-only. Its current public documentation
+supports Agent Skills but not arbitrary MCP or structured custom-tool
+registration. Sending protected content through shell arguments, pipelines,
+temporary files, URLs, or environment variables would create plaintext traces,
+so the included Mercury skill refuses remember, recall, and forget until the
+host exposes a reviewed structured boundary. See
+[`integrations/README.md`](../integrations/README.md) for install and validation
+commands for every host.
+
 ## Integration flow
 
 For each memory worth retaining:
@@ -24,7 +192,9 @@ For each user turn:
 1. Authorize the user before loading or embedding private content.
 2. Embed the current intent with the same embedding model and dimension.
 3. Call `Oracle.observe(intent)` exactly once for the turn. This advances drift,
-   proximity, twilight, eviction, and persistence state.
+   proximity, twilight, eviction, and persistence state. A returning relevant
+   intent also rescores and automatically reinforces a twilight vine before it
+   expires.
 4. Rank eligible active vines by their newly computed score. Search cold L2
    metadata with `Oracle.search_index(intent)` when the active set is
    insufficient, then resolve returned vine IDs through the authorized payload
@@ -49,7 +219,7 @@ payloads: dict[str, str] = {}
 
 anchor = np.array([1.0, 0.0, 0.0])  # replace with your embedding model
 vine = oracle.sprout("estimate labor rate", anchor)
-payloads[vine.vine_id] = "Labor rate is $125/hour."
+payloads[vine.vine_id] = "Synthetic example labor rate is $137/hour."
 
 intent = np.array([1.0, 0.0, 0.0])
 oracle.observe(intent)
@@ -69,7 +239,8 @@ if candidates:
 
 The example reads the exported `Workspace` collaborator to rank active vines
 after `observe()`. Do not mutate returned `Vine` instances. Lifecycle mutations
-must go through `Oracle.reinforce()`, `lock()`, `unlock()`, and `set_crests()`.
+must go through `Oracle.reinforce()`, `lock()`, `unlock()`, `set_crests()`, and
+`forget()`.
 
 ## Security modes
 
@@ -116,13 +287,31 @@ secrets, raw protected vectors, proofs, or attestation credentials.
 
 - Call `oracle.capability_report().as_dict()` at startup and surface blockers in
   readiness/health reporting.
+- For `AgentMemory`, use `doctor()` and retain each readiness fact separately.
+  Do not collapse installation, supported version, enablement, crypto, write,
+  index, retrieval, persistence, restart, rotation, and health into one flag.
+  Do not log the profile path, raw scope, queries, payloads, vectors, keys, or
+  exception representations that may contain them.
+- Rotate a scoped-v2 profile with repeated confirmed `rotate_key()` calls until
+  it reports `verified`. Retire the previous key only after record-reference
+  verification and an explicit backup-accounting confirmation. Legacy-v1
+  profiles must migrate to a fresh scoped-v2 profile first.
 - Keep one embedding model/version and dimension per Oracle/store. Migrate to a
-  new store when changing dimensions unless a reviewed migration exists.
+  new profile when changing dimensions or model identity; use only the reviewed
+  hashing-to-Qwen migration above for legacy adapter profiles.
 - Treat every query as tenant-scoped. Do not share an Oracle or payload lookup
   across authorization boundaries without explicit tenant isolation.
-- Apply payload deletion and retention to both the host content store and the
-  corresponding Echo Veil state. The current public API does not provide a
-  complete end-user erasure workflow; hosts needing one must implement and test
-  coordinated deletion before production use.
+- Call `oracle.forget(vine_id)` to remove the matching Echo Veil-managed
+  L1/L2/L3 state. `SQLiteStore` performs that deletion atomically and leaves a
+  live vine retryable when the transaction fails.
+- Treat `forget()` as one step in the host's erasure workflow, not a complete
+  erasure claim. Delete the authorized payload, tenant mapping, separately
+  managed conflict/fossil artifacts, and applicable backups under host policy.
+  SQLite `secure_delete` reduces ordinary page remnants, but Python memory,
+  WAL files, backups, and storage media do not provide guaranteed physical
+  erasure through this API.
+- For user-requested erasure, revoke payload access first, enqueue an auditable
+  deletion job, idempotently retry both `forget()` and host-store deletion, and
+  verify every in-scope system before marking the request complete.
 - Benchmark SQLite/LSH latency and recall on the real corpus. Its local durable
   behavior is not a distributed or exabyte-scale storage guarantee.

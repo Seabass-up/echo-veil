@@ -57,7 +57,7 @@ class MetadataIndexBackend(Protocol):
     def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None:
         raise NotImplementedError
 
-    def remove(self, key: str) -> None:
+    def remove(self, key: str) -> bool:
         raise NotImplementedError
 
     def search(
@@ -84,6 +84,9 @@ class ArchiveBackend(Protocol):
         raise NotImplementedError
 
     def get(self, key: str) -> bytes | None:
+        raise NotImplementedError
+
+    def remove(self, key: str) -> bool:
         raise NotImplementedError
 
     def __len__(self) -> int:
@@ -114,6 +117,10 @@ class TransactionalEvictionStore(Protocol):
     def load_workspace(self) -> tuple[list[Any], dict[str, int], tuple[str, ...]]:
         raise NotImplementedError
 
+    def delete_memory(self, key: str) -> bool:
+        """Atomically remove one managed memory from every storage tier."""
+        raise NotImplementedError
+
 
 def is_transactional_eviction_store(
     candidate: object,
@@ -125,10 +132,13 @@ def is_transactional_eviction_store(
         callable(getattr(candidate, "commit_evictions", None))
         and callable(getattr(candidate, "save_workspace", None))
         and callable(getattr(candidate, "load_workspace", None))
+        and callable(getattr(candidate, "delete_memory", None))
         and callable(getattr(index, "upsert", None))
+        and callable(getattr(index, "remove", None))
         and callable(getattr(index, "search", None))
         and callable(getattr(archive, "put", None))
         and callable(getattr(archive, "get", None))
+        and callable(getattr(archive, "remove", None))
     )
 
 
@@ -194,10 +204,10 @@ class MetadataIndex:
                 kind=kind,
             )
 
-    def remove(self, key: str) -> None:
+    def remove(self, key: str) -> bool:
         self._validate_key(key)
         with self._lock:
-            self._entries.pop(key, None)
+            return self._entries.pop(key, None) is not None
 
     def search(
         self,
@@ -285,6 +295,11 @@ class ColdArchive:
         MetadataIndex._validate_key(key)
         with self._lock:
             return self._store.get(key)
+
+    def remove(self, key: str) -> bool:
+        MetadataIndex._validate_key(key)
+        with self._lock:
+            return self._store.pop(key, None) is not None
 
     def __len__(self) -> int:
         with self._lock:

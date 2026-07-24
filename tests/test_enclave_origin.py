@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import os
 import sys
 import types
 from collections.abc import Mapping, Sequence
@@ -20,8 +23,14 @@ from echo_veil import (
     VerifiedEnclave,
 )
 from echo_veil_origin import AttestationSigner, EnclaveService, OriginConfig
+from echo_veil_origin.app import (
+    MAX_REQUEST_BYTES,
+    _read_bounded_request_body,
+    _read_origin_token,
+)
 from echo_veil_origin.core import ProtocolError, origin_token_matches
 from echo_veil_origin.openfhe_engine import OpenFheCkksEngine
+from echo_veil_origin.proof_verifier import RistrettoProofVerifier
 
 
 class _TestCkks:
@@ -52,6 +61,18 @@ class _ProofProvider:
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
         assert enclave.measurement == "approved-measurement"
         return b"proof:" + challenge
+
+
+class _StreamingRequest:
+    def __init__(self, chunks: list[bytes], content_length: str | None = None) -> None:
+        self._chunks = chunks
+        self.headers: dict[str, str] = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+
+    async def stream(self):
+        for chunk in self._chunks:
+            yield chunk
 
 
 class _OriginTransport:
@@ -155,6 +176,15 @@ def _service():
     )
 
 
+def test_origin_config_rejects_whitespace_identifiers() -> None:
+    with pytest.raises(ValueError, match="provider_id"):
+        OriginConfig(
+            provider_id="provider\N{NO-BREAK SPACE}name",
+            measurement="measurement",
+            key_id="key",
+        )
+
+
 def test_origin_interoperates_with_cloudflare_provider_and_shield() -> None:
     service, signing_key = _service()
     transport = _OriginTransport(service)
@@ -229,12 +259,58 @@ def test_origin_rejects_replayed_envelope() -> None:
         service.process_envelope(path, envelope)
 
 
+def test_origin_does_not_cache_unauthenticated_envelopes() -> None:
+    service, _ = _service()
+    ephemeral = X25519PrivateKey.generate().public_key().public_bytes_raw()
+    invalid = {
+        "ephemeral_public_key_b64": base64.urlsafe_b64encode(ephemeral).decode(),
+        "nonce_b64": base64.urlsafe_b64encode(b"n" * 12).decode(),
+        "ciphertext_b64": base64.urlsafe_b64encode(b"invalid-tag").decode(),
+    }
+
+    with pytest.raises(ProtocolError, match="authentication"):
+        service.process_envelope("/v1/challenge", invalid)
+
+    assert service._seen_envelopes == {}  # noqa: SLF001 - replay-cache invariant
+
+
+def test_origin_rejects_unknown_protocol_fields() -> None:
+    service, _ = _service()
+    with pytest.raises(ProtocolError, match="attestation request"):
+        service.attest(
+            {
+                "nonce_b64": base64.urlsafe_b64encode(b"n" * 32).decode(),
+                "unexpected": True,
+            }
+        )
+
+
 def test_origin_bearer_token_comparison_is_fail_closed() -> None:
     expected = "a" * 48
     assert origin_token_matches(expected, f"Bearer {expected}")
     assert not origin_token_matches(expected, None)
     assert not origin_token_matches(expected, "Basic " + expected)
     assert not origin_token_matches(expected, "Bearer " + "b" * 48)
+
+
+def test_origin_streams_request_body_with_a_hard_memory_bound() -> None:
+    request = _StreamingRequest([b'{"ok":', b"true}"], content_length="11")
+
+    assert asyncio.run(_read_bounded_request_body(request)) == b'{"ok":true}'
+
+    oversized = _StreamingRequest([b"x" * MAX_REQUEST_BYTES, b"y"])
+    with pytest.raises(ProtocolError, match="request size"):
+        asyncio.run(_read_bounded_request_body(oversized))
+
+
+@pytest.mark.parametrize("content_length", ["0", "-1", "1.5", "unknown"])
+def test_origin_rejects_invalid_content_length_before_streaming(
+    content_length: str,
+) -> None:
+    request = _StreamingRequest([b"{}"], content_length=content_length)
+
+    with pytest.raises(ProtocolError, match="request size"):
+        asyncio.run(_read_bounded_request_body(request))
 
 
 def test_origin_rejects_engine_key_id_mismatch() -> None:
@@ -247,4 +323,57 @@ def test_origin_rejects_engine_key_id_mismatch() -> None:
             service._attestation_signer,  # noqa: SLF001 - targeted invariant test
             _ProofVerifier(),
             _TestCkks(),
+        )
+
+
+def test_origin_rejects_attestation_transport_key_mismatch() -> None:
+    config = OriginConfig(
+        provider_id="azure-sev-snp-eastus2",
+        measurement="approved-measurement",
+        key_id="ckks-key-1",
+    )
+    signing_key = Ed25519PrivateKey.generate()
+    signer = AttestationSigner(signing_key, b"x" * 32, config)
+
+    with pytest.raises(RuntimeError, match="transport key"):
+        EnclaveService(
+            config,
+            X25519PrivateKey.generate(),
+            signer,
+            _ProofVerifier(),
+            _TestCkks(),
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symbolic links require POSIX")
+def test_origin_token_rejects_symbolic_link(tmp_path: Path) -> None:
+    target = tmp_path / "token"
+    target.write_text("t" * 48, encoding="utf-8")
+    target.chmod(0o600)
+    link = tmp_path / "token-link"
+    link.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="symbolic link"):
+        _read_origin_token(str(link))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symbolic links require POSIX")
+def test_origin_verifier_rejects_symbolic_link_path_components(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    binary = real / "echo-veil-zkp"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o700)
+    allowlist = real / "allowed.json"
+    allowlist.write_text("[]", encoding="utf-8")
+    allowlist.chmod(0o600)
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="symbolic links"):
+        RistrettoProofVerifier(
+            linked / binary.name,
+            linked / allowlist.name,
         )

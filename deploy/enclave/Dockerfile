@@ -15,16 +15,21 @@ RUN groupadd --gid 10001 echo-veil \
     && useradd --uid 10001 --gid echo-veil --home-dir /nonexistent --shell /usr/sbin/nologin echo-veil \
     && install -d -o echo-veil -g echo-veil -m 0700 /var/lib/echo-veil/ckks
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
+COPY --chown=0:10001 --chmod=0440 pyproject.toml README.md LICENSE ./
+COPY --chown=0:10001 src ./src
+RUN find /app/src -type d -exec chmod 0550 {} + \
+    && find /app/src -type f -exec chmod 0440 {} +
 COPY deploy/enclave/requirements.lock deploy/enclave/openfhe.lock /tmp/requirements/
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
         --require-hashes -r /tmp/requirements/requirements.lock \
     && python3 -m pip install --no-cache-dir --break-system-packages \
         --require-hashes -r /tmp/requirements/openfhe.lock \
     && rm -rf /tmp/requirements
-COPY --from=zkp-builder /build/crates/echo-veil-zkp/target/release/echo-veil-zkp /usr/local/bin/echo-veil-zkp
+COPY --chown=0:10001 --chmod=0550 --from=zkp-builder \
+    /build/crates/echo-veil-zkp/target/release/echo-veil-zkp \
+    /usr/local/bin/echo-veil-zkp
 USER 10001:10001
+RUN python3 -c "import echo_veil, echo_veil_origin, openfhe"
 EXPOSE 8080
 ENTRYPOINT ["python3", "-m", "uvicorn"]
 CMD ["echo_veil_origin.app:load_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]

@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_runnable_agent_example_retrieves_and_gates_memory() -> None:
     result = run_demo()
 
-    assert result.topic == "Topping Avenue service estimate labor rate"
-    assert result.payload == "The approved labor rate is 125 dollars per hour."
+    assert result.topic == "Harbor project service estimate labor rate"
+    assert result.payload == "The synthetic example labor rate is 137 dollars per hour."
     assert result.confidence_band == "solid_vine_integration"
     assert result.score >= 0.85
 

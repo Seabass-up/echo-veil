@@ -7,6 +7,7 @@ operations a host application actually performs:
   - sprout(topic, anchor)          add an active vine
   - observe(intent)                run a query cycle (decay + drift)
   - reinforce(vine_id)             snap a twilight vine back
+  - forget(vine_id)                delete managed L1/L2/L3 state
   - report()                       the Gardener's Report
 
 Confidence classification and the crypto shield are provided as collaborators
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import math
 import zlib
+from collections.abc import Callable
 from numbers import Real
 from threading import RLock
 from typing import cast
@@ -105,7 +107,7 @@ class Oracle:
             )
         if storage is not None and not is_transactional_eviction_store(storage):
             raise TypeError(
-                "storage must expose index, archive, and commit_evictions(records)"
+                "storage must expose coordinated workspace, eviction, and deletion APIs"
             )
         if normalized_environment == "production" and not isinstance(
             shield, EnclaveCryptoShield
@@ -124,6 +126,7 @@ class Oracle:
             )
         if normalized_environment == "staging" and not (
             isinstance(shield, AesGcmCryptoShield)
+            or getattr(shield, "staging_ready", False) is True
             or (shield is not None and is_production_crypto_shield(shield))
         ):
             raise RuntimeError(
@@ -174,13 +177,28 @@ class Oracle:
             ):
                 raise RuntimeError("persisted L1 and L2 dimensions disagree")
 
-    def sprout(self, topic: str, anchor: Vector) -> Vine:
+    def sprout(
+        self,
+        topic: str,
+        anchor: Vector,
+        *,
+        vine_id: str | None = None,
+    ) -> Vine:
         with self._lock:
-            vine = Vine(topic=topic, anchor=anchor)
+            vine = (
+                Vine(topic=topic, anchor=anchor)
+                if vine_id is None
+                else Vine(topic=topic, anchor=anchor, vine_id=vine_id)
+            )
             dimension = vine.anchor.size
             self._validate_dimension(vine.anchor, establish=False)
             if not isinstance(self.shield, NullCryptoShield):
-                protected_anchor = self.shield.protect(vine.anchor)
+                contextual_protect = getattr(self.shield, "protect_for_record", None)
+                protected_anchor = (
+                    contextual_protect(vine.anchor, vine.vine_id)
+                    if callable(contextual_protect)
+                    else self.shield.protect(vine.anchor)
+                )
                 if not is_serializable_protected_payload(protected_anchor):
                     raise TypeError(
                         "CryptoShield.protect() must return a payload with "
@@ -202,14 +220,53 @@ class Oracle:
         vines, cycles, crests = self.workspace.persistence_snapshot()
         saver(vines, cycles, crests)
 
+    def rewrap_active_protected_anchors(
+        self,
+        source_key_id: str,
+        transform: Callable[[object], object],
+    ) -> int:
+        """Re-encrypt matching active anchors under the Oracle mutation lock."""
+
+        if not isinstance(source_key_id, str) or not source_key_id.strip():
+            raise ValueError("source_key_id must be a non-empty string")
+        if not callable(transform):
+            raise TypeError("protected-anchor transform must be callable")
+        changed = 0
+        with self._lock:
+            for vine in self.workspace.vines:
+                protected = vine.protected_anchor
+                if (
+                    protected is None
+                    or getattr(protected, "key_id", None) != source_key_id
+                ):
+                    continue
+                replacement = transform(protected)
+                if not is_serializable_protected_payload(replacement):
+                    raise TypeError(
+                        "protected-anchor transform returned an invalid payload"
+                    )
+                record_id = getattr(replacement, "record_id", None)
+                if record_id is not None and record_id != vine.vine_id:
+                    raise RuntimeError(
+                        "rotated protected anchor record binding is invalid"
+                    )
+                vine.protected_anchor = replacement
+                changed += 1
+            if changed:
+                self._persist_workspace()
+        return changed
+
     def _score_vine(self, intent: Vector, vine: Vine, now: float) -> float:
         if vine.protected_anchor is not None:
             similarity = self._protected_similarity(intent, vine.protected_anchor)
             return similarity + time_decay(
                 vine.age_hours(now), self.workspace.config.proximity
             )
+        anchor = (
+            vine.anchor_snapshot() if vine.state == VineState.TWILIGHT else vine.anchor
+        )
         return proximity_score(
-            intent, vine.anchor, vine.age_hours(now), self.workspace.config.proximity
+            intent, anchor, vine.age_hours(now), self.workspace.config.proximity
         )
 
     def _reveal_protected_anchor(self, protected_anchor: object) -> Vector | None:
@@ -407,6 +464,27 @@ class Oracle:
             if result is not None and not isinstance(result, dict):
                 raise TypeError("storage metadata getter must return a dict or None")
             return cast(dict[str, object] | None, result)
+
+    def forget(self, vine_id: str) -> bool:
+        """Delete one memory from Echo Veil's managed L1/L2/L3 tiers.
+
+        Durable backends delete their records before the live Vine is released,
+        so a storage failure leaves a retryable in-memory object. Host payloads,
+        backups, and separately managed conflict artifacts remain caller-owned.
+        """
+        MetadataIndex._validate_key(vine_id)
+        with self._lock:
+            live = self.workspace.get(vine_id)
+            if self.storage is not None:
+                deleted = self.storage.delete_memory(vine_id)
+            else:
+                removed_index = self.index.remove(vine_id)
+                removed_archive = self.archive.remove(vine_id)
+                deleted = removed_index or removed_archive
+            removed = self.workspace.remove(vine_id)
+            if removed is not None:
+                removed.clear_material()
+            return deleted or live is not None
 
     def reinforce(self, vine_id: str, now: float | None = None) -> None:
         with self._lock:

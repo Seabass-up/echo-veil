@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 import numpy as np
@@ -18,10 +21,13 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from echo_veil import (
     CloudflareEnclaveProvider,
+    CloudflareGatewayError,
     EnclaveCryptoShield,
     EnclaveProtectedVector,
     VerifiedEnclave,
 )
+from echo_veil.cloudflare_provider import UrllibCloudflareTransport
+from echo_veil.cloudflare_provider import _NoRedirectHandler
 
 
 class _GatewayTransport:
@@ -57,7 +63,7 @@ class _GatewayTransport:
             )
             request_value = json.loads(plaintext)
             if path == "/v1/challenge":
-                response_value = {"challenge_b64": _b64(b"zk-challenge")}
+                response_value = {"challenge_b64": _b64(b"z" * 32)}
             elif path == "/v1/session":
                 assert request_value["proof_b64"] == _b64(b"zk-proof")
                 response_value = {"session": "opaque-session"}
@@ -103,7 +109,7 @@ class _Verifier:
 
 class _ProofProvider:
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
-        assert challenge == b"zk-challenge"
+        assert challenge == b"z" * 32
         return b"zk-proof"
 
 
@@ -151,16 +157,23 @@ def test_cloudflare_provider_wires_access_gateway_to_enclave_shield() -> None:
         "memory.example.com",
         "https://user:pass@memory.example.com",
         "https://memory.example.com?secret=value",
+        "https://memory.example.com/not-an-origin",
     ],
 )
 def test_cloudflare_provider_requires_clean_https_gateway_url(url: str) -> None:
-    with pytest.raises(ValueError, match="HTTPS|credentials"):
+    with pytest.raises(ValueError, match="HTTPS|credential-free"):
         CloudflareEnclaveProvider(url, "id", "secret")
 
 
 def test_cloudflare_provider_rejects_missing_access_credentials() -> None:
-    with pytest.raises(ValueError, match="credentials"):
+    with pytest.raises(ValueError, match="Access client ID"):
         CloudflareEnclaveProvider("https://memory.example.com", "", "secret")
+    with pytest.raises(ValueError, match="Access client secret"):
+        CloudflareEnclaveProvider(
+            "https://memory.example.com",
+            "id",
+            "secret\N{NO-BREAK SPACE}suffix",
+        )
 
 
 def test_cloudflare_provider_loads_access_credentials_from_env(monkeypatch) -> None:
@@ -168,3 +181,75 @@ def test_cloudflare_provider_loads_access_credentials_from_env(monkeypatch) -> N
     monkeypatch.setenv("CF_ACCESS_CLIENT_SECRET", "secret")
     provider = CloudflareEnclaveProvider.from_env("https://memory.example.com")
     assert provider is not None
+
+
+def test_cloudflare_provider_bounds_timeout() -> None:
+    with pytest.raises(ValueError, match="within"):
+        CloudflareEnclaveProvider(
+            "https://memory.example.com", "id", "secret", timeout_seconds=61
+        )
+
+
+def test_cloudflare_provider_bounds_enclave_protocol_inputs() -> None:
+    provider = CloudflareEnclaveProvider(
+        "https://memory.example.com",
+        "id",
+        "secret",
+        transport=_GatewayTransport(),
+    )
+
+    with pytest.raises(ValueError, match="attestation nonce"):
+        provider.attest(b"short")
+    with pytest.raises(ValueError, match="proof"):
+        provider.open_session(b"p" * 4_097)
+    with pytest.raises(ValueError, match="session"):
+        provider.encrypt_vector("bad\nsession", np.array([1.0]))
+    with pytest.raises(ValueError, match="session"):
+        provider.encrypt_vector("bad\N{NO-BREAK SPACE}session", np.array([1.0]))
+    with pytest.raises(ValueError, match="safety limit"):
+        provider.encrypt_vector("session", np.ones(16_385))
+
+
+def test_urllib_transport_redacts_upstream_error_body(monkeypatch) -> None:
+    upstream_error = urllib.error.HTTPError(
+        "https://memory.example.com/v1/attest",
+        502,
+        "Bad Gateway",
+        {},
+        io.BytesIO(b"internal secret detail"),
+    )
+
+    class RejectingOpener:
+        def open(self, *_args, **_kwargs):
+            raise upstream_error
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: RejectingOpener(),
+    )
+
+    with pytest.raises(CloudflareGatewayError) as caught:
+        UrllibCloudflareTransport().post(
+            "https://memory.example.com/v1/attest",
+            {"Content-Type": "application/json"},
+            b"{}",
+            10.0,
+        )
+
+    assert caught.value.status_code == 502
+    assert "secret" not in str(caught.value)
+
+
+def test_cloudflare_transport_refuses_redirects() -> None:
+    assert (
+        _NoRedirectHandler().redirect_request(
+            None,
+            None,
+            302,
+            "Found",
+            {},
+            "https://attacker.example/steal",
+        )
+        is None
+    )

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "echo_veil": {
+      "type": "local",
+      "command": [
+        "echo-veil-agent",
+        "--profile",
+        "opencode-qwen3",
+        "--embedder",
+        "ollama",
+        "--embedding-model",
+        "qwen3-embedding:latest",
+        "--embedding-dimension",
+        "1024",
+        "--availability-layer",
+        "mcp"
+      ],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "echo-veil_echo_veil_remember": "ask",
+    "echo-veil_echo_veil_forget": "ask"
+  }
+}

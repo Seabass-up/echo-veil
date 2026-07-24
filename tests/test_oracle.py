@@ -33,6 +33,21 @@ def test_oracle_sprout_and_report():
     assert report.twilight_grove == 0
 
 
+def test_oracle_forget_removes_in_memory_vine_and_is_idempotent():
+    oracle = Oracle()
+    vine = oracle.sprout("temporary", np.array([1.0, 0.0]))
+
+    assert oracle.forget(vine.vine_id) is True
+    assert oracle.forget(vine.vine_id) is False
+    assert oracle.workspace.get(vine.vine_id) is None
+    assert vine.anchor.size == 0
+
+
+def test_oracle_forget_rejects_empty_id():
+    with pytest.raises(ValueError, match="non-empty"):
+        Oracle().forget(" ")
+
+
 def test_oracle_observe_demotes_offtopic_vine():
     o = Oracle(WorkspaceConfig(capacity=2, pressure_evict_at=0.0))
     keep = o.sprout("on topic", np.array([1.0, 0.0]))

@@ -16,6 +16,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from ._bounded_process import ProcessOutputLimitError, run_bounded_process
+from ._json import require_exact_keys, strict_json_loads
 from .crypto_shield import VerifiedEnclave
 
 DEFAULT_ZKP_BINARY_ENV = "ECHO_VEIL_ZKP_BINARY"
@@ -44,7 +46,22 @@ class RistrettoSchnorrProofProvider:
             raise ValueError("Ristretto proof helper binary was not found")
         if not os.access(resolved_binary, os.X_OK):
             raise ValueError("Ristretto proof helper binary is not executable")
-        resolved_key = Path(key_file).expanduser().resolve()
+        if (
+            os.name == "posix"
+            and stat.S_IMODE(os.stat(resolved_binary).st_mode) & 0o022
+        ):
+            raise ValueError(
+                "Ristretto proof helper binary must not be group/world writable"
+            )
+        supplied_key = Path(key_file).expanduser().absolute()
+        if any(
+            component.is_symlink()
+            for component in (supplied_key, *supplied_key.parents)
+        ):
+            raise ValueError(
+                "Ristretto identity key path must not contain symbolic links"
+            )
+        resolved_key = supplied_key.resolve()
         if not resolved_key.is_file():
             raise ValueError("Ristretto identity key file was not found")
         if os.name == "posix":
@@ -71,15 +88,22 @@ class RistrettoSchnorrProofProvider:
         key_file_env: str = DEFAULT_ZKP_KEY_FILE_ENV,
         timeout_seconds: float = 5.0,
     ) -> RistrettoSchnorrProofProvider:
-        binary = os.environ.get(binary_env, "").strip()
-        key_file = os.environ.get(key_file_env, "").strip()
-        if not binary or not key_file:
+        binary = os.environ.get(binary_env, "")
+        key_file = os.environ.get(key_file_env, "")
+        if (
+            not binary
+            or binary != binary.strip()
+            or not key_file
+            or key_file != key_file.strip()
+        ):
             raise ValueError(f"{binary_env} and {key_file_env} must both be set")
         return cls(binary, key_file, timeout_seconds=timeout_seconds)
 
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
         if not isinstance(challenge, bytes) or not 32 <= len(challenge) <= 256:
             raise ValueError("enclave challenge must contain 32..256 bytes")
+        if not isinstance(enclave, VerifiedEnclave):
+            raise TypeError("enclave must be a VerifiedEnclave")
         request = json.dumps(
             {
                 "challenge_b64": base64.urlsafe_b64encode(challenge).decode("ascii"),
@@ -91,33 +115,44 @@ class RistrettoSchnorrProofProvider:
             separators=(",", ":"),
         ).encode("utf-8")
         try:
-            completed = subprocess.run(  # noqa: S603 -- fixed executable, no shell
+            completed = run_bounded_process(
                 [self._binary, "prove", "--key-file", self._key_file],
-                input=request,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self._timeout,
-                check=False,
-                close_fds=True,
+                input_bytes=request,
+                timeout_seconds=self._timeout,
+                maximum_output_bytes=MAX_HELPER_OUTPUT_BYTES,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Ristretto proof helper timed out") from exc
-        except OSError as exc:
-            raise RuntimeError("Ristretto proof helper could not be executed") from exc
-        if len(completed.stdout) > MAX_HELPER_OUTPUT_BYTES:
+        except ProcessOutputLimitError as exc:
             raise RuntimeError(
                 "Ristretto proof helper output exceeded the safety limit"
-            )
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError("Ristretto proof helper could not be executed") from exc
         if completed.returncode != 0:
             raise RuntimeError("Ristretto proof helper rejected the request")
         try:
-            response = json.loads(completed.stdout.decode("utf-8"))
+            response = strict_json_loads(completed.stdout)
+            if not isinstance(response, dict):
+                raise TypeError
+            require_exact_keys(response, {"proof_b64", "public_key_b64"})
             encoded = response["proof_b64"]
-            if not isinstance(encoded, str):
+            encoded_public_key = response["public_key_b64"]
+            if not isinstance(encoded, str) or not isinstance(encoded_public_key, str):
                 raise TypeError
             proof = base64.b64decode(
                 encoded.encode("ascii"), altchars=b"-_", validate=True
             )
+            public_key = base64.b64decode(
+                encoded_public_key.encode("ascii"), altchars=b"-_", validate=True
+            )
+            if (
+                base64.urlsafe_b64encode(proof).decode("ascii") != encoded
+                or base64.urlsafe_b64encode(public_key).decode("ascii")
+                != encoded_public_key
+                or len(public_key) != 32
+            ):
+                raise ValueError
         except Exception as exc:
             raise RuntimeError(
                 "Ristretto proof helper returned invalid output"

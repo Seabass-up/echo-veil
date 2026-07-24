@@ -62,6 +62,22 @@ def test_reinforce_snaps_back_with_bonus():
     assert v.score == pytest.approx(before + 0.08)
 
 
+def test_relevant_intent_automatically_snaps_twilight_vine_back() -> None:
+    ws = Workspace(WorkspaceConfig(capacity=2))
+    vine = ws.add(Vine("returning topic", np.array([1.0, 0.0])))
+    now = time.time()
+
+    ws.run_decay_cycle(np.array([0.0, 1.0]), now=now)
+    assert vine.state == VineState.TWILIGHT
+    assert vine.anchor.size == 0
+
+    ws.run_decay_cycle(np.array([1.0, 0.0]), now=now + 1)
+
+    assert vine.state == VineState.ACTIVE
+    assert vine.anchor.shape == (2,)
+    assert vine.score == pytest.approx(1.0)
+
+
 def test_twilight_evicts_after_window():
     ws = _ws()
     v = ws.add(Vine("b", np.array([0.0, 1.0])))
@@ -85,6 +101,21 @@ def test_crest_cap_enforced():
     ]
     with pytest.raises(ValueError):
         ws.set_crests(ids)
+
+
+def test_remove_cleans_lifecycle_bookkeeping_without_resetting_dimension():
+    ws = _ws()
+    vine = ws.add(Vine("primary", np.array([1.0, 0.0])))
+    ws.set_crests([vine.vine_id])
+
+    removed = ws.remove(vine.vine_id)
+    removed_again = ws.remove(vine.vine_id)
+
+    assert removed is vine
+    assert removed_again is None
+    assert ws.tidal_split() == {}
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        ws.add(Vine("wrong dimension", np.array([1.0, 0.0, 0.0])))
 
 
 def test_tidal_split_normal_and_pressure():

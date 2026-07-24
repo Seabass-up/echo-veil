@@ -204,3 +204,21 @@ class Vine:
         compress() has been called). Returns None if no compressed data exists.
         """
         return self._compressed
+
+    def clear_material(self) -> None:
+        """Best-effort release of vector and protected material held by this object.
+
+        Python and the host operating system do not guarantee physical memory
+        erasure. This method prevents continued access through the Vine object;
+        deployment-level secure deletion remains the host's responsibility.
+        """
+        try:
+            self.anchor.fill(0.0)
+        except (AttributeError, TypeError, ValueError):
+            # Returned Vine objects are mutable; replacement below still drops
+            # this object's reference if a caller installed a read-only value.
+            pass
+        self.anchor = np.zeros(0, dtype=np.float64)
+        self._compressed = None
+        self._anchor_shape = None
+        self.protected_anchor = None

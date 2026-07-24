@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test scripts/render-config.test.mjs src/index.test.mjs",
     "render-config": "node scripts/render-config.mjs",
+    "types": "npm run render-config && wrangler types --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
+    "types:check": "npm run render-config && wrangler types --check --config .wrangler.generated.json --env-interface CloudflareBindings --include-runtime false --strict-vars false worker-configuration.d.ts",
     "deploy": "npm run render-config && wrangler deploy --config .wrangler.generated.json",
     "deploy:dry-run": "npm run render-config && wrangler deploy --dry-run --config .wrangler.generated.json",
     "dev": "npm run render-config && wrangler dev --config .wrangler.generated.json"
@@ -15,8 +18,11 @@
     "jose": "^6.1.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260715.1",
+    "@cloudflare/workers-types": "5.20260722.1",
     "typescript": "^5.9.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "4.113.0"
+  },
+  "overrides": {
+    "sharp": "0.35.3"
   }
 }

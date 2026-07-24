@@ -1,0 +1,37 @@
+{
+  "name": "echo-veil",
+  "version": "0.6.0",
+  "description": "Local encrypted, decay-driven memory tools for Codex.",
+  "author": {
+    "name": "Algo-cli.com",
+    "url": "https://github.com/Seabass-up"
+  },
+  "homepage": "https://echo.algo-cli.com",
+  "repository": "https://github.com/Seabass-up/echo-veil",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "agents",
+    "retrieval",
+    "privacy"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Echo Veil",
+    "shortDescription": "Encrypted, confidence-gated local memory",
+    "longDescription": "Remember, recall, inspect, and forget user-authorized local memories through Echo Veil's decay-driven lifecycle.",
+    "developerName": "Algo-cli.com",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://echo.algo-cli.com",
+    "defaultPrompt": [
+      "Remember this with Echo Veil.",
+      "Recall what Echo Veil knows about this topic.",
+      "Check Echo Veil's local readiness."
+    ],
+    "brandColor": "#6B5B95"
+  }
+}

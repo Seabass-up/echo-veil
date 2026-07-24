@@ -30,7 +30,16 @@ def test_deployment_loads_public_key_and_measurement_allowlist(monkeypatch) -> N
 
 @pytest.mark.parametrize(
     "value",
-    ["", "not-json", "[]", '["SET_AFTER_DEPLOYMENT"]', '[""]'],
+    [
+        "",
+        "not-json",
+        "[]",
+        '["SET_AFTER_DEPLOYMENT"]',
+        '[""]',
+        '["duplicate","duplicate"]',
+        ' ["leading-whitespace"]',
+        '["measurement with whitespace"]',
+    ],
 )
 def test_deployment_rejects_missing_or_placeholder_measurements(
     monkeypatch, value: str
@@ -38,6 +47,18 @@ def test_deployment_rejects_missing_or_placeholder_measurements(
     monkeypatch.setenv("ECHO_VEIL_ALLOWED_MEASUREMENTS", value)
     with pytest.raises(ValueError, match="MEASUREMENTS"):
         _allowed_measurements()
+
+
+def test_deployment_rejects_noncanonical_attestation_public_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ECHO_VEIL_ATTESTATION_PUBLIC_KEY",
+        base64.b64encode(b"\xff" * 32).decode("ascii"),
+    )
+
+    with pytest.raises(ValueError, match="32 bytes"):
+        _attestation_public_key()
 
 
 def test_deployment_requires_real_access_credentials(monkeypatch) -> None:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import base64
-import json
+import hmac
 import os
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from ._json import strict_json_loads
 from .cloudflare_provider import CloudflareEnclaveProvider, CloudflareTransport
 from .crypto_shield import Ed25519AttestationVerifier, EnclaveCryptoShield
 from .zkp import RistrettoSchnorrProofProvider
@@ -16,8 +17,8 @@ DEFAULT_GATEWAY_URL = "https://memory.algo-cli.com"
 
 
 def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
+    value = os.environ.get(name, "")
+    if not value or value != value.strip():
         raise ValueError(f"{name} is required")
     return value
 
@@ -28,7 +29,9 @@ def _attestation_public_key() -> Ed25519PublicKey:
         raw = base64.b64decode(encoded.encode("ascii"), altchars=b"-_", validate=True)
     except Exception as exc:
         raise ValueError("ECHO_VEIL_ATTESTATION_PUBLIC_KEY is invalid base64") from exc
-    if len(raw) != 32:
+    if len(raw) != 32 or not hmac.compare_digest(
+        base64.urlsafe_b64encode(raw), encoded.encode("ascii")
+    ):
         raise ValueError("ECHO_VEIL_ATTESTATION_PUBLIC_KEY must decode to 32 bytes")
     return Ed25519PublicKey.from_public_bytes(raw)
 
@@ -36,7 +39,7 @@ def _attestation_public_key() -> Ed25519PublicKey:
 def _allowed_measurements() -> set[str]:
     raw = _required_env("ECHO_VEIL_ALLOWED_MEASUREMENTS")
     try:
-        values = json.loads(raw)
+        values = strict_json_loads(raw)
     except Exception as exc:
         raise ValueError("ECHO_VEIL_ALLOWED_MEASUREMENTS must be a JSON array") from exc
     if (
@@ -45,10 +48,14 @@ def _allowed_measurements() -> set[str]:
         or not all(
             isinstance(value, str)
             and value
+            and value == value.strip()
             and len(value) <= 512
             and "SET_" not in value
+            and value.isprintable()
+            and not any(character.isspace() for character in value)
             for value in values
         )
+        or len(set(values)) != len(values)
     ):
         raise ValueError(
             "ECHO_VEIL_ALLOWED_MEASUREMENTS must contain 1..16 real measurements"
@@ -65,8 +72,8 @@ def build_production_enclave_shield_from_env(
     returning if Access, evidence, measurement, CKKS capabilities, transport-key
     binding, the Ristretto proof, or session issuance is invalid.
     """
-    gateway_url = os.environ.get("ECHO_VEIL_GATEWAY_URL", DEFAULT_GATEWAY_URL).strip()
-    if not gateway_url:
+    gateway_url = os.environ.get("ECHO_VEIL_GATEWAY_URL", DEFAULT_GATEWAY_URL)
+    if not gateway_url or gateway_url != gateway_url.strip():
         raise ValueError("ECHO_VEIL_GATEWAY_URL must not be empty")
     provider = CloudflareEnclaveProvider(
         gateway_url,
@@ -79,6 +86,8 @@ def build_production_enclave_shield_from_env(
     )
     proof_provider = RistrettoSchnorrProofProvider.from_env()
     raw_security = os.environ.get("ECHO_VEIL_MINIMUM_CKKS_SECURITY_BITS", "128")
+    if raw_security != raw_security.strip() or not raw_security.isascii():
+        raise ValueError("ECHO_VEIL_MINIMUM_CKKS_SECURITY_BITS must be an integer")
     try:
         minimum_security_bits = int(raw_security)
     except ValueError as exc:

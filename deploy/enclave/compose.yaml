@@ -1,6 +1,7 @@
 services:
   origin:
     image: ${ECHO_VEIL_IMAGE:?set ECHO_VEIL_IMAGE to an immutable image digest}
+    platform: linux/amd64
     restart: unless-stopped
     env_file:
       - /etc/echo-veil/origin.env

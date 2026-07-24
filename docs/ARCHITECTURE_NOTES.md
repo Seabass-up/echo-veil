@@ -36,6 +36,8 @@ Implemented and tested:
   payload reconstruction, and durable topic/lifecycle metadata.
 - Transactional active-workspace checkpoints and startup restoration, including
   twilight counters, Amber Locks, and focal crests.
+- Fail-closed per-vine deletion across managed L1/L2/L3 state, with durable
+  transaction rollback and best-effort release of material on live Vine objects.
 - Persisted random-projection LSH candidate lookup with exact reranking.
 - A fail-closed CKKS enclave provider boundary with attestation policy and a
   zero-knowledge access-proof exchange.
@@ -48,6 +50,20 @@ Implemented and tested:
   key-generation, and deployment-runbook artifacts for `algo-cli.com`.
 - Reentrant locking around Oracle, Workspace, MetadataIndex, ColdArchive, and
   DriftDetector operations.
+- Automatic return-to-topic scoring and reinforcement for twilight vines.
+- A concrete local `AgentMemory` host adapter with caller-selected embeddings,
+  record/scope/schema/key-bound AES-GCM protected anchors, payloads, topics, and
+  retrieval vectors; keyed minimal lexical metadata; exact-write
+  deduplication; authenticated tombstones; startup reconciliation; resumable
+  key rotation; record quarantine; confidence-gated active/cold recall;
+  ambiguity telemetry; and a read-only keyed availability floor for local
+  embedding outages.
+- A bounded stdio MCP server for Codex, Claude Code, Hermes, OpenCode, Droid,
+  and Goose, plus native OpenClaw and Pi packages. Every full adapter shares the
+  same `AgentMemory` policy instead of reimplementing lifecycle rules per host.
+- A Mercury readiness skill that reports the local boundary only. Mercury's
+  documented skill interface does not expose a safe structured custom-tool
+  transport, so remember, recall, and forget are deliberately unavailable.
 
 Implemented as a practical confidentiality baseline:
 - `AesGcmCryptoShield` encrypts/authenticates protected vectors with AES-256-GCM and loads keys from explicit bytes or `ECHO_VEIL_CRYPTO_KEY`.
@@ -95,6 +111,13 @@ Deployment-provided:
    `cycles_since_twilight` parameter, but it is no longer required for correct
    eviction behavior — the internal counter is the default.
 
+4. **The core has no implicit embedding dependency.** `HashingTextEmbedder`
+   remains a deterministic offline test fixture and keyword-oriented fallback;
+   it is not evidence of semantic quality. Bundled full adapters explicitly use
+   loopback-only Qwen3 embeddings, pin their identity inside each profile, and
+   must benchmark the real corpus. Caller-supplied embedders are separate trust
+   boundaries and may receive plaintext.
+
 ## 3. Deviations from the spec
 
 | Spec statement | What we did | Why |
@@ -131,12 +154,42 @@ Deployment-provided:
   coordinates L2/L3 writes across processes, but L1 objects remain process-local;
   other backend implementations must provide equivalent coordination. Use the
   public mutation methods rather than editing returned Vines concurrently.
+- **Managed deletion is not physical erasure.** `Oracle.forget()` coordinates
+  deletion of one vine across Echo Veil's managed tiers, and SQLite enables
+  `secure_delete`. Host payloads, conflict/fossil records, WAL remnants,
+  backups, and storage-media retention remain deployment responsibilities.
 - **Custom crypto shields are not automatically trusted.** The Oracle rejects
   objects that do not implement `protect()` and `similarity()`, rejects
   non-serializable protected payloads, and requires an explicit readiness marker
   for custom shields in staging. A marker cannot prove cryptographic strength;
   capability reporting keeps custom shields degraded until their design,
   serialization behavior, and threat model are reviewed outside Echo Veil.
+- **Host-plugin overlap is intentional but bounded.** Every host gets a distinct
+  profile by default, and the adapters expose opt-in tools rather than automatic
+  prompt injection. The OpenClaw integration does not take its configured
+  memory slot or context engine. This prevents duplicate automatic recall with
+  `memory-core`, Active Memory, or Lossless Claw. A future automatic hook must
+  define precedence, tenant boundaries, latency budgets, and deduplication
+  before activation. Writable adapter processes hold a profile-wide SQLite
+  lease for their lifetime; concurrent callers wait only for the configured
+  bounded timeout and then fail closed.
+- **The local availability layer is degraded recall, not a crypto or semantic
+  fallback.** It opens only an existing owner-protected payload database in
+  SQLite read-only mode, uses subject-masked keyed term overlap, and returns a
+  fixed degraded marker. Qualified raw overlap is mapped only into the
+  non-authoritative Fragmented Synthesis band and can never claim Coherent or
+  Solid confidence. It cannot write, forget, reindex, lower its calibrated
+  threshold, perform inferential recall, or mutate lifecycle state. Only local
+  Ollama service/model unavailability activates it; integrity, identity, key,
+  schema, and malformed-response failures remain hard stops.
+- **Local scoped-v2 metadata is minimized, not invisible.** Payloads, topics,
+  lifecycle anchors, and retrieval vectors are encrypted; lexical terms and
+  topics are keyed opaque values. Record IDs, random scope IDs, key IDs,
+  schema/dimension data, timestamps, supersession shape, counts, sizes, and
+  access patterns remain visible. Plaintext exists in the authorized process
+  and loopback embedding service. Logs, model context, host stores, swap,
+  snapshots, backups, and physical media are outside this adapter's protection
+  unless separately controlled.
 
 ## 5. Crypto shield: trust boundary
 
@@ -195,9 +248,18 @@ small multi-process deployment:
   the Oracle leaves affected vines pending for retry.
 - WAL mode, `synchronous=FULL`, a busy timeout, and SQLite locking provide crash
   recovery and cross-process writer serialization.
+- The executable adapter adds a profile-wide writer lease before loading L1 and
+  reconciles lifecycle/payload ID sets at startup. Interrupted lifecycle-first
+  remembers are removed safely; unexplained encrypted payload orphans are
+  preserved and block startup for operator review.
+- `Oracle.forget()` uses one `BEGIN IMMEDIATE` transaction to remove matching
+  active, index, archive, ANN, and eviction-metadata records. Failures roll back
+  before a live Vine is released, allowing the caller to retry.
 - Database files are created with owner-only permissions, versioned with
-  `PRAGMA user_version`, and checked with `PRAGMA quick_check` on open by
-  default. Unknown future schema versions fail closed.
+  `PRAGMA user_version`, and checked with `PRAGMA quick_check` and
+  `foreign_key_check` on open by default. Expected tables, indexes, columns,
+  and foreign-key definitions are validated so injected triggers or altered
+  indexes fail closed. Unknown future schema versions fail closed.
 - Built-in AES and enclave payloads are reconstructed through the algorithm-aware
   protected payload loader. Custom shields may supply a compatible loader.
 - The SQLite index reports `search_strategy="lsh-ann"`. Eight indexed bands of

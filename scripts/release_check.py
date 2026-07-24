@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sys
 import tarfile
@@ -63,14 +64,57 @@ def check_metadata(root: Path, tag: str | None = None) -> tuple[str, list[str]]:
     if tag is not None and tag != f"v{version}":
         errors.append(f"release tag {tag!r} must equal v{version}")
 
+    versioned_json = (
+        ".codex-plugin/plugin.json",
+        "integrations/claude-code/.claude-plugin/plugin.json",
+        "integrations/openclaw/openclaw.plugin.json",
+        "integrations/openclaw/package.json",
+        "integrations/pi/package.json",
+    )
+    for name in versioned_json:
+        path = root / name
+        if not path.is_file():
+            continue
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if document.get("version") != version:
+            errors.append(
+                f"{name} version {document.get('version')} != project version {version}"
+            )
+
     required = (
         "CHANGELOG.md",
         "LICENSE",
         "README.md",
         "SECURITY.md",
+        "docs/LOCAL_AGENT_SECURITY.md",
         "uv.lock",
+        ".dockerignore",
+        "crates/echo-veil-zkp/Cargo.toml",
         "crates/echo-veil-zkp/Cargo.lock",
+        "cloudflare/enclave-gateway/package.json",
         "cloudflare/enclave-gateway/package-lock.json",
+        "deploy/enclave/Dockerfile",
+        ".codex-plugin/plugin.json",
+        ".mcp.json",
+        "integrations/README.md",
+        "integrations/openclaw/package.json",
+        "integrations/openclaw/openclaw.plugin.json",
+        "integrations/openclaw/package-lock.json",
+        "integrations/openclaw/dist/index.d.ts",
+        "integrations/openclaw/dist/index.js",
+        "integrations/claude-code/.claude-plugin/plugin.json",
+        "integrations/claude-code/.mcp.json",
+        "integrations/droid/.factory/mcp.json",
+        "integrations/goose/echo-veil.yaml",
+        "integrations/hermes/config.yaml",
+        "integrations/mercury/SKILL.md",
+        "integrations/opencode/opencode.json",
+        "integrations/pi/package.json",
+        "integrations/pi/package-lock.json",
+        "integrations/pi/README.md",
+        "website/package.json",
+        "website/package-lock.json",
+        "website/wrangler.production.jsonc",
         "deploy/cloudflare/.terraform.lock.hcl",
     )
     for name in required:

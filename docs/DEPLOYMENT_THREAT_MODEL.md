@@ -1,5 +1,12 @@
 # Algo-cli.com confidential deployment contract
 
+This document covers the production enclave path. The local AES-GCM
+agent-memory boundary, including plaintext-in-process and embedding-provider
+limitations, is specified separately in
+[`LOCAL_AGENT_SECURITY.md`](LOCAL_AGENT_SECURITY.md). Neither boundary implies
+that unrelated host memory, wiki, graph, transcript, log, backup, or model
+provider paths are protected.
+
 ## Trust paths
 
 The production endpoint is `memory.algo-cli.com`. Cloudflare Access protects the
@@ -70,5 +77,43 @@ a production blocker until an independent reviewer is recorded.
 - Missing/expired Access assertions, bad mTLS, bad origin tokens, invalid or
   replayed envelopes, expired/consumed challenges, invalid sessions, wrong
   dimensions, and non-finite values are rejected.
-- `enclave-origin.algo-cli.com` remains DNS-only. Proxing that hostname through
+- Access assertions and request/response streams are byte-bounded before they
+  can be fully buffered. Worker-to-origin health and protocol requests have a
+  fixed deadline, and upstream error bodies are not propagated to clients.
+- Worker and Python transports handle redirects manually so Access service
+  tokens, origin bearer credentials, and mTLS bindings are never forwarded to a
+  redirect target.
+- Successful origin responses must use JSON and match the documented endpoint
+  envelope shape. Gateway errors include a generated request ID; structured
+  logs contain fixed reason codes rather than assertions, secrets, or bodies.
+- `enclave-origin.algo-cli.com` remains DNS-only. Proxying that hostname through
   Cloudflare would invalidate the Worker mTLS origin design.
+
+## Local adapter availability boundary
+
+The local staging adapter has a separate, non-production availability path for
+an unavailable local Ollama service or configured model. It can read an existing
+owner-only encrypted payload database and keyed term index, but it does not run
+semantic embeddings, answerability verification, CKKS, enclave operations, or
+the ZKP gate. Every response is marked degraded and read-only; writes,
+inferential recall, reindexing, erasure, and lifecycle mutation are disabled.
+Availability confidence is capped below the Coherent Assembly threshold.
+A long-lived CLI/MCP process transitions to this mode if a later embedding
+request detects a service outage; artifact-identity and malformed-response
+failures do not activate it.
+This path does not satisfy or weaken any production invariant above and is not
+used by the confidential origin.
+
+Writable local profiles are process-serialized before live L1 is loaded. The
+adapter validates both SQLite schemas and reconciles interrupted cross-database
+operations at startup. Native host adapters pass only an explicit runtime
+environment allowlist to the child process; production crypto keys, Access
+credentials, and unrelated API tokens are not inherited.
+
+Scoped-v2 local profiles additionally encrypt payloads, topics, lifecycle
+anchors, and retrieval vectors with record/scope/schema/key-bound AES-GCM.
+Keyed lexical tokens and opaque identifiers minimize the index but still expose
+row counts, timestamps, vector dimensions, access patterns, and relationship
+shape. Plaintext is present in the authorized Python and local embedding
+processes. This remains a local staging control, not CKKS, hardware isolation,
+or proof-gated production access.

@@ -4,6 +4,8 @@ __pycache__/
 .eggs/
 build/
 dist/
+!integrations/openclaw/dist/
+!integrations/openclaw/dist/**
 .pytest_cache/
 .venv/
 venv/

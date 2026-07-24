@@ -1,6 +1,10 @@
 # Cloudflare enclave gateway protocol
 
 The Worker forwards five JSON endpoints and an authenticated health check.
+Request bodies are limited to 2 MiB while streaming; protocol responses are
+limited to 16 MiB and health responses to 64 KiB. Origin calls have a fixed
+10-second deadline. The Python transport also bounds responses and never
+includes an upstream error body in an exception.
 `/v1/attest` accepts
 `nonce_b64` and returns `evidence_b64`. The signed normalized evidence must bind
 the nonce, approved enclave measurement, sealed CKKS key, security level,
@@ -46,6 +50,12 @@ canonical response scalar. Its Merlin transcript binds the provider ID,
 measurement, CKKS key ID, challenge, public key, and commitment. The origin
 consumes the challenge only after successful verification.
 
-`GET /healthz` is not end-to-end enveloped, contains no secret values, and still
+`GET /healthz` returns `ready`, `provider_id`, `key_id`, `platform`, `ckks`, and
+`zkp`. It is not end-to-end enveloped, contains no secret values, and still
 requires Access at the Worker plus Worker-to-origin mTLS and the origin bearer
 token.
+
+The gateway validates JSON content types and the documented top-level response
+shape before forwarding a successful response. It creates a fresh
+`X-Request-ID` for each request, includes it in the origin call and client
+response, and never accepts a caller-supplied value as the trusted request ID.

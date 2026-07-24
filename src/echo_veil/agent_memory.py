@@ -1,0 +1,4586 @@
+"""Durable, local-first host adapter for agent runtimes.
+
+The core Echo Veil package deliberately leaves text embedding and authorized
+payload storage to its host. Agent runtimes need a concrete implementation of
+those responsibilities, so this module provides a small local adapter:
+
+* an explicit local Ollama semantic embedder or offline hashing fallback;
+* AES-GCM protected Echo Veil anchors;
+* a separate AES-GCM encrypted payload database; and
+* confidence-gated recall across active and archived memory.
+
+It is intended for one local operating-system user.  Multi-user authorization,
+remote synchronization, and production enclave guarantees remain host duties.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import http.client
+import ipaddress
+import json
+import math
+import os
+import re
+import sqlite3
+import stat
+import sys
+import time
+import uuid
+from collections.abc import Callable
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Protocol, cast, runtime_checkable
+from urllib.parse import urlsplit
+
+import numpy as np
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from numpy.typing import NDArray
+
+from ._json import strict_json_loads
+from .agent_security import (
+    AES_GCM_NONCE_BYTES,
+    KeyUnavailable,
+    ProfileKeyring,
+    ScopedAesGcmShield,
+    ScopedProtectedVector,
+    opaque_topic,
+    scoped_aad,
+)
+from .archive import TransactionalEvictionStore
+from .confidence import classify
+from .crypto_shield import AesGcmCryptoShield
+from .oracle import GenerationGated, Oracle
+from .persistence import SQLiteStore
+from .proximity import time_decay
+from .vectors import cosine_similarity
+from .workspace import WorkspaceConfig
+
+DEFAULT_EMBEDDING_DIMENSION = 384
+DEFAULT_OLLAMA_EMBEDDING_DIMENSION = 1024
+DEFAULT_OLLAMA_MODEL = "qwen3-embedding:latest"
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_SEMANTIC_MIN_SCORE = 0.44
+DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
+DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
+DEFAULT_HASHING_MIN_SCORE = 0.35
+DEFAULT_CAPACITY = 400
+MAX_TOPIC_CHARS = 512
+MAX_PAYLOAD_CHARS = 100_000
+MAX_QUERY_CHARS = 20_000
+MAX_RECALL_RESULTS = 20
+MAX_EMBEDDING_RESPONSE_BYTES = 4_194_304
+DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 30.0
+MAX_MEMORY_PASSAGES = 12
+MAX_PASSAGE_CHARS = 1_600
+MAX_LEXICAL_FEATURES = 4_096
+_SQLITE_BUSY_CODE = int(getattr(sqlite3, "SQLITE_BUSY", 5))
+_SQLITE_LOCKED_CODE = int(getattr(sqlite3, "SQLITE_LOCKED", 6))
+_SQLITE_LOCK_MESSAGES = frozenset(
+    {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+)
+MAX_QUERY_FEATURES = 256
+MAX_RETRIEVAL_CANDIDATES = 900
+PAYLOAD_SCHEMA_VERSION = 2
+LEGACY_PAYLOAD_SCHEMA_VERSION = 1
+DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS = 30.0
+LEXICAL_BOOST = 0.35
+ANSWERABILITY_BOOST = 0.20
+MIN_AVAILABILITY_FEATURES = 2
+AMBIGUOUS_RANKING_MARGIN = 0.05
+MMR_RELEVANCE_WEIGHT = 0.88
+RETRIEVAL_SCHEMA_VERSION = "protected-hybrid-maxsim-v1"
+MEMORY_QUERY_INSTRUCTION = (
+    "Given a memory recall query, retrieve the stored personal or operational "
+    "memory that answers it"
+)
+ANSWERABILITY_QUERY_INSTRUCTION = (
+    "Retrieve a stored memory passage only when it explicitly contains the answer "
+    "to the requested attribute or predicate. Ignore subject-only similarity."
+)
+_PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
+_EMBEDDER_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
+_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "should",
+        "that",
+        "the",
+        "this",
+        "to",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _StoredCandidate:
+    vine_id: str
+    semantic_score: float | None
+    answerability_score: float | None
+    lexical_score: float
+    best_vector: NDArray[np.float64] | None
+    topic: str
+    effective_at: float
+    superseded_by: str | None
+    superseded_at: float | None
+
+
+@dataclass(frozen=True)
+class _RankedCandidate:
+    vine_id: str
+    topic: str
+    source: str
+    relevance_score: float
+    semantic_score: float | None
+    answerability_score: float | None
+    lexical_score: float
+    lifecycle_score: float | None
+    best_vector: NDArray[np.float64] | None
+    effective_at: float
+    superseded_by: str | None
+    superseded_at: float | None
+    temporal_current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AvailabilityCandidate:
+    vine_id: str
+    topic: str
+    score: float
+    lexical_score: float
+    predicate_score: float
+    matched_features: int
+    effective_at: float
+    superseded_by: str | None
+    superseded_at: float | None
+    temporal_current: bool
+
+
+class EmbeddingUnavailable(RuntimeError):
+    """The configured local embedding service or model cannot currently run."""
+
+
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code & 0xFF in {_SQLITE_BUSY_CODE, _SQLITE_LOCKED_CODE}
+    return str(exc).strip().casefold() in _SQLITE_LOCK_MESSAGES
+
+
+class _ProfileWriterLease:
+    """Serialize one profile's process-local L1 snapshot through SQLite locking."""
+
+    def __init__(self, path: Path, timeout_seconds: float) -> None:
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise TypeError("profile lock timeout must be a finite positive number")
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or not 0.0 < timeout <= 120.0:
+            raise ValueError("profile lock timeout must be within (0, 120] seconds")
+        _secure_regular_file(path)
+        self._connection = sqlite3.connect(
+            str(path),
+            timeout=timeout,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        try:
+            self._connection.execute(
+                f"PRAGMA busy_timeout = {max(1, int(timeout * 1000))}"
+            )
+            self._connection.execute("PRAGMA trusted_schema = OFF")
+            self._connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            self._connection.close()
+            if _is_sqlite_lock_error(exc):
+                raise RuntimeError(
+                    "memory profile is already in use by another writer"
+                ) from exc
+            raise
+
+    def close(self) -> None:
+        if self._connection.in_transaction:
+            self._connection.execute("ROLLBACK")
+        self._connection.close()
+
+
+@dataclass(frozen=True)
+class _MigrationRecord:
+    vine_id: str
+    topic: str
+    effective_at: float
+    superseded_by: str | None
+
+
+@runtime_checkable
+class TextEmbedder(Protocol):
+    """Stable document/query embedding contract used by ``AgentMemory``."""
+
+    identity: str
+    name: str
+    model: str
+    dimension: int
+    semantic: bool
+    default_min_score: float
+
+    def embed_document(self, text: str) -> NDArray[np.float64]:
+        """Embed text for durable document indexing."""
+        raise NotImplementedError
+
+    def embed_query(self, text: str) -> NDArray[np.float64]:
+        """Embed text for query-time retrieval."""
+        raise NotImplementedError
+
+
+class HashingTextEmbedder:
+    """Return stable local text vectors without a model download or API call.
+
+    Token and adjacent-token features are hashed into a signed fixed-size
+    vector.  This is useful for private, dependency-light integration testing
+    and modest keyword-oriented recall.  It is not a substitute for a reviewed
+    semantic embedding model on large or multilingual corpora.
+    """
+
+    def __init__(self, dimension: int = DEFAULT_EMBEDDING_DIMENSION) -> None:
+        if isinstance(dimension, bool) or not isinstance(dimension, int):
+            raise TypeError("embedding dimension must be a positive integer")
+        if dimension < 32:
+            raise ValueError("embedding dimension must be at least 32")
+        self.dimension = dimension
+        self.name = "hashing"
+        self.model = "blake2b-token-bigram-v1"
+        self.identity = f"hashing:{self.model}:{dimension}"
+        self.semantic = False
+        self.default_min_score = DEFAULT_HASHING_MIN_SCORE
+
+    def __call__(self, text: str) -> NDArray[np.float64]:
+        normalized = _validate_text(text, "text", MAX_PAYLOAD_CHARS)
+        tokens = _TOKEN_PATTERN.findall(normalized.casefold())
+        if not tokens:
+            tokens = [normalized.casefold()]
+
+        features: list[tuple[str, float]] = [(token, 1.0) for token in tokens]
+        features.extend(
+            (f"{left}\0{right}", 1.35)
+            for left, right in zip(tokens, tokens[1:], strict=False)
+        )
+
+        vector = np.zeros(self.dimension, dtype=np.float64)
+        for feature, weight in features:
+            digest = hashlib.blake2b(
+                feature.encode("utf-8"),
+                digest_size=16,
+                person=b"echo-veil-emb-v1",
+            ).digest()
+            index = int.from_bytes(digest[:8], "big") % self.dimension
+            sign = 1.0 if digest[8] & 1 else -1.0
+            vector[index] += sign * weight
+
+        magnitude = float(np.linalg.norm(vector))
+        if not math.isfinite(magnitude) or magnitude == 0.0:
+            raise ValueError("text did not produce a usable embedding")
+        return vector / magnitude
+
+    def embed_document(self, text: str) -> NDArray[np.float64]:
+        return self(text)
+
+    def embed_query(self, text: str) -> NDArray[np.float64]:
+        return self(text)
+
+    def embed_documents(self, texts: list[str]) -> list[NDArray[np.float64]]:
+        return [self.embed_document(text) for text in texts]
+
+
+class OllamaTextEmbedder:
+    """Embed documents locally with an installed, digest-pinned Ollama model.
+
+    The transport accepts loopback IP literals only, never follows redirects,
+    bounds responses, and does not silently fall back to keyword hashing.
+    Qwen3 retrieval queries receive the instruction format recommended by the
+    model authors while stored documents remain unprefixed.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_OLLAMA_MODEL,
+        *,
+        base_url: str = DEFAULT_OLLAMA_URL,
+        dimension: int = DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
+        timeout_seconds: float = DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+        query_instruction: str = MEMORY_QUERY_INSTRUCTION,
+    ) -> None:
+        if not isinstance(model, str) or not _MODEL_PATTERN.fullmatch(model):
+            raise ValueError("Ollama model must be a safe non-empty model name")
+        if isinstance(dimension, bool) or not isinstance(dimension, int):
+            raise TypeError("embedding dimension must be a positive integer")
+        if dimension < 32 or dimension > 65_536:
+            raise ValueError("embedding dimension must be between 32 and 65536")
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise TypeError("embedding timeout must be a finite positive number")
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0.0 or timeout > 120.0:
+            raise ValueError(
+                "embedding timeout must be positive and at most 120 seconds"
+            )
+        instruction = _validate_text(
+            query_instruction,
+            "query instruction",
+            512,
+        )
+
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme != "http"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or parsed.hostname is None
+        ):
+            raise ValueError("Ollama URL must be an HTTP loopback origin")
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError as exc:
+            raise ValueError("Ollama URL must use a loopback IP literal") from exc
+        if not address.is_loopback:
+            raise ValueError("Ollama URL must use a loopback IP literal")
+
+        try:
+            port = parsed.port or 80
+        except ValueError as exc:
+            raise ValueError("Ollama URL contains an invalid port") from exc
+
+        self._host = parsed.hostname
+        self._port = port
+        self._timeout_seconds = timeout
+        self._query_instruction = instruction
+        self.name = "ollama"
+        self.model = model if ":" in model else f"{model}:latest"
+        self.dimension = dimension
+        self.semantic = True
+        self.default_min_score = DEFAULT_SEMANTIC_MIN_SCORE
+        digest, maximum_dimension = self._resolve_model()
+        if dimension > maximum_dimension:
+            raise ValueError(
+                f"requested embedding dimension {dimension} exceeds model maximum "
+                f"{maximum_dimension}"
+            )
+        instruction_digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        self._model_digest = digest
+        self._maximum_dimension = maximum_dimension
+        self.identity = (
+            f"ollama:{self.model}@sha256:{digest}:dimension:{dimension}:"
+            f"instruction:{instruction_digest}"
+        )
+
+    def embed_document(self, text: str) -> NDArray[np.float64]:
+        return self._embed(_validate_text(text, "text", MAX_PAYLOAD_CHARS))
+
+    def embed_documents(self, texts: list[str]) -> list[NDArray[np.float64]]:
+        if not isinstance(texts, list) or not texts:
+            raise ValueError("embedding document batch must be a non-empty list")
+        if len(texts) > MAX_MEMORY_PASSAGES:
+            raise ValueError(
+                f"embedding document batch must contain at most {MAX_MEMORY_PASSAGES} items"
+            )
+        clean = [_validate_text(text, "text", MAX_PAYLOAD_CHARS) for text in texts]
+        return self._embed_batch(clean)
+
+    def embed_query(self, text: str) -> NDArray[np.float64]:
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        instructed = f"Instruct: {self._query_instruction}\nQuery: {clean}"
+        return self._embed(instructed)
+
+    def embed_retrieval_queries(
+        self, text: str
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Batch broad-recall and predicate-focused queries in one local request."""
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        predicate_query = _predicate_query(clean)
+        broad = f"Instruct: {self._query_instruction}\nQuery: {clean}"
+        answerability = (
+            f"Instruct: {ANSWERABILITY_QUERY_INSTRUCTION}\nQuery: {predicate_query}"
+        )
+        broad_vector, answerability_vector = self._embed_batch([broad, answerability])
+        return broad_vector, answerability_vector
+
+    def embed_answerability_query(self, text: str) -> NDArray[np.float64]:
+        """Embed the requested predicate without letting subject identity dominate."""
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        predicate_query = _predicate_query(clean)
+        instructed = (
+            f"Instruct: {ANSWERABILITY_QUERY_INSTRUCTION}\nQuery: {predicate_query}"
+        )
+        return self._embed(instructed)
+
+    def __call__(self, text: str) -> NDArray[np.float64]:
+        return self.embed_document(text)
+
+    def _embed(self, text: str) -> NDArray[np.float64]:
+        return self._embed_batch([text])[0]
+
+    def _embed_batch(self, texts: list[str]) -> list[NDArray[np.float64]]:
+        self._assert_model_identity()
+        response = self._request_json(
+            "POST",
+            "/api/embed",
+            {
+                "model": self.model,
+                "input": texts,
+                "dimensions": self.dimension,
+                "truncate": False,
+                "keep_alive": "5m",
+            },
+        )
+        embeddings = response.get("embeddings")
+        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+            raise RuntimeError("local Ollama returned an invalid embedding response")
+        vectors: list[NDArray[np.float64]] = []
+        for item in embeddings:
+            try:
+                if (
+                    not isinstance(item, list)
+                    or len(item) != self.dimension
+                    or any(
+                        isinstance(part, bool) or not isinstance(part, (int, float))
+                        for part in item
+                    )
+                ):
+                    raise ValueError
+                vector = np.asarray(item, dtype=np.float64)
+                vectors.append(
+                    _normalize_embedding_vector(
+                        vector,
+                        expected_dimension=self.dimension,
+                        source="local Ollama",
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "local Ollama returned an invalid embedding vector"
+                ) from exc
+        return vectors
+
+    def _assert_model_identity(self) -> None:
+        digest, maximum_dimension = self._resolve_model()
+        if digest != self._model_digest or maximum_dimension != self._maximum_dimension:
+            raise RuntimeError(
+                "local Ollama model identity changed after adapter initialization"
+            )
+
+    def _resolve_model(self) -> tuple[str, int]:
+        response = self._request_json("GET", "/api/tags")
+        models = response.get("models")
+        if not isinstance(models, list):
+            raise RuntimeError("local Ollama returned an invalid model inventory")
+        matches: list[tuple[str, int]] = []
+        for entry in models:
+            if not isinstance(entry, Mapping):
+                continue
+            if self.model not in {entry.get("name"), entry.get("model")}:
+                continue
+            digest = entry.get("digest")
+            details = entry.get("details")
+            maximum_dimension = (
+                details.get("embedding_length")
+                if isinstance(details, Mapping)
+                else None
+            )
+            if (
+                not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or isinstance(maximum_dimension, bool)
+                or not isinstance(maximum_dimension, int)
+                or maximum_dimension <= 0
+            ):
+                raise RuntimeError("local Ollama model metadata is incomplete")
+            matches.append((digest, maximum_dimension))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError("local Ollama model inventory is ambiguous")
+        raise EmbeddingUnavailable(
+            f"required local Ollama model is not installed: {self.model}"
+        )
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
+        body = None
+        headers = {"Accept": "application/json"}
+        if payload is not None:
+            body = json.dumps(
+                dict(payload),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        connection = http.client.HTTPConnection(
+            self._host,
+            self._port,
+            timeout=self._timeout_seconds,
+        )
+        status: int | None = None
+        try:
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            status = response.status
+            if status == 200:
+                content_type = response.getheader("Content-Type", "") or ""
+                if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                    raise RuntimeError("local Ollama returned an invalid content type")
+                declared_length = response.getheader("Content-Length")
+                if declared_length is not None and (
+                    not declared_length.isascii()
+                    or not declared_length.isdigit()
+                    or int(declared_length) > MAX_EMBEDDING_RESPONSE_BYTES
+                ):
+                    raise RuntimeError("local Ollama returned an invalid response size")
+            encoded = response.read(MAX_EMBEDDING_RESPONSE_BYTES + 1)
+        except (OSError, http.client.HTTPException) as exc:
+            raise EmbeddingUnavailable(
+                "local Ollama embedding service is unavailable"
+            ) from exc
+        finally:
+            connection.close()
+        if status != 200:
+            error_type = (
+                EmbeddingUnavailable if status in {502, 503, 504} else RuntimeError
+            )
+            raise error_type(
+                f"local Ollama embedding request failed with HTTP {status}"
+            )
+        if len(encoded) > MAX_EMBEDDING_RESPONSE_BYTES:
+            raise RuntimeError("local Ollama embedding response exceeded size limit")
+        try:
+            decoded = strict_json_loads(encoded)
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            ValueError,
+        ) as exc:
+            raise RuntimeError("local Ollama returned invalid JSON") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("local Ollama returned an invalid JSON object")
+        return decoded
+
+
+class _CallableTextEmbedder:
+    """Compatibility wrapper for reviewed caller-provided embedding functions."""
+
+    def __init__(
+        self,
+        embed: Callable[[str], NDArray[np.float64]],
+        embedder_id: str,
+    ) -> None:
+        if not isinstance(embedder_id, str) or not _EMBEDDER_ID_PATTERN.fullmatch(
+            embedder_id
+        ):
+            raise ValueError("embedder_id must be a stable safe identifier")
+        identifier = embedder_id
+        probe = _normalize_embedding_vector(embed("echo veil dimension probe"))
+        self._embed = embed
+        self.dimension = int(probe.shape[0])
+        self.name = "custom"
+        self.model = identifier
+        self.identity = f"custom:{identifier}:dimension:{self.dimension}"
+        self.semantic = False
+        self.default_min_score = DEFAULT_HASHING_MIN_SCORE
+
+    def embed_document(self, text: str) -> NDArray[np.float64]:
+        clean = _validate_text(text, "text", MAX_PAYLOAD_CHARS)
+        return _normalize_embedding_vector(
+            self._embed(clean), expected_dimension=self.dimension
+        )
+
+    def embed_query(self, text: str) -> NDArray[np.float64]:
+        clean = _validate_text(text, "query", MAX_QUERY_CHARS)
+        return _normalize_embedding_vector(
+            self._embed(clean), expected_dimension=self.dimension
+        )
+
+
+class _LegacyEncryptedPayloadStore:
+    """Caller-owned encrypted content store keyed by Echo Veil vine id."""
+
+    def __init__(self, path: Path, key: bytes, *, read_only: bool = False) -> None:
+        self.path = path
+        self._read_only = read_only
+        if read_only:
+            _require_secure_regular_file(path, "payload database")
+            database = f"{path.resolve().as_uri()}?mode=ro"
+        else:
+            _secure_regular_file(path)
+            database = str(path)
+        self._cipher = AESGCM(key)
+        self._dedupe_key = key
+        self._connection = sqlite3.connect(
+            database,
+            timeout=5.0,
+            isolation_level=None,
+            check_same_thread=False,
+            uri=read_only,
+        )
+        try:
+            self._connection.execute("PRAGMA busy_timeout = 5000")
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA trusted_schema = OFF")
+            version_row = self._connection.execute("PRAGMA user_version").fetchone()
+            version = 0 if version_row is None else int(version_row[0])
+            if version not in {0, LEGACY_PAYLOAD_SCHEMA_VERSION}:
+                raise RuntimeError("unsupported payload database schema version")
+            if read_only:
+                self._connection.execute("PRAGMA query_only = ON")
+                self._validate_existing_schema()
+                self._verify_integrity()
+                return
+            self._connection.execute("PRAGMA secure_delete = ON")
+            self._connection.execute("PRAGMA synchronous = FULL")
+            mode = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            if mode is None or str(mode[0]).lower() != "wal":
+                raise RuntimeError("payload database WAL mode could not be enabled")
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payloads (
+                    vine_id TEXT PRIMARY KEY NOT NULL,
+                    topic TEXT NOT NULL,
+                    nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+                    ciphertext BLOB NOT NULL CHECK(length(ciphertext) > 16),
+                    content_hash TEXT UNIQUE NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self._ensure_payload_column("effective_at", "REAL")
+            self._ensure_payload_column("superseded_by", "TEXT")
+            self._ensure_payload_column("superseded_at", "REAL")
+            self._connection.execute(
+                "UPDATE payloads SET effective_at = created_at WHERE effective_at IS NULL"
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS adapter_metadata (
+                    key TEXT PRIMARY KEY NOT NULL CHECK(length(key) BETWEEN 1 AND 64),
+                    value TEXT NOT NULL CHECK(length(value) BETWEEN 1 AND 2048)
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_vectors (
+                    vine_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                    nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+                    ciphertext BLOB NOT NULL CHECK(length(ciphertext) > 16),
+                    dimension INTEGER NOT NULL CHECK(dimension > 0),
+                    PRIMARY KEY(vine_id, ordinal)
+                ) WITHOUT ROWID
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_terms (
+                    vine_id TEXT NOT NULL,
+                    term_hash BLOB NOT NULL CHECK(length(term_hash) = 16),
+                    term_count INTEGER NOT NULL CHECK(term_count > 0),
+                    PRIMARY KEY(vine_id, term_hash)
+                ) WITHOUT ROWID
+                """
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_terms_hash "
+                "ON memory_terms(term_hash)"
+            )
+            self._validate_existing_schema()
+            self._verify_integrity()
+            self._connection.execute(
+                f"PRAGMA user_version = {LEGACY_PAYLOAD_SCHEMA_VERSION}"
+            )
+        except Exception:
+            self._connection.close()
+            raise
+
+    def _validate_existing_schema(self) -> None:
+        expected = {
+            "payloads": (
+                ("vine_id", "TEXT", 1, 1),
+                ("topic", "TEXT", 1, 0),
+                ("nonce", "BLOB", 1, 0),
+                ("ciphertext", "BLOB", 1, 0),
+                ("content_hash", "TEXT", 1, 0),
+                ("created_at", "REAL", 1, 0),
+                ("effective_at", "REAL", 0, 0),
+                ("superseded_by", "TEXT", 0, 0),
+                ("superseded_at", "REAL", 0, 0),
+            ),
+            "adapter_metadata": (
+                ("key", "TEXT", 1, 1),
+                ("value", "TEXT", 1, 0),
+            ),
+            "memory_vectors": (
+                ("vine_id", "TEXT", 1, 1),
+                ("ordinal", "INTEGER", 1, 2),
+                ("nonce", "BLOB", 1, 0),
+                ("ciphertext", "BLOB", 1, 0),
+                ("dimension", "INTEGER", 1, 0),
+            ),
+            "memory_terms": (
+                ("vine_id", "TEXT", 1, 1),
+                ("term_hash", "BLOB", 1, 2),
+                ("term_count", "INTEGER", 1, 0),
+            ),
+        }
+        for table, expected_columns in expected.items():
+            rows = self._connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            actual = tuple(
+                (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5]))
+                for row in rows
+                if int(row[6]) == 0
+            )
+            if actual != expected_columns:
+                raise RuntimeError("payload database schema validation failed")
+        objects = {
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in self._connection.execute(
+                "SELECT type, name, tbl_name FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        expected_objects = {
+            *(("table", table, table) for table in expected),
+            ("index", "idx_memory_terms_hash", "memory_terms"),
+        }
+        if objects != expected_objects:
+            raise RuntimeError("payload database schema validation failed")
+        index_columns = tuple(
+            str(row[2])
+            for row in self._connection.execute(
+                "PRAGMA index_info(idx_memory_terms_hash)"
+            )
+        )
+        if index_columns != ("term_hash",):
+            raise RuntimeError("payload database schema validation failed")
+
+    def _verify_integrity(self) -> None:
+        rows = self._connection.execute("PRAGMA quick_check").fetchall()
+        if tuple(str(row[0]) for row in rows) != ("ok",):
+            raise RuntimeError("payload database integrity check failed")
+        foreign_key_rows = self._connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+        if foreign_key_rows:
+            raise RuntimeError("payload database foreign-key integrity check failed")
+        orphan_queries = (
+            "SELECT 1 FROM memory_vectors AS child "
+            "LEFT JOIN payloads ON payloads.vine_id = child.vine_id "
+            "WHERE payloads.vine_id IS NULL LIMIT 1",
+            "SELECT 1 FROM memory_terms AS child "
+            "LEFT JOIN payloads ON payloads.vine_id = child.vine_id "
+            "WHERE payloads.vine_id IS NULL LIMIT 1",
+        )
+        for query in orphan_queries:
+            orphan = self._connection.execute(query).fetchone()
+            if orphan is not None:
+                raise RuntimeError(
+                    "payload database foreign-key integrity check failed"
+                )
+
+    def _ensure_payload_column(self, name: str, declaration: str) -> None:
+        columns = {
+            str(row[1])
+            for row in self._connection.execute("PRAGMA table_info(payloads)")
+        }
+        if name not in columns:
+            self._connection.execute(
+                f"ALTER TABLE payloads ADD COLUMN {name} {declaration}"
+            )
+
+    def digest(self, topic: str, payload: str) -> str:
+        digest = hashlib.blake2b(
+            key=self._dedupe_key,
+            digest_size=32,
+            person=b"echo-v-dedupe-v1",
+        )
+        digest.update(topic.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload.encode("utf-8"))
+        return digest.hexdigest()
+
+    def find_by_hash(self, content_hash: str) -> tuple[str, str] | None:
+        row = self._connection.execute(
+            "SELECT vine_id, topic FROM payloads WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), _validate_stored_topic(row[1])
+
+    def put(
+        self,
+        vine_id: str,
+        topic: str,
+        payload: str,
+        content_hash: str,
+        *,
+        vectors: list[NDArray[np.float64]],
+        effective_at: float,
+        supersedes: tuple[str, ...],
+    ) -> None:
+        nonce = os.urandom(12)
+        ciphertext = self._cipher.encrypt(nonce, payload.encode("utf-8"), _aad(vine_id))
+        created_at = time.time()
+        terms = self._term_features(f"{topic}\n{payload}", MAX_LEXICAL_FEATURES)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for prior_id in supersedes:
+                row = self._connection.execute(
+                    "SELECT effective_at, superseded_by FROM payloads WHERE vine_id = ?",
+                    (prior_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"superseded memory does not exist: {prior_id}")
+                if row[1] is not None:
+                    raise ValueError(f"memory is already superseded: {prior_id}")
+                if row[0] is not None and float(row[0]) > effective_at:
+                    raise ValueError(
+                        "replacement effective_at must not precede superseded memory"
+                    )
+            self._connection.execute(
+                """
+                INSERT INTO payloads(
+                    vine_id, topic, nonce, ciphertext, content_hash, created_at,
+                    effective_at, superseded_by, superseded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    vine_id,
+                    topic,
+                    nonce,
+                    ciphertext,
+                    content_hash,
+                    created_at,
+                    effective_at,
+                ),
+            )
+            for ordinal, vector in enumerate(vectors):
+                clean = _normalize_embedding_vector(vector)
+                vector_nonce = os.urandom(12)
+                vector_ciphertext = self._cipher.encrypt(
+                    vector_nonce,
+                    clean.astype(np.float64, copy=False).tobytes(order="C"),
+                    _vector_aad(vine_id, ordinal),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_vectors(
+                        vine_id, ordinal, nonce, ciphertext, dimension
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        vine_id,
+                        ordinal,
+                        vector_nonce,
+                        vector_ciphertext,
+                        clean.size,
+                    ),
+                )
+            self._connection.executemany(
+                """
+                INSERT INTO memory_terms(vine_id, term_hash, term_count)
+                VALUES (?, ?, ?)
+                """,
+                [(vine_id, term_hash, count) for term_hash, count in terms.items()],
+            )
+            for prior_id in supersedes:
+                self._connection.execute(
+                    """
+                    UPDATE payloads
+                    SET superseded_by = ?, superseded_at = ?
+                    WHERE vine_id = ? AND superseded_by IS NULL
+                    """,
+                    (vine_id, effective_at, prior_id),
+                )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def get(self, vine_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT nonce, ciphertext FROM payloads WHERE vine_id = ?", (vine_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        nonce = bytes(row[0])
+        ciphertext = bytes(row[1])
+        if len(nonce) != 12 or not 16 < len(ciphertext) <= MAX_PAYLOAD_CHARS * 4 + 16:
+            raise RuntimeError("stored payload has an invalid encrypted size")
+        try:
+            plaintext = self._cipher.decrypt(nonce, ciphertext, _aad(vine_id))
+        except InvalidTag as exc:
+            raise RuntimeError("stored payload authentication failed") from exc
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("stored payload is not valid UTF-8") from exc
+
+    def delete(self, vine_id: str) -> bool:
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            link = self._connection.execute(
+                "SELECT superseded_by, superseded_at FROM payloads WHERE vine_id = ?",
+                (vine_id,),
+            ).fetchone()
+            if link is None:
+                self._connection.execute("ROLLBACK")
+                return False
+            self._connection.execute(
+                "DELETE FROM memory_vectors WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                """
+                UPDATE payloads
+                SET superseded_by = ?, superseded_at = ?
+                WHERE superseded_by = ?
+                """,
+                (link[0], link[1], vine_id),
+            )
+            result = self._connection.execute(
+                "DELETE FROM payloads WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute("COMMIT")
+            return result.rowcount > 0
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def retrieval_candidates(
+        self,
+        intent: NDArray[np.float64],
+        query: str,
+        semantic_candidate_ids: list[str],
+        answerability_intent: NDArray[np.float64] | None = None,
+    ) -> dict[str, _StoredCandidate]:
+        query_vector = _normalize_embedding_vector(intent)
+        answerability_vector = (
+            None
+            if answerability_intent is None
+            else _normalize_embedding_vector(
+                answerability_intent,
+                expected_dimension=query_vector.size,
+                source="answerability embedder",
+            )
+        )
+        lexical = self._lexical_scores(query)
+        ordered_ids = list(dict.fromkeys(semantic_candidate_ids))[
+            :MAX_RETRIEVAL_CANDIDATES
+        ]
+        candidate_ids = set(ordered_ids)
+        lexical_ranked = sorted(
+            lexical,
+            key=lambda vine_id: (lexical[vine_id], vine_id),
+            reverse=True,
+        )
+        for vine_id in lexical_ranked:
+            if len(candidate_ids) >= MAX_RETRIEVAL_CANDIDATES:
+                break
+            candidate_ids.add(vine_id)
+        if not candidate_ids:
+            return {}
+        placeholders = ",".join("?" for _ in candidate_ids)
+        parameters = tuple(sorted(candidate_ids))
+        semantic: dict[str, tuple[float, NDArray[np.float64]]] = {}
+        answerability: dict[str, float] = {}
+        # Only a bounded count of qmark placeholders is interpolated. Candidate
+        # values remain SQLite parameters and never become SQL text.
+        vector_query = (
+            "SELECT vine_id, ordinal, nonce, ciphertext, dimension "
+            "FROM memory_vectors "
+            f"WHERE vine_id IN ({placeholders}) "
+            "ORDER BY vine_id, ordinal"
+        )
+        cursor = self._connection.execute(vector_query, parameters)
+        for row in cursor:
+            vine_id = str(row[0])
+            ordinal = int(row[1])
+            dimension = int(row[4])
+            if (
+                ordinal < 0
+                or ordinal >= MAX_MEMORY_PASSAGES
+                or dimension <= 0
+                or dimension > 65_536
+                or dimension != query_vector.size
+            ):
+                raise RuntimeError("stored retrieval vector dimension mismatch")
+            nonce = bytes(row[2])
+            ciphertext = bytes(row[3])
+            if len(nonce) != 12 or len(ciphertext) != dimension * 8 + 16:
+                raise RuntimeError("stored retrieval vector has invalid encrypted size")
+            try:
+                raw = self._cipher.decrypt(
+                    nonce,
+                    ciphertext,
+                    _vector_aad(vine_id, ordinal),
+                )
+            except InvalidTag as exc:
+                raise RuntimeError(
+                    "stored retrieval vector authentication failed"
+                ) from exc
+            expected_bytes = dimension * np.dtype(np.float64).itemsize
+            if len(raw) != expected_bytes:
+                raise RuntimeError("stored retrieval vector has invalid length")
+            vector = np.frombuffer(raw, dtype=np.float64).copy()
+            vector = _normalize_embedding_vector(
+                vector,
+                expected_dimension=dimension,
+                source="stored retrieval vector",
+            )
+            score = cosine_similarity(query_vector, vector)
+            current = semantic.get(vine_id)
+            if current is None or score > current[0]:
+                semantic[vine_id] = (score, vector)
+            if answerability_vector is not None:
+                answerability_score = cosine_similarity(answerability_vector, vector)
+                current_answerability = answerability.get(vine_id)
+                if (
+                    current_answerability is None
+                    or answerability_score > current_answerability
+                ):
+                    answerability[vine_id] = answerability_score
+
+        payload_query = (
+            "SELECT vine_id, topic, effective_at, superseded_by, superseded_at "
+            "FROM payloads "
+            f"WHERE vine_id IN ({placeholders})"
+        )
+        rows = self._connection.execute(payload_query, parameters).fetchall()
+        candidates: dict[str, _StoredCandidate] = {}
+        for row in rows:
+            vine_id = str(row[0])
+            semantic_entry = semantic.get(vine_id)
+            topic = _validate_stored_topic(row[1])
+            effective_at = _validate_stored_timestamp(row[2], "effective_at")
+            superseded_at = (
+                None
+                if row[4] is None
+                else _validate_stored_timestamp(row[4], "superseded_at")
+            )
+            candidates[vine_id] = _StoredCandidate(
+                vine_id=vine_id,
+                semantic_score=None if semantic_entry is None else semantic_entry[0],
+                answerability_score=answerability.get(vine_id),
+                lexical_score=lexical.get(vine_id, 0.0),
+                best_vector=None if semantic_entry is None else semantic_entry[1],
+                topic=topic,
+                effective_at=effective_at,
+                superseded_by=None if row[3] is None else str(row[3]),
+                superseded_at=superseded_at,
+            )
+        return candidates
+
+    def retrieval_index_counts(self) -> tuple[int, int]:
+        indexed_row = self._connection.execute(
+            "SELECT COUNT(DISTINCT vine_id) FROM memory_vectors"
+        ).fetchone()
+        total = len(self)
+        indexed = 0 if indexed_row is None else int(indexed_row[0])
+        return indexed, max(0, total - indexed)
+
+    def record_ids_for_reindex(self) -> list[str]:
+        rows = self._connection.execute(
+            "SELECT vine_id FROM payloads ORDER BY created_at, vine_id"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def record_for_reindex(self, vine_id: str) -> tuple[str, str]:
+        row = self._connection.execute(
+            "SELECT topic FROM payloads WHERE vine_id = ?", (vine_id,)
+        ).fetchone()
+        payload = self.get(vine_id)
+        if row is None or payload is None:
+            raise RuntimeError("payload disappeared during retrieval reindex")
+        return _validate_stored_topic(row[0]), payload
+
+    def records_for_migration(self) -> list[_MigrationRecord]:
+        rows = self._connection.execute(
+            """
+            SELECT vine_id, topic, effective_at, superseded_by
+            FROM payloads
+            ORDER BY created_at, vine_id
+            """
+        ).fetchall()
+        records: list[_MigrationRecord] = []
+        for row in rows:
+            vine_id = str(row[0])
+            records.append(
+                _MigrationRecord(
+                    vine_id=vine_id,
+                    topic=_validate_stored_topic(row[1]),
+                    effective_at=_validate_stored_timestamp(row[2], "effective_at"),
+                    superseded_by=None if row[3] is None else str(row[3]),
+                )
+            )
+        return records
+
+    def replace_retrieval_index(
+        self,
+        vine_id: str,
+        text: str,
+        vectors: list[NDArray[np.float64]],
+    ) -> None:
+        terms = self._term_features(text, MAX_LEXICAL_FEATURES)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            exists = self._connection.execute(
+                "SELECT 1 FROM payloads WHERE vine_id = ?", (vine_id,)
+            ).fetchone()
+            if exists is None:
+                raise RuntimeError("payload disappeared during retrieval reindex")
+            self._connection.execute(
+                "DELETE FROM memory_vectors WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            for ordinal, vector in enumerate(vectors):
+                clean = _normalize_embedding_vector(vector)
+                nonce = os.urandom(12)
+                ciphertext = self._cipher.encrypt(
+                    nonce,
+                    clean.astype(np.float64, copy=False).tobytes(order="C"),
+                    _vector_aad(vine_id, ordinal),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_vectors(
+                        vine_id, ordinal, nonce, ciphertext, dimension
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (vine_id, ordinal, nonce, ciphertext, clean.size),
+                )
+            self._connection.executemany(
+                """
+                INSERT INTO memory_terms(vine_id, term_hash, term_count)
+                VALUES (?, ?, ?)
+                """,
+                [(vine_id, term_hash, count) for term_hash, count in terms.items()],
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def _term_features(self, text: str, limit: int) -> dict[bytes, int]:
+        raw = _lexical_features(text, limit)
+        return {
+            hashlib.blake2b(
+                feature.encode("utf-8"),
+                key=self._dedupe_key,
+                digest_size=16,
+                person=b"echo-v-term-v1",
+            ).digest(): count
+            for feature, count in raw.items()
+        }
+
+    def _lexical_matches(self, query: str) -> dict[str, tuple[float, int]]:
+        query_terms = self._term_features(query, MAX_QUERY_FEATURES)
+        if not query_terms:
+            return {}
+        placeholders = ",".join("?" for _ in query_terms)
+        # Term hashes remain parameters; the generated SQL fragment contains
+        # only one qmark for each bounded query feature.
+        term_query = (
+            "SELECT vine_id, term_hash, term_count FROM memory_terms "
+            f"WHERE term_hash IN ({placeholders})"
+        )
+        rows = self._connection.execute(term_query, tuple(query_terms)).fetchall()
+        matched_counts: dict[str, int] = {}
+        matched_unique: dict[str, int] = {}
+        for vine_id_raw, term_hash_raw, count_raw in rows:
+            vine_id = str(vine_id_raw)
+            term_hash = bytes(term_hash_raw)
+            matched_counts[vine_id] = matched_counts.get(vine_id, 0) + min(
+                query_terms[term_hash], int(count_raw)
+            )
+            matched_unique[vine_id] = matched_unique.get(vine_id, 0) + 1
+        query_count = sum(query_terms.values())
+        query_unique = len(query_terms)
+        return {
+            vine_id: (
+                min(
+                    1.0,
+                    0.7 * (matched_counts[vine_id] / query_count)
+                    + 0.3 * (matched_unique[vine_id] / query_unique),
+                ),
+                matched_unique[vine_id],
+            )
+            for vine_id in matched_counts
+        }
+
+    def _lexical_scores(self, query: str) -> dict[str, float]:
+        return {
+            vine_id: score
+            for vine_id, (score, _matched) in self._lexical_matches(query).items()
+        }
+
+    def availability_candidates(
+        self,
+        query: str,
+        *,
+        as_of: float | None,
+    ) -> list[_AvailabilityCandidate]:
+        broad = self._lexical_matches(query)
+        predicate = self._lexical_matches(_predicate_query(query))
+        if not predicate:
+            return []
+        placeholders = ",".join("?" for _ in predicate)
+        candidate_query = (
+            "SELECT vine_id, topic, effective_at, superseded_by, superseded_at "
+            "FROM payloads "
+            f"WHERE vine_id IN ({placeholders})"
+        )
+        rows = self._connection.execute(
+            candidate_query,
+            tuple(sorted(predicate)),
+        ).fetchall()
+        candidates: list[_AvailabilityCandidate] = []
+        for row in rows:
+            vine_id = str(row[0])
+            effective_at = _validate_stored_timestamp(row[2], "effective_at")
+            superseded_at = (
+                None
+                if row[4] is None
+                else _validate_stored_timestamp(row[4], "superseded_at")
+            )
+            if as_of is not None and effective_at > as_of:
+                continue
+            temporal_current = row[3] is None
+            if as_of is not None:
+                temporal_current = superseded_at is None or as_of < superseded_at
+                if not temporal_current:
+                    continue
+            predicate_score, matched_features = predicate[vine_id]
+            lexical_score = broad.get(vine_id, (0.0, 0))[0]
+            score = min(1.0, 0.85 * predicate_score + 0.15 * lexical_score)
+            candidates.append(
+                _AvailabilityCandidate(
+                    vine_id=vine_id,
+                    topic=_validate_stored_topic(row[1]),
+                    score=score,
+                    lexical_score=lexical_score,
+                    predicate_score=predicate_score,
+                    matched_features=matched_features,
+                    effective_at=effective_at,
+                    superseded_by=None if row[3] is None else str(row[3]),
+                    superseded_at=superseded_at,
+                    temporal_current=temporal_current,
+                )
+            )
+        return sorted(
+            candidates,
+            key=lambda item: (
+                1 if item.temporal_current else 0,
+                item.score,
+                item.effective_at,
+                item.vine_id,
+            ),
+            reverse=True,
+        )
+
+    def __len__(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) FROM payloads").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def get_metadata(self, key: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT value FROM adapter_metadata WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_metadata(self, key: str, value: str) -> None:
+        self._connection.execute(
+            "INSERT OR IGNORE INTO adapter_metadata(key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+    def close(self) -> None:
+        self._connection.close()
+
+
+class QuarantinedRecordError(RuntimeError):
+    """A record failed authentication and was isolated from retrieval."""
+
+
+class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
+    """Versioned encrypted payload and protected retrieval store.
+
+    Version 1 is retained as a read/write compatibility mode so an existing
+    profile can be explicitly migrated.  Newly created profiles use version 2,
+    where topics are opaque, payloads and vectors are record/scope/key bound,
+    writes carry a crash-recoverable operation state, deletions are
+    authenticated, and corrupt records are quarantined.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        keyring: ProfileKeyring | None = None,
+        legacy_key: bytes | None = None,
+        read_only: bool = False,
+    ) -> None:
+        existing_version = _payload_database_version(path)
+        if existing_version == LEGACY_PAYLOAD_SCHEMA_VERSION:
+            if legacy_key is None:
+                raise KeyUnavailable("legacy profile key is unavailable")
+            self._secure_schema = False
+            self._keyring = None
+            super().__init__(path, legacy_key, read_only=read_only)
+            return
+        if existing_version not in {0, PAYLOAD_SCHEMA_VERSION}:
+            raise RuntimeError("unsupported payload database schema version")
+        if keyring is None:
+            raise KeyUnavailable("secure profile keyring is unavailable")
+
+        self._secure_schema = True
+        self._keyring = keyring
+        self.path = path
+        self._read_only = read_only
+        if read_only:
+            _require_secure_regular_file(path, "payload database")
+            database = f"{path.resolve().as_uri()}?mode=ro"
+        else:
+            _secure_regular_file(path)
+            database = str(path)
+        self._connection = sqlite3.connect(
+            database,
+            timeout=5.0,
+            isolation_level=None,
+            check_same_thread=False,
+            uri=read_only,
+        )
+        try:
+            self._connection.execute("PRAGMA busy_timeout = 5000")
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA trusted_schema = OFF")
+            version_row = self._connection.execute("PRAGMA user_version").fetchone()
+            version = 0 if version_row is None else int(version_row[0])
+            if version not in {0, PAYLOAD_SCHEMA_VERSION}:
+                raise RuntimeError("unsupported payload database schema version")
+            if read_only:
+                if version != PAYLOAD_SCHEMA_VERSION:
+                    raise RuntimeError("secure payload database is not initialized")
+                self._connection.execute("PRAGMA query_only = ON")
+                self._validate_existing_schema()
+                self._verify_integrity()
+                return
+            self._connection.execute("PRAGMA secure_delete = ON")
+            self._connection.execute("PRAGMA synchronous = FULL")
+            mode = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            if mode is None or str(mode[0]).lower() != "wal":
+                raise RuntimeError("payload database WAL mode could not be enabled")
+            self._initialize_secure_schema()
+            self._validate_existing_schema()
+            self._verify_integrity()
+            self._connection.execute(f"PRAGMA user_version = {PAYLOAD_SCHEMA_VERSION}")
+        except Exception:
+            self._connection.close()
+            raise
+
+    @property
+    def security_schema(self) -> str:
+        return "scoped-v2" if self._secure_schema else "legacy-v1"
+
+    @property
+    def metadata_protected(self) -> bool:
+        return self._secure_schema
+
+    def _initialize_secure_schema(self) -> None:
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payloads (
+                vine_id TEXT PRIMARY KEY NOT NULL,
+                topic TEXT NOT NULL,
+                nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+                ciphertext BLOB NOT NULL CHECK(length(ciphertext) > 16),
+                key_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                format_version INTEGER NOT NULL CHECK(format_version = 2),
+                content_hash TEXT UNIQUE NOT NULL,
+                created_at REAL NOT NULL,
+                effective_at REAL NOT NULL,
+                superseded_by TEXT,
+                superseded_at REAL,
+                operation_state TEXT NOT NULL CHECK(
+                    operation_state IN ('pending', 'committed')
+                )
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS adapter_metadata (
+                key TEXT PRIMARY KEY NOT NULL CHECK(length(key) BETWEEN 1 AND 64),
+                value TEXT NOT NULL CHECK(length(value) BETWEEN 1 AND 2048)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_vectors (
+                vine_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+                ciphertext BLOB NOT NULL CHECK(length(ciphertext) > 16),
+                dimension INTEGER NOT NULL CHECK(dimension > 0),
+                key_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                format_version INTEGER NOT NULL CHECK(format_version = 2),
+                PRIMARY KEY(vine_id, ordinal)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_terms (
+                vine_id TEXT NOT NULL,
+                term_hash BLOB NOT NULL CHECK(length(term_hash) = 16),
+                term_count INTEGER NOT NULL CHECK(term_count > 0),
+                key_id TEXT NOT NULL,
+                PRIMARY KEY(vine_id, term_hash)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quarantine (
+                vine_id TEXT PRIMARY KEY NOT NULL,
+                reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 64),
+                detected_at REAL NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deletion_tombstones (
+                vine_id TEXT PRIMARY KEY NOT NULL,
+                deleted_at REAL NOT NULL,
+                key_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                auth_tag BLOB NOT NULL CHECK(length(auth_tag) = 32)
+            )
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_terms_hash "
+            "ON memory_terms(term_hash)"
+        )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payload_nonce "
+            "ON payloads(key_id, nonce)"
+        )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_nonce "
+            "ON memory_vectors(key_id, nonce)"
+        )
+
+    def _validate_existing_schema(self) -> None:
+        if not self._secure_schema:
+            return super()._validate_existing_schema()
+        expected = {
+            "payloads": (
+                ("vine_id", "TEXT", 1, 1),
+                ("topic", "TEXT", 1, 0),
+                ("nonce", "BLOB", 1, 0),
+                ("ciphertext", "BLOB", 1, 0),
+                ("key_id", "TEXT", 1, 0),
+                ("scope_id", "TEXT", 1, 0),
+                ("format_version", "INTEGER", 1, 0),
+                ("content_hash", "TEXT", 1, 0),
+                ("created_at", "REAL", 1, 0),
+                ("effective_at", "REAL", 1, 0),
+                ("superseded_by", "TEXT", 0, 0),
+                ("superseded_at", "REAL", 0, 0),
+                ("operation_state", "TEXT", 1, 0),
+            ),
+            "adapter_metadata": (
+                ("key", "TEXT", 1, 1),
+                ("value", "TEXT", 1, 0),
+            ),
+            "memory_vectors": (
+                ("vine_id", "TEXT", 1, 1),
+                ("ordinal", "INTEGER", 1, 2),
+                ("nonce", "BLOB", 1, 0),
+                ("ciphertext", "BLOB", 1, 0),
+                ("dimension", "INTEGER", 1, 0),
+                ("key_id", "TEXT", 1, 0),
+                ("scope_id", "TEXT", 1, 0),
+                ("format_version", "INTEGER", 1, 0),
+            ),
+            "memory_terms": (
+                ("vine_id", "TEXT", 1, 1),
+                ("term_hash", "BLOB", 1, 2),
+                ("term_count", "INTEGER", 1, 0),
+                ("key_id", "TEXT", 1, 0),
+            ),
+            "quarantine": (
+                ("vine_id", "TEXT", 1, 1),
+                ("reason_code", "TEXT", 1, 0),
+                ("detected_at", "REAL", 1, 0),
+            ),
+            "deletion_tombstones": (
+                ("vine_id", "TEXT", 1, 1),
+                ("deleted_at", "REAL", 1, 0),
+                ("key_id", "TEXT", 1, 0),
+                ("scope_id", "TEXT", 1, 0),
+                ("auth_tag", "BLOB", 1, 0),
+            ),
+        }
+        for table, columns in expected.items():
+            rows = self._connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
+            actual = tuple(
+                (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5]))
+                for row in rows
+                if int(row[6]) == 0
+            )
+            if actual != columns:
+                raise RuntimeError("payload database schema validation failed")
+        objects = {
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in self._connection.execute(
+                "SELECT type, name, tbl_name FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        expected_objects = {
+            *(("table", table, table) for table in expected),
+            ("index", "idx_memory_terms_hash", "memory_terms"),
+            ("index", "idx_payload_nonce", "payloads"),
+            ("index", "idx_vector_nonce", "memory_vectors"),
+        }
+        if objects != expected_objects:
+            raise RuntimeError("payload database schema validation failed")
+        expected_indexes = {
+            "idx_memory_terms_hash": ("term_hash",),
+            "idx_payload_nonce": ("key_id", "nonce"),
+            "idx_vector_nonce": ("key_id", "nonce"),
+        }
+        for index_name, expected_columns in expected_indexes.items():
+            actual_index_columns = tuple(
+                str(row[2])
+                for row in self._connection.execute(f"PRAGMA index_info({index_name})")
+            )
+            if actual_index_columns != expected_columns:
+                raise RuntimeError("payload database schema validation failed")
+
+    def _verify_integrity(self) -> None:
+        if not self._secure_schema:
+            return super()._verify_integrity()
+        rows = self._connection.execute("PRAGMA quick_check").fetchall()
+        if tuple(str(row[0]) for row in rows) != ("ok",):
+            raise RuntimeError("payload database integrity check failed")
+        if self._connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("payload database foreign-key integrity check failed")
+        orphan_queries = (
+            "SELECT 1 FROM memory_vectors AS child "
+            "LEFT JOIN payloads ON payloads.vine_id = child.vine_id "
+            "WHERE payloads.vine_id IS NULL LIMIT 1",
+            "SELECT 1 FROM memory_terms AS child "
+            "LEFT JOIN payloads ON payloads.vine_id = child.vine_id "
+            "WHERE payloads.vine_id IS NULL LIMIT 1",
+            "SELECT 1 FROM quarantine AS child "
+            "LEFT JOIN payloads ON payloads.vine_id = child.vine_id "
+            "WHERE payloads.vine_id IS NULL LIMIT 1",
+        )
+        for query in orphan_queries:
+            if self._connection.execute(query).fetchone() is not None:
+                raise RuntimeError(
+                    "payload database foreign-key integrity check failed"
+                )
+        reused = self._connection.execute(
+            """
+            SELECT 1
+            FROM payloads AS payload
+            JOIN memory_vectors AS vector
+              ON vector.key_id = payload.key_id
+             AND vector.nonce = payload.nonce
+            LIMIT 1
+            """
+        ).fetchone()
+        if reused is not None:
+            raise RuntimeError("payload database contains a reused AES-GCM nonce")
+        if self._keyring is None:
+            raise KeyUnavailable("secure profile keyring is unavailable")
+        scope_id = self._keyring.scope_id
+        key_ids = set(self._keyring.key_ids)
+        rows = self._connection.execute(
+            "SELECT vine_id, key_id, scope_id, format_version FROM payloads "
+            "UNION ALL "
+            "SELECT vine_id, key_id, scope_id, format_version FROM memory_vectors"
+        ).fetchall()
+        metadata_failures: set[str] = set()
+        for vine_id, key_id, stored_scope, version in rows:
+            if str(key_id) not in key_ids:
+                raise KeyUnavailable("encrypted records reference an unavailable key")
+            if str(stored_scope) != scope_id or int(version) != PAYLOAD_SCHEMA_VERSION:
+                metadata_failures.add(str(vine_id))
+        if metadata_failures and self._read_only:
+            raise RuntimeError("encrypted record metadata authentication failed")
+        for vine_id in metadata_failures:
+            self._quarantine(vine_id, "record_metadata")
+
+    def topic_token(self, topic: str) -> str:
+        if not self._secure_schema:
+            return topic
+        keyring = self._require_keyring()
+        return opaque_topic(keyring.active_key(), keyring.scope_id, topic)
+
+    def digest(self, topic: str, payload: str) -> str:
+        if not self._secure_schema:
+            return super().digest(topic, payload)
+        keyring = self._require_keyring()
+        return self._content_digest(keyring.active_key(), topic, payload)
+
+    def find_duplicate(self, topic: str, payload: str) -> tuple[str, str] | None:
+        if not self._secure_schema:
+            return super().find_by_hash(super().digest(topic, payload))
+        keyring = self._require_keyring()
+        for key_id in keyring.key_ids:
+            content_hash = self._content_digest(
+                keyring.key(key_id),
+                topic,
+                payload,
+            )
+            row = self._connection.execute(
+                """
+                SELECT payloads.vine_id
+                FROM payloads
+                LEFT JOIN quarantine
+                  ON quarantine.vine_id = payloads.vine_id
+                WHERE payloads.content_hash = ?
+                  AND payloads.operation_state = 'committed'
+                  AND quarantine.vine_id IS NULL
+                """,
+                (content_hash,),
+            ).fetchone()
+            if row is None:
+                continue
+            record = self.get_record(str(row[0]))
+            if record is not None and hmac.compare_digest(record[0], topic):
+                if hmac.compare_digest(record[1], payload):
+                    return str(row[0]), record[0]
+        return None
+
+    def find_by_hash(self, content_hash: str) -> tuple[str, str] | None:
+        if not self._secure_schema:
+            return super().find_by_hash(content_hash)
+        row = self._connection.execute(
+            """
+            SELECT payloads.vine_id
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.content_hash = ?
+              AND payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            """,
+            (content_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        record = self.get_record(str(row[0]))
+        return None if record is None else (str(row[0]), record[0])
+
+    def put(
+        self,
+        vine_id: str,
+        topic: str,
+        payload: str,
+        content_hash: str,
+        *,
+        vectors: list[NDArray[np.float64]],
+        effective_at: float,
+        supersedes: tuple[str, ...],
+    ) -> None:
+        if not self._secure_schema:
+            return super().put(
+                vine_id,
+                topic,
+                payload,
+                content_hash,
+                vectors=vectors,
+                effective_at=effective_at,
+                supersedes=supersedes,
+            )
+        keyring = self._require_keyring()
+        key_id = keyring.active_key_id
+        key = keyring.active_key()
+        scope_id = keyring.scope_id
+        nonce = os.urandom(AES_GCM_NONCE_BYTES)
+        envelope = self._encode_envelope(
+            vine_id=vine_id,
+            topic=topic,
+            payload=payload,
+            key_id=key_id,
+            scope_id=scope_id,
+        )
+        ciphertext = AESGCM(key).encrypt(
+            nonce,
+            envelope,
+            scoped_aad(
+                object_type="payload",
+                scope_id=scope_id,
+                record_id=vine_id,
+                schema_version=PAYLOAD_SCHEMA_VERSION,
+                key_id=key_id,
+            ),
+        )
+        topic_value = opaque_topic(key, scope_id, topic)
+        created_at = time.time()
+        terms = self._term_features_for_key(
+            f"{topic}\n{payload}",
+            MAX_LEXICAL_FEATURES,
+            key,
+        )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for prior_id in supersedes:
+                row = self._connection.execute(
+                    """
+                    SELECT effective_at, superseded_by
+                    FROM payloads
+                    WHERE vine_id = ? AND operation_state = 'committed'
+                    """,
+                    (prior_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"superseded memory does not exist: {prior_id}")
+                if row[1] is not None:
+                    raise ValueError(f"memory is already superseded: {prior_id}")
+                if float(row[0]) > effective_at:
+                    raise ValueError(
+                        "replacement effective_at must not precede superseded memory"
+                    )
+            self._connection.execute(
+                """
+                INSERT INTO payloads(
+                    vine_id, topic, nonce, ciphertext, key_id, scope_id,
+                    format_version, content_hash, created_at, effective_at,
+                    superseded_by, superseded_at, operation_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'pending')
+                """,
+                (
+                    vine_id,
+                    topic_value,
+                    nonce,
+                    ciphertext,
+                    key_id,
+                    scope_id,
+                    PAYLOAD_SCHEMA_VERSION,
+                    content_hash,
+                    created_at,
+                    effective_at,
+                ),
+            )
+            for ordinal, vector in enumerate(vectors):
+                clean = _normalize_embedding_vector(vector)
+                vector_nonce = os.urandom(AES_GCM_NONCE_BYTES)
+                vector_ciphertext = AESGCM(key).encrypt(
+                    vector_nonce,
+                    clean.astype(np.float64, copy=False).tobytes(order="C"),
+                    scoped_aad(
+                        object_type="retrieval-vector",
+                        scope_id=scope_id,
+                        record_id=vine_id,
+                        schema_version=PAYLOAD_SCHEMA_VERSION,
+                        key_id=key_id,
+                        ordinal=ordinal,
+                        dimension=int(clean.size),
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_vectors(
+                        vine_id, ordinal, nonce, ciphertext, dimension,
+                        key_id, scope_id, format_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        vine_id,
+                        ordinal,
+                        vector_nonce,
+                        vector_ciphertext,
+                        clean.size,
+                        key_id,
+                        scope_id,
+                        PAYLOAD_SCHEMA_VERSION,
+                    ),
+                )
+            self._connection.executemany(
+                """
+                INSERT INTO memory_terms(
+                    vine_id, term_hash, term_count, key_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (vine_id, term_hash, count, key_id)
+                    for term_hash, count in terms.items()
+                ],
+            )
+            for prior_id in supersedes:
+                self._connection.execute(
+                    """
+                    UPDATE payloads
+                    SET superseded_by = ?, superseded_at = ?
+                    WHERE vine_id = ?
+                      AND superseded_by IS NULL
+                      AND operation_state = 'committed'
+                    """,
+                    (vine_id, effective_at, prior_id),
+                )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def mark_committed(self, vine_id: str) -> None:
+        if not self._secure_schema:
+            return
+        result = self._connection.execute(
+            """
+            UPDATE payloads
+            SET operation_state = 'committed'
+            WHERE vine_id = ? AND operation_state = 'pending'
+            """,
+            (vine_id,),
+        )
+        if result.rowcount != 1:
+            raise RuntimeError("pending encrypted record could not be committed")
+
+    def pending_ids(self) -> list[str]:
+        if not self._secure_schema:
+            return []
+        rows = self._connection.execute(
+            "SELECT vine_id FROM payloads WHERE operation_state = 'pending' "
+            "ORDER BY vine_id"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def get_record(self, vine_id: str) -> tuple[str, str] | None:
+        if not self._secure_schema:
+            row = self._connection.execute(
+                "SELECT topic FROM payloads WHERE vine_id = ?",
+                (vine_id,),
+            ).fetchone()
+            payload = super().get(vine_id)
+            if row is None or payload is None:
+                return None
+            return _validate_stored_topic(row[0]), payload
+        row = self._connection.execute(
+            """
+            SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   key_id, scope_id, format_version
+            FROM payloads
+            WHERE vine_id = ? AND operation_state = 'committed'
+            """,
+            (vine_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._decrypt_record(vine_id, row)
+
+    def _get_pending_record(self, vine_id: str) -> tuple[str, str] | None:
+        row = self._connection.execute(
+            """
+            SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   key_id, scope_id, format_version
+            FROM payloads
+            WHERE vine_id = ?
+            """,
+            (vine_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._decrypt_record(vine_id, row)
+
+    def get(self, vine_id: str) -> str | None:
+        if not self._secure_schema:
+            return super().get(vine_id)
+        record = self.get_record(vine_id)
+        return None if record is None else record[1]
+
+    def get_topic(self, vine_id: str) -> str | None:
+        record = self.get_record(vine_id)
+        return None if record is None else record[0]
+
+    def delete(self, vine_id: str, *, tombstone: bool = True) -> bool:
+        if not self._secure_schema:
+            return super().delete(vine_id)
+        keyring = self._require_keyring()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            link = self._connection.execute(
+                """
+                SELECT superseded_by, superseded_at, key_id, operation_state
+                FROM payloads WHERE vine_id = ?
+                """,
+                (vine_id,),
+            ).fetchone()
+            if link is None:
+                self._connection.execute("ROLLBACK")
+                return False
+            if tombstone and str(link[3]) == "committed":
+                deleted_at = time.time()
+                key_id = keyring.active_key_id
+                tag = self._tombstone_tag(
+                    keyring.key(key_id),
+                    vine_id,
+                    deleted_at,
+                    keyring.scope_id,
+                    key_id,
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO deletion_tombstones(
+                        vine_id, deleted_at, key_id, scope_id, auth_tag
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(vine_id) DO UPDATE SET
+                        deleted_at = excluded.deleted_at,
+                        key_id = excluded.key_id,
+                        scope_id = excluded.scope_id,
+                        auth_tag = excluded.auth_tag
+                    """,
+                    (vine_id, deleted_at, key_id, keyring.scope_id, tag),
+                )
+            self._connection.execute(
+                "DELETE FROM quarantine WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM memory_vectors WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                """
+                UPDATE payloads
+                SET superseded_by = ?, superseded_at = ?
+                WHERE superseded_by = ?
+                """,
+                (link[0], link[1], vine_id),
+            )
+            result = self._connection.execute(
+                "DELETE FROM payloads WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute("COMMIT")
+            return result.rowcount > 0
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def retrieval_candidates(
+        self,
+        intent: NDArray[np.float64],
+        query: str,
+        semantic_candidate_ids: list[str],
+        answerability_intent: NDArray[np.float64] | None = None,
+    ) -> dict[str, _StoredCandidate]:
+        if not self._secure_schema:
+            return super().retrieval_candidates(
+                intent,
+                query,
+                semantic_candidate_ids,
+                answerability_intent,
+            )
+        query_vector = _normalize_embedding_vector(intent)
+        answerability_vector = (
+            None
+            if answerability_intent is None
+            else _normalize_embedding_vector(
+                answerability_intent,
+                expected_dimension=query_vector.size,
+                source="answerability embedder",
+            )
+        )
+        lexical = self._lexical_scores(query)
+        ordered_ids = list(dict.fromkeys(semantic_candidate_ids))[
+            :MAX_RETRIEVAL_CANDIDATES
+        ]
+        candidate_ids = set(ordered_ids)
+        for vine_id in sorted(
+            lexical,
+            key=lambda candidate: (lexical[candidate], candidate),
+            reverse=True,
+        ):
+            if len(candidate_ids) >= MAX_RETRIEVAL_CANDIDATES:
+                break
+            candidate_ids.add(vine_id)
+        if not candidate_ids:
+            return {}
+        placeholders = ",".join("?" for _ in candidate_ids)
+        parameters = tuple(sorted(candidate_ids))
+        semantic: dict[str, tuple[float, NDArray[np.float64]]] = {}
+        answerability: dict[str, float] = {}
+        bad_ids: set[str] = set()
+        vector_query = (
+            "SELECT vector.vine_id, vector.ordinal, "
+            "CAST(vector.nonce AS BLOB), CAST(vector.ciphertext AS BLOB), "
+            "vector.dimension, vector.key_id, "
+            "vector.scope_id, vector.format_version "
+            "FROM memory_vectors AS vector "
+            "JOIN payloads AS payload ON payload.vine_id = vector.vine_id "
+            "LEFT JOIN quarantine ON quarantine.vine_id = vector.vine_id "
+            f"WHERE vector.vine_id IN ({placeholders}) "
+            "AND payload.operation_state = 'committed' "
+            "AND quarantine.vine_id IS NULL "
+            "ORDER BY vector.vine_id, vector.ordinal"
+        )
+        for row in self._connection.execute(vector_query, parameters):
+            vine_id = str(row[0])
+            ordinal = int(row[1])
+            dimension = int(row[4])
+            try:
+                vector = self._decrypt_vector(
+                    vine_id=vine_id,
+                    ordinal=ordinal,
+                    nonce=bytes(row[2]),
+                    ciphertext=bytes(row[3]),
+                    dimension=dimension,
+                    key_id=str(row[5]),
+                    scope_id=str(row[6]),
+                    format_version=int(row[7]),
+                )
+            except (QuarantinedRecordError, KeyUnavailable):
+                bad_ids.add(vine_id)
+                self._quarantine(vine_id, "retrieval_vector_authentication")
+                continue
+            if dimension != query_vector.size:
+                bad_ids.add(vine_id)
+                self._quarantine(vine_id, "retrieval_vector_dimension")
+                continue
+            score = cosine_similarity(query_vector, vector)
+            current = semantic.get(vine_id)
+            if current is None or score > current[0]:
+                semantic[vine_id] = (score, vector)
+            if answerability_vector is not None:
+                answerability_score = cosine_similarity(answerability_vector, vector)
+                current_answerability = answerability.get(vine_id)
+                if (
+                    current_answerability is None
+                    or answerability_score > current_answerability
+                ):
+                    answerability[vine_id] = answerability_score
+        payload_query = (
+            "SELECT payloads.vine_id, payloads.topic, payloads.effective_at, "
+            "payloads.superseded_by, payloads.superseded_at "
+            "FROM payloads "
+            "LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id "
+            f"WHERE payloads.vine_id IN ({placeholders}) "
+            "AND payloads.operation_state = 'committed' "
+            "AND quarantine.vine_id IS NULL"
+        )
+        rows = self._connection.execute(payload_query, parameters).fetchall()
+        candidates: dict[str, _StoredCandidate] = {}
+        for row in rows:
+            vine_id = str(row[0])
+            if vine_id in bad_ids:
+                continue
+            semantic_entry = semantic.get(vine_id)
+            effective_at = _validate_stored_timestamp(row[2], "effective_at")
+            superseded_at = (
+                None
+                if row[4] is None
+                else _validate_stored_timestamp(row[4], "superseded_at")
+            )
+            candidates[vine_id] = _StoredCandidate(
+                vine_id=vine_id,
+                semantic_score=None if semantic_entry is None else semantic_entry[0],
+                answerability_score=answerability.get(vine_id),
+                lexical_score=lexical.get(vine_id, 0.0),
+                best_vector=None if semantic_entry is None else semantic_entry[1],
+                topic=_validate_stored_topic(row[1]),
+                effective_at=effective_at,
+                superseded_by=None if row[3] is None else str(row[3]),
+                superseded_at=superseded_at,
+            )
+        return candidates
+
+    def retrieval_index_counts(self) -> tuple[int, int]:
+        if not self._secure_schema:
+            return super().retrieval_index_counts()
+        indexed_row = self._connection.execute(
+            """
+            SELECT COUNT(DISTINCT memory_vectors.vine_id)
+            FROM memory_vectors
+            JOIN payloads ON payloads.vine_id = memory_vectors.vine_id
+            LEFT JOIN quarantine ON quarantine.vine_id = memory_vectors.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            """
+        ).fetchone()
+        total = len(self)
+        indexed = 0 if indexed_row is None else int(indexed_row[0])
+        return indexed, max(0, total - indexed)
+
+    def record_ids_for_reindex(self) -> list[str]:
+        if not self._secure_schema:
+            return super().record_ids_for_reindex()
+        rows = self._connection.execute(
+            """
+            SELECT payloads.vine_id
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            ORDER BY payloads.created_at, payloads.vine_id
+            """
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def record_for_reindex(self, vine_id: str) -> tuple[str, str]:
+        if not self._secure_schema:
+            return super().record_for_reindex(vine_id)
+        record = self.get_record(vine_id)
+        if record is None:
+            raise RuntimeError("payload disappeared during retrieval reindex")
+        return record
+
+    def records_for_migration(self) -> list[_MigrationRecord]:
+        if not self._secure_schema:
+            return super().records_for_migration()
+        rows = self._connection.execute(
+            """
+            SELECT payloads.vine_id, payloads.effective_at, payloads.superseded_by
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            ORDER BY payloads.created_at, payloads.vine_id
+            """
+        ).fetchall()
+        records: list[_MigrationRecord] = []
+        for row in rows:
+            vine_id = str(row[0])
+            record = self.get_record(vine_id)
+            if record is None:
+                raise RuntimeError("payload disappeared during profile migration")
+            records.append(
+                _MigrationRecord(
+                    vine_id=vine_id,
+                    topic=record[0],
+                    effective_at=_validate_stored_timestamp(row[1], "effective_at"),
+                    superseded_by=None if row[2] is None else str(row[2]),
+                )
+            )
+        return records
+
+    def replace_retrieval_index(
+        self,
+        vine_id: str,
+        text: str,
+        vectors: list[NDArray[np.float64]],
+    ) -> None:
+        if not self._secure_schema:
+            return super().replace_retrieval_index(vine_id, text, vectors)
+        keyring = self._require_keyring()
+        key_id = keyring.active_key_id
+        key = keyring.active_key()
+        terms = self._term_features_for_key(text, MAX_LEXICAL_FEATURES, key)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            exists = self._connection.execute(
+                """
+                SELECT 1 FROM payloads
+                WHERE vine_id = ? AND operation_state = 'committed'
+                """,
+                (vine_id,),
+            ).fetchone()
+            if exists is None:
+                raise RuntimeError("payload disappeared during retrieval reindex")
+            self._connection.execute(
+                "DELETE FROM memory_vectors WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            for ordinal, vector in enumerate(vectors):
+                clean = _normalize_embedding_vector(vector)
+                nonce = os.urandom(AES_GCM_NONCE_BYTES)
+                ciphertext = AESGCM(key).encrypt(
+                    nonce,
+                    clean.astype(np.float64, copy=False).tobytes(order="C"),
+                    scoped_aad(
+                        object_type="retrieval-vector",
+                        scope_id=keyring.scope_id,
+                        record_id=vine_id,
+                        schema_version=PAYLOAD_SCHEMA_VERSION,
+                        key_id=key_id,
+                        ordinal=ordinal,
+                        dimension=int(clean.size),
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO memory_vectors(
+                        vine_id, ordinal, nonce, ciphertext, dimension,
+                        key_id, scope_id, format_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        vine_id,
+                        ordinal,
+                        nonce,
+                        ciphertext,
+                        clean.size,
+                        key_id,
+                        keyring.scope_id,
+                        PAYLOAD_SCHEMA_VERSION,
+                    ),
+                )
+            self._connection.executemany(
+                """
+                INSERT INTO memory_terms(
+                    vine_id, term_hash, term_count, key_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (vine_id, term_hash, count, key_id)
+                    for term_hash, count in terms.items()
+                ],
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def _lexical_matches(self, query: str) -> dict[str, tuple[float, int]]:
+        if not self._secure_schema:
+            return super()._lexical_matches(query)
+        keyring = self._require_keyring()
+        query_terms_by_key: dict[str, dict[bytes, int]] = {
+            key_id: self._term_features_for_key(
+                query,
+                MAX_QUERY_FEATURES,
+                keyring.key(key_id),
+            )
+            for key_id in keyring.key_ids
+        }
+        flattened: dict[bytes, tuple[str, int]] = {}
+        for key_id, terms in query_terms_by_key.items():
+            for term_hash, count in terms.items():
+                flattened[term_hash] = (key_id, count)
+        if not flattened:
+            return {}
+        placeholders = ",".join("?" for _ in flattened)
+        term_query = (
+            "SELECT memory_terms.vine_id, memory_terms.term_hash, "
+            "memory_terms.term_count, memory_terms.key_id "
+            "FROM memory_terms "
+            "JOIN payloads ON payloads.vine_id = memory_terms.vine_id "
+            "LEFT JOIN quarantine ON quarantine.vine_id = memory_terms.vine_id "
+            f"WHERE memory_terms.term_hash IN ({placeholders}) "
+            "AND payloads.operation_state = 'committed' "
+            "AND quarantine.vine_id IS NULL"
+        )
+        rows = self._connection.execute(term_query, tuple(flattened)).fetchall()
+        matched_counts: dict[str, int] = {}
+        matched_unique: dict[str, int] = {}
+        query_count_by_key = {
+            key_id: sum(terms.values()) for key_id, terms in query_terms_by_key.items()
+        }
+        query_unique_by_key = {
+            key_id: len(terms) for key_id, terms in query_terms_by_key.items()
+        }
+        candidate_key: dict[str, str] = {}
+        for vine_id_raw, term_hash_raw, count_raw, key_id_raw in rows:
+            vine_id = str(vine_id_raw)
+            key_id = str(key_id_raw)
+            term_hash = bytes(term_hash_raw)
+            expected = flattened.get(term_hash)
+            if expected is None or expected[0] != key_id:
+                continue
+            candidate_key[vine_id] = key_id
+            matched_counts[vine_id] = matched_counts.get(vine_id, 0) + min(
+                expected[1],
+                int(count_raw),
+            )
+            matched_unique[vine_id] = matched_unique.get(vine_id, 0) + 1
+        return {
+            vine_id: (
+                min(
+                    1.0,
+                    0.7
+                    * (
+                        matched_counts[vine_id]
+                        / max(1, query_count_by_key[candidate_key[vine_id]])
+                    )
+                    + 0.3
+                    * (
+                        matched_unique[vine_id]
+                        / max(1, query_unique_by_key[candidate_key[vine_id]])
+                    ),
+                ),
+                matched_unique[vine_id],
+            )
+            for vine_id in matched_counts
+        }
+
+    def availability_candidates(
+        self,
+        query: str,
+        *,
+        as_of: float | None,
+    ) -> list[_AvailabilityCandidate]:
+        if not self._secure_schema:
+            return super().availability_candidates(query, as_of=as_of)
+        broad = self._lexical_matches(query)
+        predicate = self._lexical_matches(_predicate_query(query))
+        if not predicate:
+            return []
+        placeholders = ",".join("?" for _ in predicate)
+        candidate_query = (
+            "SELECT payloads.vine_id, payloads.topic, payloads.effective_at, "
+            "payloads.superseded_by, payloads.superseded_at "
+            "FROM payloads "
+            "LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id "
+            f"WHERE payloads.vine_id IN ({placeholders}) "
+            "AND payloads.operation_state = 'committed' "
+            "AND quarantine.vine_id IS NULL"
+        )
+        rows = self._connection.execute(
+            candidate_query,
+            tuple(sorted(predicate)),
+        ).fetchall()
+        candidates: list[_AvailabilityCandidate] = []
+        for row in rows:
+            vine_id = str(row[0])
+            effective_at = _validate_stored_timestamp(row[2], "effective_at")
+            superseded_at = (
+                None
+                if row[4] is None
+                else _validate_stored_timestamp(row[4], "superseded_at")
+            )
+            if as_of is not None and effective_at > as_of:
+                continue
+            temporal_current = row[3] is None
+            if as_of is not None:
+                temporal_current = superseded_at is None or as_of < superseded_at
+                if not temporal_current:
+                    continue
+            predicate_score, matched_features = predicate[vine_id]
+            lexical_score = broad.get(vine_id, (0.0, 0))[0]
+            score = min(1.0, 0.85 * predicate_score + 0.15 * lexical_score)
+            candidates.append(
+                _AvailabilityCandidate(
+                    vine_id=vine_id,
+                    topic=_validate_stored_topic(row[1]),
+                    score=score,
+                    lexical_score=lexical_score,
+                    predicate_score=predicate_score,
+                    matched_features=matched_features,
+                    effective_at=effective_at,
+                    superseded_by=None if row[3] is None else str(row[3]),
+                    superseded_at=superseded_at,
+                    temporal_current=temporal_current,
+                )
+            )
+        return sorted(
+            candidates,
+            key=lambda item: (
+                1 if item.temporal_current else 0,
+                item.score,
+                item.effective_at,
+                item.vine_id,
+            ),
+            reverse=True,
+        )
+
+    def list_records(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("record listing limit must be between 1 and 1000")
+        if not self._secure_schema:
+            rows = self._connection.execute(
+                """
+                SELECT vine_id, topic, effective_at, superseded_by, superseded_at
+                FROM payloads
+                ORDER BY created_at, vine_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            records: list[dict[str, Any]] = []
+            for row in rows:
+                payload = super().get(str(row[0]))
+                if payload is None:
+                    continue
+                records.append(
+                    {
+                        "vine_id": str(row[0]),
+                        "topic": _validate_stored_topic(row[1]),
+                        "payload": payload,
+                        "effective_at": _validate_stored_timestamp(
+                            row[2],
+                            "effective_at",
+                        ),
+                        "superseded_by": (None if row[3] is None else str(row[3])),
+                        "superseded_at": (
+                            None
+                            if row[4] is None
+                            else _validate_stored_timestamp(
+                                row[4],
+                                "superseded_at",
+                            )
+                        ),
+                    }
+                )
+            return records
+        rows = self._connection.execute(
+            """
+            SELECT payloads.vine_id, payloads.effective_at,
+                   payloads.superseded_by, payloads.superseded_at
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            ORDER BY payloads.created_at, payloads.vine_id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        records = []
+        for row in rows:
+            vine_id = str(row[0])
+            try:
+                record = self.get_record(vine_id)
+            except QuarantinedRecordError:
+                continue
+            if record is None:
+                continue
+            records.append(
+                {
+                    "vine_id": vine_id,
+                    "topic": record[0],
+                    "payload": record[1],
+                    "effective_at": _validate_stored_timestamp(
+                        row[1],
+                        "effective_at",
+                    ),
+                    "superseded_by": None if row[2] is None else str(row[2]),
+                    "superseded_at": (
+                        None
+                        if row[3] is None
+                        else _validate_stored_timestamp(row[3], "superseded_at")
+                    ),
+                }
+            )
+        return records
+
+    def quarantine_count(self) -> int:
+        if not self._secure_schema:
+            return 0
+        row = self._connection.execute("SELECT COUNT(*) FROM quarantine").fetchone()
+        return 0 if row is None else int(row[0])
+
+    def tombstone_count(self) -> int:
+        if not self._secure_schema:
+            return 0
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM deletion_tombstones"
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def key_usage(self, key_id: str) -> int:
+        if not self._secure_schema:
+            return 0
+        queries = (
+            "SELECT COUNT(*) FROM payloads WHERE key_id = ?",
+            "SELECT COUNT(*) FROM memory_vectors WHERE key_id = ?",
+            "SELECT COUNT(*) FROM memory_terms WHERE key_id = ?",
+            "SELECT COUNT(*) FROM deletion_tombstones WHERE key_id = ?",
+        )
+        counts = [
+            self._connection.execute(query, (key_id,)).fetchone() for query in queries
+        ]
+        return sum(0 if row is None else int(row[0]) for row in counts)
+
+    def rotate_batch(
+        self,
+        *,
+        source_key_id: str,
+        target_key_id: str,
+        limit: int,
+    ) -> dict[str, int]:
+        if not self._secure_schema:
+            raise RuntimeError("legacy profiles must migrate to a scoped-v2 profile")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("rotation batch limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            """
+            SELECT payloads.vine_id
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.key_id = ?
+              AND payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            ORDER BY payloads.created_at, payloads.vine_id
+            LIMIT ?
+            """,
+            (source_key_id, limit),
+        ).fetchall()
+        migrated = 0
+        failed = 0
+        for row in rows:
+            try:
+                self._reencrypt_record(str(row[0]), target_key_id)
+            except (QuarantinedRecordError, KeyUnavailable):
+                failed += 1
+            else:
+                migrated += 1
+        remaining_limit = max(0, limit - migrated - failed)
+        tombstones = 0
+        if remaining_limit:
+            tombstones = self._rotate_tombstones(
+                source_key_id,
+                target_key_id,
+                remaining_limit,
+            )
+        return {
+            "migrated_records": migrated,
+            "migrated_tombstones": tombstones,
+            "failed_records": failed,
+            "remaining_key_references": self.key_usage(source_key_id),
+        }
+
+    def __len__(self) -> int:
+        if not self._secure_schema:
+            return super().__len__()
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM payloads
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            """
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def _decrypt_record(
+        self,
+        vine_id: str,
+        row: tuple[Any, ...],
+    ) -> tuple[str, str]:
+        keyring = self._require_keyring()
+        nonce = bytes(row[0])
+        ciphertext = bytes(row[1])
+        key_id = str(row[2])
+        scope_id = str(row[3])
+        format_version = int(row[4])
+        if (
+            len(nonce) != AES_GCM_NONCE_BYTES
+            or not 16
+            < len(ciphertext)
+            <= (MAX_PAYLOAD_CHARS + MAX_TOPIC_CHARS) * 4 + 4096
+            or scope_id != keyring.scope_id
+            or format_version != PAYLOAD_SCHEMA_VERSION
+        ):
+            self._quarantine(vine_id, "payload_metadata")
+            raise QuarantinedRecordError("encrypted record is quarantined")
+        try:
+            plaintext = bytearray(
+                AESGCM(keyring.key(key_id)).decrypt(
+                    nonce,
+                    ciphertext,
+                    scoped_aad(
+                        object_type="payload",
+                        scope_id=scope_id,
+                        record_id=vine_id,
+                        schema_version=format_version,
+                        key_id=key_id,
+                    ),
+                )
+            )
+        except (InvalidTag, KeyUnavailable) as exc:
+            self._quarantine(vine_id, "payload_authentication")
+            raise QuarantinedRecordError("encrypted record is quarantined") from exc
+        try:
+            decoded = strict_json_loads(bytes(plaintext))
+            if not isinstance(decoded, dict) or set(decoded) != {
+                "key_id",
+                "payload",
+                "record_id",
+                "schema_version",
+                "scope_id",
+                "topic",
+            }:
+                raise ValueError
+            if (
+                decoded["key_id"] != key_id
+                or decoded["record_id"] != vine_id
+                or decoded["schema_version"] != format_version
+                or decoded["scope_id"] != scope_id
+            ):
+                raise ValueError
+            topic = _validate_stored_topic(decoded["topic"])
+            payload = _validate_text(
+                decoded["payload"],
+                "stored payload",
+                MAX_PAYLOAD_CHARS,
+            )
+            return topic, payload
+        except Exception as exc:
+            self._quarantine(vine_id, "payload_envelope")
+            raise QuarantinedRecordError("encrypted record is quarantined") from exc
+        finally:
+            for index in range(len(plaintext)):
+                plaintext[index] = 0
+
+    def _decrypt_vector(
+        self,
+        *,
+        vine_id: str,
+        ordinal: int,
+        nonce: bytes,
+        ciphertext: bytes,
+        dimension: int,
+        key_id: str,
+        scope_id: str,
+        format_version: int,
+    ) -> NDArray[np.float64]:
+        keyring = self._require_keyring()
+        if (
+            ordinal < 0
+            or ordinal >= MAX_MEMORY_PASSAGES
+            or dimension <= 0
+            or dimension > 65_536
+            or len(nonce) != AES_GCM_NONCE_BYTES
+            or len(ciphertext) != dimension * 8 + 16
+            or scope_id != keyring.scope_id
+            or format_version != PAYLOAD_SCHEMA_VERSION
+        ):
+            raise QuarantinedRecordError("retrieval vector is quarantined")
+        plaintext = bytearray()
+        try:
+            plaintext = bytearray(
+                AESGCM(keyring.key(key_id)).decrypt(
+                    nonce,
+                    ciphertext,
+                    scoped_aad(
+                        object_type="retrieval-vector",
+                        scope_id=scope_id,
+                        record_id=vine_id,
+                        schema_version=format_version,
+                        key_id=key_id,
+                        ordinal=ordinal,
+                        dimension=dimension,
+                    ),
+                )
+            )
+            expected = dimension * np.dtype(np.float64).itemsize
+            if len(plaintext) != expected:
+                raise QuarantinedRecordError("retrieval vector is quarantined")
+            return _normalize_embedding_vector(
+                np.frombuffer(plaintext, dtype=np.float64).copy(),
+                expected_dimension=dimension,
+                source="stored retrieval vector",
+            )
+        except (InvalidTag, KeyUnavailable) as exc:
+            raise QuarantinedRecordError("retrieval vector is quarantined") from exc
+        finally:
+            for index in range(len(plaintext)):
+                plaintext[index] = 0
+
+    def _quarantine(self, vine_id: str, reason_code: str) -> None:
+        if not self._secure_schema or self._read_only:
+            return
+        safe_reason = (
+            reason_code
+            if re.fullmatch(r"[a-z0-9_]{1,64}", reason_code)
+            else "authentication_failure"
+        )
+        self._connection.execute(
+            """
+            INSERT INTO quarantine(vine_id, reason_code, detected_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(vine_id) DO NOTHING
+            """,
+            (vine_id, safe_reason, time.time()),
+        )
+
+    def _reencrypt_record(self, vine_id: str, target_key_id: str) -> None:
+        keyring = self._require_keyring()
+        row = self._connection.execute(
+            """
+            SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   key_id, scope_id, format_version
+            FROM payloads
+            WHERE vine_id = ? AND operation_state = 'committed'
+            """,
+            (vine_id,),
+        ).fetchone()
+        if row is None:
+            return
+        topic, payload = self._decrypt_record(vine_id, row)
+        vector_rows = self._connection.execute(
+            """
+            SELECT ordinal, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   dimension, key_id, scope_id, format_version
+            FROM memory_vectors
+            WHERE vine_id = ?
+            ORDER BY ordinal
+            """,
+            (vine_id,),
+        ).fetchall()
+        vectors: list[tuple[int, NDArray[np.float64]]] = []
+        try:
+            for vector_row in vector_rows:
+                ordinal = int(vector_row[0])
+                vectors.append(
+                    (
+                        ordinal,
+                        self._decrypt_vector(
+                            vine_id=vine_id,
+                            ordinal=ordinal,
+                            nonce=bytes(vector_row[1]),
+                            ciphertext=bytes(vector_row[2]),
+                            dimension=int(vector_row[3]),
+                            key_id=str(vector_row[4]),
+                            scope_id=str(vector_row[5]),
+                            format_version=int(vector_row[6]),
+                        ),
+                    )
+                )
+            target_key = keyring.key(target_key_id)
+            scope_id = keyring.scope_id
+            payload_nonce = os.urandom(AES_GCM_NONCE_BYTES)
+            envelope = self._encode_envelope(
+                vine_id=vine_id,
+                topic=topic,
+                payload=payload,
+                key_id=target_key_id,
+                scope_id=scope_id,
+            )
+            payload_ciphertext = AESGCM(target_key).encrypt(
+                payload_nonce,
+                envelope,
+                scoped_aad(
+                    object_type="payload",
+                    scope_id=scope_id,
+                    record_id=vine_id,
+                    schema_version=PAYLOAD_SCHEMA_VERSION,
+                    key_id=target_key_id,
+                ),
+            )
+            encrypted_vectors: list[tuple[int, bytes, bytes, int]] = []
+            for ordinal, vector in vectors:
+                nonce = os.urandom(AES_GCM_NONCE_BYTES)
+                encrypted_vectors.append(
+                    (
+                        ordinal,
+                        nonce,
+                        AESGCM(target_key).encrypt(
+                            nonce,
+                            vector.astype(np.float64, copy=False).tobytes(order="C"),
+                            scoped_aad(
+                                object_type="retrieval-vector",
+                                scope_id=scope_id,
+                                record_id=vine_id,
+                                schema_version=PAYLOAD_SCHEMA_VERSION,
+                                key_id=target_key_id,
+                                ordinal=ordinal,
+                                dimension=int(vector.size),
+                            ),
+                        ),
+                        int(vector.size),
+                    )
+                )
+            terms = self._term_features_for_key(
+                f"{topic}\n{payload}",
+                MAX_LEXICAL_FEATURES,
+                target_key,
+            )
+            content_hash = self._content_digest(target_key, topic, payload)
+            topic_value = opaque_topic(target_key, scope_id, topic)
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    """
+                    UPDATE payloads
+                    SET topic = ?, nonce = ?, ciphertext = ?, key_id = ?,
+                        scope_id = ?, format_version = ?, content_hash = ?
+                    WHERE vine_id = ?
+                    """,
+                    (
+                        topic_value,
+                        payload_nonce,
+                        payload_ciphertext,
+                        target_key_id,
+                        scope_id,
+                        PAYLOAD_SCHEMA_VERSION,
+                        content_hash,
+                        vine_id,
+                    ),
+                )
+                self._connection.execute(
+                    "DELETE FROM memory_vectors WHERE vine_id = ?", (vine_id,)
+                )
+                self._connection.executemany(
+                    """
+                    INSERT INTO memory_vectors(
+                        vine_id, ordinal, nonce, ciphertext, dimension,
+                        key_id, scope_id, format_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            vine_id,
+                            ordinal,
+                            nonce,
+                            ciphertext,
+                            dimension,
+                            target_key_id,
+                            scope_id,
+                            PAYLOAD_SCHEMA_VERSION,
+                        )
+                        for ordinal, nonce, ciphertext, dimension in encrypted_vectors
+                    ],
+                )
+                self._connection.execute(
+                    "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+                )
+                self._connection.executemany(
+                    """
+                    INSERT INTO memory_terms(
+                        vine_id, term_hash, term_count, key_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (vine_id, term_hash, count, target_key_id)
+                        for term_hash, count in terms.items()
+                    ],
+                )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        except (QuarantinedRecordError, KeyUnavailable):
+            self._quarantine(vine_id, "rotation_authentication")
+            raise
+        finally:
+            for _ordinal, vector in vectors:
+                vector.fill(0.0)
+            payload = ""
+            topic = ""
+
+    def _rotate_tombstones(
+        self,
+        source_key_id: str,
+        target_key_id: str,
+        limit: int,
+    ) -> int:
+        keyring = self._require_keyring()
+        target_key = keyring.key(target_key_id)
+        rows = self._connection.execute(
+            """
+            SELECT vine_id, deleted_at, scope_id, CAST(auth_tag AS BLOB)
+            FROM deletion_tombstones
+            WHERE key_id = ?
+            ORDER BY deleted_at, vine_id
+            LIMIT ?
+            """,
+            (source_key_id, limit),
+        ).fetchall()
+        migrated = 0
+        for vine_id_raw, deleted_at_raw, scope_id_raw, tag_raw in rows:
+            vine_id = str(vine_id_raw)
+            deleted_at = float(deleted_at_raw)
+            scope_id = str(scope_id_raw)
+            expected = self._tombstone_tag(
+                keyring.key(source_key_id),
+                vine_id,
+                deleted_at,
+                scope_id,
+                source_key_id,
+            )
+            if not hmac.compare_digest(expected, bytes(tag_raw)):
+                raise RuntimeError("authenticated deletion state is corrupt")
+            tag = self._tombstone_tag(
+                target_key,
+                vine_id,
+                deleted_at,
+                scope_id,
+                target_key_id,
+            )
+            self._connection.execute(
+                """
+                UPDATE deletion_tombstones
+                SET key_id = ?, auth_tag = ?
+                WHERE vine_id = ? AND key_id = ?
+                """,
+                (target_key_id, tag, vine_id, source_key_id),
+            )
+            migrated += 1
+        return migrated
+
+    def _require_keyring(self) -> ProfileKeyring:
+        if self._keyring is None:
+            raise KeyUnavailable("secure profile keyring is unavailable")
+        return self._keyring
+
+    @staticmethod
+    def _content_digest(key: bytes, topic: str, payload: str) -> str:
+        digest = hashlib.blake2b(
+            key=key,
+            digest_size=32,
+            person=b"echo-v-dedupe-v2",
+        )
+        digest.update(topic.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload.encode("utf-8"))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _term_features_for_key(
+        text: str,
+        limit: int,
+        key: bytes,
+    ) -> dict[bytes, int]:
+        raw = _lexical_features(text, limit)
+        return {
+            hashlib.blake2b(
+                feature.encode("utf-8"),
+                key=key,
+                digest_size=16,
+                person=b"echo-v-term-v2",
+            ).digest(): count
+            for feature, count in raw.items()
+        }
+
+    @staticmethod
+    def _encode_envelope(
+        *,
+        vine_id: str,
+        topic: str,
+        payload: str,
+        key_id: str,
+        scope_id: str,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "key_id": key_id,
+                "payload": payload,
+                "record_id": vine_id,
+                "schema_version": PAYLOAD_SCHEMA_VERSION,
+                "scope_id": scope_id,
+                "topic": topic,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @staticmethod
+    def _tombstone_tag(
+        key: bytes,
+        vine_id: str,
+        deleted_at: float,
+        scope_id: str,
+        key_id: str,
+    ) -> bytes:
+        message = json.dumps(
+            {
+                "deleted_at": deleted_at,
+                "key_id": key_id,
+                "record_id": vine_id,
+                "schema_version": PAYLOAD_SCHEMA_VERSION,
+                "scope_id": scope_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hmac.new(
+            key,
+            b"echo-veil-tombstone-v2\0" + message,
+            hashlib.sha256,
+        ).digest()
+
+
+class AgentMemory:
+    """Concrete Echo Veil memory adapter for a single local host profile."""
+
+    def __init__(
+        self,
+        state_dir: str | os.PathLike[str] | None = None,
+        *,
+        profile: str = "default",
+        scope: str = "local-user",
+        capacity: int = DEFAULT_CAPACITY,
+        embed: TextEmbedder | Callable[[str], NDArray[np.float64]] | None = None,
+        embedder_id: str | None = None,
+        profile_lock_timeout_seconds: float = DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS,
+    ) -> None:
+        profile_name = _validate_profile(profile)
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("capacity must be a positive integer")
+        if capacity <= 0:
+            raise ValueError("capacity must be a positive integer")
+
+        base = (
+            default_state_dir() if state_dir is None else Path(state_dir).expanduser()
+        )
+        self.profile_dir = _secure_directory(base / profile_name)
+        self._embedder = _coerce_embedder(embed, embedder_id)
+        self._lease = _ProfileWriterLease(
+            self.profile_dir / "profile-lock.db",
+            profile_lock_timeout_seconds,
+        )
+        self._closed = False
+        self._recovered_lifecycle_orphans = 0
+        self._restored_on_startup = False
+        self._store: SQLiteStore | None = None
+        self._keyring: ProfileKeyring | None = None
+        self._scoped_shield: ScopedAesGcmShield | None = None
+        try:
+            payload_path = self.profile_dir / "payloads.db"
+            payload_version = _payload_database_version(payload_path)
+            if payload_version == LEGACY_PAYLOAD_SCHEMA_VERSION:
+                key = _load_existing_key(self.profile_dir / "agent.key")
+                self._payloads = _EncryptedPayloadStore(
+                    payload_path,
+                    legacy_key=key,
+                )
+                shield: AesGcmCryptoShield | ScopedAesGcmShield = AesGcmCryptoShield(
+                    key
+                )
+                self._store = SQLiteStore(self.profile_dir / "echo-veil.db")
+            else:
+                self._keyring = ProfileKeyring(self.profile_dir, scope)
+                self._payloads = _EncryptedPayloadStore(
+                    payload_path,
+                    keyring=self._keyring,
+                )
+                self._scoped_shield = ScopedAesGcmShield(self._keyring)
+                shield = self._scoped_shield
+                self._store = SQLiteStore(
+                    self.profile_dir / "echo-veil.db",
+                    protected_payload_loader=ScopedProtectedVector.from_json_bytes,
+                )
+            self.oracle = Oracle(
+                WorkspaceConfig(capacity=capacity),
+                shield=shield,
+                environment="staging",
+                storage=cast(TransactionalEvictionStore, self._store),
+            )
+            self._recovered_lifecycle_orphans = self._recover_incomplete_operations()
+            self._bind_embedding_identity()
+            self._restored_on_startup = True
+        except Exception:
+            payloads = getattr(self, "_payloads", None)
+            try:
+                if payloads is not None:
+                    payloads.close()
+            finally:
+                try:
+                    if self._store is not None:
+                        self._store.close()
+                finally:
+                    self._lease.close()
+                    self._closed = True
+            raise
+
+    def remember(
+        self,
+        topic: str,
+        payload: str,
+        *,
+        effective_at: float | None = None,
+        supersedes: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        clean_topic = _validate_text(topic, "topic", MAX_TOPIC_CHARS)
+        clean_payload = _validate_text(payload, "payload", MAX_PAYLOAD_CHARS)
+        effective = _validate_timestamp(effective_at, "effective_at")
+        superseded_ids = _validate_vine_ids(supersedes)
+        content_hash = self._payloads.digest(clean_topic, clean_payload)
+        existing = self._payloads.find_duplicate(clean_topic, clean_payload)
+        if existing is not None and self._managed_exists(existing[0]):
+            return {
+                "vine_id": existing[0],
+                "topic": existing[1],
+                "created": False,
+                "duplicate": True,
+            }
+        if existing is not None:
+            self._payloads.delete(existing[0], tombstone=False)
+
+        passages = _memory_passages(clean_topic, clean_payload)
+        vectors = _embed_document_batch(self._embedder, passages)
+        primary = _normalize_embedding_vector(np.mean(np.stack(vectors), axis=0))
+        if self._payloads.metadata_protected:
+            vine_id = uuid.uuid4().hex
+            self._payloads.put(
+                vine_id,
+                clean_topic,
+                clean_payload,
+                content_hash,
+                vectors=vectors,
+                effective_at=effective,
+                supersedes=superseded_ids,
+            )
+            try:
+                vine = self.oracle.sprout(
+                    self._payloads.topic_token(clean_topic),
+                    primary,
+                    vine_id=vine_id,
+                )
+                self._payloads.mark_committed(vine_id)
+            except Exception:
+                self.oracle.forget(vine_id)
+                self._payloads.delete(vine_id, tombstone=False)
+                raise
+            return {
+                "vine_id": vine.vine_id,
+                "topic": clean_topic,
+                "created": True,
+                "duplicate": False,
+                "effective_at": effective,
+                "supersedes": list(superseded_ids),
+            }
+
+        vine = self.oracle.sprout(clean_topic, primary)
+        try:
+            self._payloads.put(
+                vine.vine_id,
+                clean_topic,
+                clean_payload,
+                content_hash,
+                vectors=vectors,
+                effective_at=effective,
+                supersedes=superseded_ids,
+            )
+        except sqlite3.IntegrityError:
+            self.oracle.forget(vine.vine_id)
+            winner = self._payloads.find_duplicate(clean_topic, clean_payload)
+            if winner is None:
+                raise
+            return {
+                "vine_id": winner[0],
+                "topic": winner[1],
+                "created": False,
+                "duplicate": True,
+            }
+        except Exception:
+            self.oracle.forget(vine.vine_id)
+            raise
+        return {
+            "vine_id": vine.vine_id,
+            "topic": clean_topic,
+            "created": True,
+            "duplicate": False,
+            "effective_at": effective,
+            "supersedes": list(superseded_ids),
+        }
+
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+    ) -> dict[str, Any]:
+        clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= top_k <= MAX_RECALL_RESULTS:
+            raise ValueError(f"top_k must be between 1 and {MAX_RECALL_RESULTS}")
+        if min_score is None:
+            threshold = self._embedder.default_min_score
+        elif isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise TypeError("min_score must be a finite number or None")
+        else:
+            threshold = float(min_score)
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+        if not isinstance(allow_inferential, bool):
+            raise TypeError("allow_inferential must be a bool")
+        point_in_time = _validate_optional_timestamp(as_of, "as_of")
+
+        retrieval_query_embed = getattr(self._embedder, "embed_retrieval_queries", None)
+        answerability_embed = getattr(self._embedder, "embed_answerability_query", None)
+        if self._embedder.semantic and callable(retrieval_query_embed):
+            intent, answerability_intent = retrieval_query_embed(clean_query)
+        else:
+            intent = self._embedder.embed_query(clean_query)
+            answerability_intent = (
+                answerability_embed(clean_query)
+                if self._embedder.semantic and callable(answerability_embed)
+                else None
+            )
+        answerability_threshold = (
+            DEFAULT_ANSWERABILITY_MIN_SCORE
+            if answerability_intent is not None
+            else None
+        )
+        lifecycle = self.oracle.observe(intent)
+        active = {vine.vine_id: vine for vine in self.oracle.workspace.active()}
+        cold_limit = min(MAX_RECALL_RESULTS * 3, max(top_k * 3, 10))
+        cold_scores = dict(self.oracle.search_index(intent, top_k=cold_limit))
+        semantic_candidates = [
+            vine.vine_id
+            for vine in sorted(
+                active.values(),
+                key=lambda candidate: candidate.score,
+                reverse=True,
+            )
+        ]
+        semantic_candidates.extend(
+            vine_id
+            for vine_id, _score in sorted(
+                cold_scores.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        )
+        stored = self._payloads.retrieval_candidates(
+            intent,
+            clean_query,
+            semantic_candidates,
+            answerability_intent,
+        )
+        candidates: list[_RankedCandidate] = []
+        answerability_rejected_count = 0
+        for vine_id, item in stored.items():
+            if point_in_time is not None and item.effective_at > point_in_time:
+                continue
+            temporal_current = item.superseded_by is None
+            if point_in_time is not None:
+                temporal_current = (
+                    item.superseded_at is None or point_in_time < item.superseded_at
+                )
+                if not temporal_current:
+                    continue
+            vine = active.get(vine_id)
+            lifecycle_score: float | None = None
+            semantic_score = item.semantic_score
+            if vine is not None:
+                lifecycle_score = vine.score
+                if semantic_score is None:
+                    semantic_score = vine.score - time_decay(
+                        vine.age_hours(), self.oracle.workspace.config.proximity
+                    )
+                source = "active"
+            elif self.oracle.archived_metadata(vine_id) is not None:
+                source = "archive"
+                if semantic_score is None:
+                    semantic_score = cold_scores.get(vine_id)
+            else:
+                continue
+            base_relevance = _hybrid_relevance(semantic_score, item.lexical_score)
+            if base_relevance < threshold:
+                continue
+            if answerability_threshold is not None and (
+                item.answerability_score is None
+                or item.answerability_score < answerability_threshold
+            ):
+                answerability_rejected_count += 1
+                continue
+            relevance = _answerability_relevance(
+                base_relevance,
+                item.answerability_score,
+            )
+            candidates.append(
+                _RankedCandidate(
+                    vine_id=vine_id,
+                    topic=item.topic,
+                    source=source,
+                    relevance_score=relevance,
+                    semantic_score=semantic_score,
+                    answerability_score=item.answerability_score,
+                    lexical_score=item.lexical_score,
+                    lifecycle_score=lifecycle_score,
+                    best_vector=item.best_vector,
+                    effective_at=item.effective_at,
+                    superseded_by=item.superseded_by,
+                    superseded_at=item.superseded_at,
+                    temporal_current=temporal_current,
+                )
+            )
+
+        ranked = _mmr_rank(candidates)
+
+        results: list[dict[str, Any]] = []
+        result_topic_tokens: list[str] = []
+        gated_count = 0
+        for candidate in ranked:
+            vine_id = candidate.vine_id
+            score = candidate.relevance_score
+            policy = classify(score)
+            try:
+                self.oracle.check_generation_gate(score, override=allow_inferential)
+            except GenerationGated:
+                gated_count += 1
+                results.append(
+                    {
+                        "vine_id": vine_id,
+                        "topic": (
+                            None
+                            if self._payloads.metadata_protected
+                            else candidate.topic
+                        ),
+                        "topic_protected": self._payloads.metadata_protected,
+                        "score": round(score, 6),
+                        "semantic_score": _round_optional(candidate.semantic_score),
+                        "answerability_score": _round_optional(
+                            candidate.answerability_score
+                        ),
+                        "lexical_score": round(candidate.lexical_score, 6),
+                        "lifecycle_score": _round_optional(candidate.lifecycle_score),
+                        "source": candidate.source,
+                        "temporal_status": (
+                            "valid_at_as_of"
+                            if point_in_time is not None
+                            else (
+                                "current"
+                                if candidate.temporal_current
+                                else "superseded"
+                            )
+                        ),
+                        "effective_at": candidate.effective_at,
+                        "superseded_by": candidate.superseded_by,
+                        "superseded_at": candidate.superseded_at,
+                        "confidence_band": policy.band.value,
+                        "confidence_indicator": policy.indicator,
+                        "gated": True,
+                        "payload": None,
+                    }
+                )
+                result_topic_tokens.append(candidate.topic)
+            else:
+                try:
+                    record = self._payloads.get_record(vine_id)
+                except QuarantinedRecordError:
+                    continue
+                if record is None:
+                    continue
+                topic, payload = record
+                if candidate.source == "active":
+                    self.oracle.reinforce(vine_id)
+                results.append(
+                    {
+                        "vine_id": vine_id,
+                        "topic": topic,
+                        "topic_protected": self._payloads.metadata_protected,
+                        "score": round(score, 6),
+                        "semantic_score": _round_optional(candidate.semantic_score),
+                        "answerability_score": _round_optional(
+                            candidate.answerability_score
+                        ),
+                        "lexical_score": round(candidate.lexical_score, 6),
+                        "lifecycle_score": _round_optional(candidate.lifecycle_score),
+                        "source": candidate.source,
+                        "temporal_status": (
+                            "valid_at_as_of"
+                            if point_in_time is not None
+                            else (
+                                "current"
+                                if candidate.temporal_current
+                                else "superseded"
+                            )
+                        ),
+                        "effective_at": candidate.effective_at,
+                        "superseded_by": candidate.superseded_by,
+                        "superseded_at": candidate.superseded_at,
+                        "confidence_band": policy.band.value,
+                        "confidence_indicator": policy.indicator,
+                        "gated": False,
+                        "payload": payload,
+                    }
+                )
+                result_topic_tokens.append(candidate.topic)
+            if len(results) >= top_k:
+                break
+
+        for rank, result in enumerate(results, start=1):
+            result["rank"] = rank
+        ranking_margin = (
+            None
+            if len(results) < 2
+            else round(float(results[0]["score"]) - float(results[1]["score"]), 6)
+        )
+        ranking_ambiguous = (
+            ranking_margin is not None
+            and ranking_margin <= AMBIGUOUS_RANKING_MARGIN
+            and result_topic_tokens[0].casefold() != result_topic_tokens[1].casefold()
+        )
+
+        return {
+            "query": clean_query,
+            "as_of": point_in_time,
+            "min_score": threshold,
+            "answerability_min_score": answerability_threshold,
+            "answerability_rejected_count": answerability_rejected_count,
+            "results": results,
+            "gated_count": gated_count,
+            "ranking_margin": ranking_margin,
+            "ranking_ambiguous": ranking_ambiguous,
+            "lifecycle": lifecycle,
+        }
+
+    def forget(self, vine_id: str) -> dict[str, Any]:
+        clean_id = _validate_text(vine_id, "vine_id", 128)
+        # Revoke content access before cleaning derived lifecycle state.
+        payload_deleted = self._payloads.delete(clean_id)
+        memory_deleted = self.oracle.forget(clean_id)
+        return {
+            "vine_id": clean_id,
+            "forgotten": payload_deleted or memory_deleted,
+            "payload_deleted": payload_deleted,
+            "lifecycle_deleted": memory_deleted,
+        }
+
+    def list_memories(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """List authorized profile records without exposing storage locations."""
+
+        return self._payloads.list_records(limit=limit)
+
+    def reindex(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        record_ids = self._payloads.record_ids_for_reindex()
+        updated = 0
+        for vine_id in record_ids:
+            topic, payload = self._payloads.record_for_reindex(vine_id)
+            passages = _memory_passages(topic, payload)
+            vectors = _embed_document_batch(self._embedder, passages)
+            self._payloads.replace_retrieval_index(
+                vine_id,
+                f"{topic}\n{payload}",
+                vectors,
+            )
+            updated += 1
+            payload = ""
+        return {
+            "reindexed": updated,
+            "embedding_model": self._embedder.model,
+            "dimension": self._embedder.dimension,
+            "retrieval_strategy": RETRIEVAL_SCHEMA_VERSION,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        }
+
+    def migrate_to(
+        self, target: AgentMemory, *, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Re-embed this profile into an empty target without plaintext exports."""
+        if not isinstance(target, AgentMemory):
+            raise TypeError("target must be an AgentMemory instance")
+        if confirm is not True:
+            raise ValueError("profile migration requires confirm=true")
+        if target is self or os.path.samefile(target.profile_dir, self.profile_dir):
+            raise ValueError("source and target profiles must be different")
+        if (
+            len(target._payloads)
+            or target.oracle.workspace.vines
+            or len(target.oracle.index)
+            or len(target.oracle.archive)
+        ):
+            raise ValueError("target profile must be empty")
+
+        records = self._payloads.records_for_migration()
+        predecessors: dict[str, list[str]] = {}
+        source_ids = {record.vine_id for record in records}
+        for record in records:
+            if record.superseded_by is not None:
+                if record.superseded_by not in source_ids:
+                    raise RuntimeError("source profile has a broken supersession link")
+                predecessors.setdefault(record.superseded_by, []).append(record.vine_id)
+
+        pending = {record.vine_id: record for record in records}
+        migrated_ids: dict[str, str] = {}
+        created_target_ids: list[str] = []
+        started = time.perf_counter()
+        try:
+            while pending:
+                progressed = False
+                for source_id, record in list(pending.items()):
+                    prior_ids = predecessors.get(source_id, [])
+                    if any(prior_id not in migrated_ids for prior_id in prior_ids):
+                        continue
+                    payload = self._payloads.get(source_id)
+                    if payload is None:
+                        raise RuntimeError(
+                            "payload disappeared during profile migration"
+                        )
+                    try:
+                        result = target.remember(
+                            record.topic,
+                            payload,
+                            effective_at=record.effective_at,
+                            supersedes=[
+                                migrated_ids[prior_id] for prior_id in prior_ids
+                            ],
+                        )
+                    finally:
+                        payload = ""
+                    target_id = str(result["vine_id"])
+                    migrated_ids[source_id] = target_id
+                    created_target_ids.append(target_id)
+                    del pending[source_id]
+                    progressed = True
+                if not progressed:
+                    raise RuntimeError(
+                        "source profile contains cyclic supersession history"
+                    )
+        except Exception:
+            for target_id in reversed(created_target_ids):
+                target.forget(target_id)
+            raise
+        return {
+            "migrated": len(migrated_ids),
+            "source_profile": self.profile_dir.name,
+            "target_profile": target.profile_dir.name,
+            "source_embedding": self._embedder.model,
+            "target_embedding": target._embedder.model,
+            "history_links": sum(len(items) for items in predecessors.values()),
+            "lifecycle_state_preserved": False,
+            "plaintext_export_created": False,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
+        }
+
+    def rotate_key(
+        self,
+        *,
+        confirm: bool = False,
+        batch_size: int = 100,
+    ) -> dict[str, Any]:
+        """Start or resume a bounded, multi-key-safe local key rotation."""
+
+        if confirm is not True:
+            raise ValueError("key rotation requires confirm=true")
+        if self._keyring is None or self._scoped_shield is None:
+            raise RuntimeError(
+                "legacy profiles must migrate to scoped-v2 before key rotation"
+            )
+        scoped_shield = self._scoped_shield
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or not 1 <= batch_size <= 1000
+        ):
+            raise ValueError("rotation batch_size must be between 1 and 1000")
+        current = self._keyring.rotation_state
+        if current is not None and current["state"] == "verified":
+            return {
+                "state": "verified",
+                "migrated_records": 0,
+                "migrated_lifecycle_records": 0,
+                "remaining_key_references": 0,
+                "old_key_retained": True,
+            }
+        rotation = self._keyring.begin_rotation()
+        source = rotation["from"]
+        target = rotation["to"]
+
+        def transform(value: object) -> ScopedProtectedVector:
+            if not isinstance(value, ScopedProtectedVector):
+                raise TypeError("rotation encountered an unsupported protected payload")
+            return scoped_shield.reencrypt(value, target_key_id=target)
+
+        active_migrated = self.oracle.rewrap_active_protected_anchors(
+            source,
+            transform,
+        )
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        lifecycle = self._store.rotate_protected_payloads(
+            source_key_id=source,
+            limit=batch_size,
+            transform=transform,
+        )
+        payloads = self._payloads.rotate_batch(
+            source_key_id=source,
+            target_key_id=target,
+            limit=batch_size,
+        )
+        remaining_payload = self._payloads.key_usage(source)
+        remaining_lifecycle = self._store.count_protected_payloads_for_key(source)
+        remaining = remaining_payload + remaining_lifecycle
+        state = "migrating"
+        if remaining == 0 and self._payloads.quarantine_count() == 0:
+            self._keyring.mark_rotation_verified()
+            state = "verified"
+        return {
+            "state": state,
+            "migrated_records": payloads["migrated_records"],
+            "migrated_tombstones": payloads["migrated_tombstones"],
+            "failed_records": payloads["failed_records"],
+            "migrated_lifecycle_records": (active_migrated + lifecycle["migrated"]),
+            "remaining_key_references": remaining,
+            "old_key_retained": True,
+        }
+
+    def retire_previous_key(
+        self,
+        *,
+        confirm_backups_accounted_for: bool = False,
+    ) -> dict[str, Any]:
+        """Retire a verified old key only after storage and backups are checked."""
+
+        if self._keyring is None or self._store is None:
+            raise RuntimeError("legacy profiles do not support key retirement")
+        rotation = self._keyring.rotation_state
+        if rotation is None or rotation["state"] != "verified":
+            raise RuntimeError("key rotation is not fully verified")
+        source = rotation["from"]
+        if self._payloads.key_usage(
+            source
+        ) or self._store.count_protected_payloads_for_key(source):
+            raise RuntimeError("the previous key is still referenced by encrypted data")
+        retired = self._keyring.retire_previous_key(
+            confirm_backups_accounted_for=confirm_backups_accounted_for
+        )
+        return {
+            "retired_key_id": retired,
+            "backups_accounted_for": True,
+            "physical_erasure_guaranteed": False,
+        }
+
+    def doctor(self) -> dict[str, Any]:
+        capability = self.oracle.capability_report().as_dict()
+        indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        quarantine_count = self._payloads.quarantine_count()
+        answerability_ready = self._embedder.semantic and (
+            callable(getattr(self._embedder, "embed_retrieval_queries", None))
+            or callable(getattr(self._embedder, "embed_answerability_query", None))
+        )
+        scoped = self._payloads.metadata_protected
+        key_id = self._keyring.active_key_id if self._keyring is not None else "legacy"
+        rotation_state = (
+            self._keyring.rotation_state if self._keyring is not None else None
+        )
+        rotation_remaining = 0
+        if rotation_state is not None:
+            rotation_remaining = self._payloads.key_usage(rotation_state["from"])
+            if self._store is not None:
+                rotation_remaining += self._store.count_protected_payloads_for_key(
+                    rotation_state["from"]
+                )
+        rotation_ready = scoped and quarantine_count == 0 and unindexed_count == 0
+        healthy = (
+            scoped
+            and self._restored_on_startup
+            and quarantine_count == 0
+            and unindexed_count == 0
+        )
+        return {
+            "adapter_ready": True,
+            "mode": "local-staging",
+            "local_protection_ready": healthy,
+            "production_ready": False,
+            "profile": self.profile_dir.name,
+            "protection_policy": "required",
+            "security_schema": self._payloads.security_schema,
+            "scope_bound": scoped,
+            "key_id": key_id,
+            "payload_count": len(self._payloads),
+            "active_count": len(self.oracle.workspace.vines),
+            "archived_count": len(self.oracle.index),
+            "key_owner_only": True,
+            "store_permissions": "valid",
+            "writer_serialization": "profile-sqlite-lease",
+            "recovered_incomplete_lifecycle_records": (
+                self._recovered_lifecycle_orphans
+            ),
+            "readiness": {
+                "installed": True,
+                "enabled": True,
+                "crypto_initialized": True,
+                "write_wired": True,
+                "index_wired": True,
+                "retrieval_wired": True,
+                "persistence_wired": True,
+                "restart_restored": self._restored_on_startup,
+                "rotation_ready": rotation_ready,
+                "healthy": healthy,
+            },
+            "rotation": {
+                "state": "idle" if rotation_state is None else rotation_state["state"],
+                "remaining_key_references": rotation_remaining,
+            },
+            "reconciliation_backlog": len(self._payloads.pending_ids()),
+            "quarantined_records": quarantine_count,
+            "failed_decryptions": quarantine_count,
+            "authenticated_deletion_records": self._payloads.tombstone_count(),
+            "plaintext_fallback_attempts": 0,
+            "retrieval": {
+                "strategy": RETRIEVAL_SCHEMA_VERSION,
+                "protected_multivector_count": indexed_count,
+                "unindexed_payload_count": unindexed_count,
+                "candidate_limit": MAX_RETRIEVAL_CANDIDATES,
+                "lexical_terms": "keyed-hash",
+                "diversity_ranking": "topic-aware-mmr",
+                "temporal_history": "explicit-supersession",
+                "answerability_gate": (
+                    "semantic-predicate-v1" if answerability_ready else "unavailable"
+                ),
+                "answerability_min_score": (
+                    DEFAULT_ANSWERABILITY_MIN_SCORE if answerability_ready else None
+                ),
+                "metadata": (
+                    "opaque-authenticated" if scoped else "legacy-plaintext-topics"
+                ),
+            },
+            "embedding": {
+                "backend": self._embedder.name,
+                "model": self._embedder.model,
+                "dimension": self._embedder.dimension,
+                "semantic": self._embedder.semantic,
+                "default_min_score": self._embedder.default_min_score,
+            },
+            "capability_report": capability,
+            "limitations": [
+                *(
+                    ["The hashing fallback is keyword-oriented, not a semantic model."]
+                    if not self._embedder.semantic
+                    else [
+                        "Semantic recall quality is model- and corpus-dependent; "
+                        "benchmark it before primary-memory use."
+                    ]
+                ),
+                "Memory capture is opt-in; neither host is silently recorded.",
+                *(
+                    []
+                    if scoped
+                    else [
+                        "This legacy profile retains plaintext topic metadata; "
+                        "migrate it to a new scoped-v2 profile."
+                    ]
+                ),
+                "AES-GCM local staging is not the production enclave profile.",
+                "Python cannot guarantee complete in-process plaintext zeroization.",
+            ],
+        }
+
+    def _managed_exists(self, vine_id: str) -> bool:
+        return (
+            self.oracle.workspace.get(vine_id) is not None
+            or self.oracle.archived_metadata(vine_id) is not None
+        )
+
+    def _recover_incomplete_operations(self) -> int:
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        active, indexed, archived, metadata = self._store.managed_state_ids()
+        if indexed != archived or indexed != metadata or active & indexed:
+            raise RuntimeError("memory lifecycle tier integrity check failed")
+        pending_ids = set(self._payloads.pending_ids())
+        managed_ids = active | indexed
+        for vine_id in sorted(pending_ids):
+            if vine_id in managed_ids:
+                self._payloads.mark_committed(vine_id)
+            else:
+                self._payloads.delete(vine_id, tombstone=False)
+        payload_ids = set(self._payloads.record_ids_for_reindex())
+        if payload_ids - managed_ids:
+            raise RuntimeError(
+                "encrypted payload records are missing lifecycle state; "
+                "automatic deletion is refused"
+            )
+        incomplete = sorted(managed_ids - payload_ids)
+        for vine_id in incomplete:
+            self.oracle.forget(vine_id)
+        return len(incomplete)
+
+    def _bind_embedding_identity(self) -> None:
+        stored = self._payloads.get_metadata("embedding_identity")
+        has_managed_state = bool(
+            len(self._payloads)
+            or self.oracle.workspace.vines
+            or len(self.oracle.index)
+            or len(self.oracle.archive)
+        )
+        if stored is None and has_managed_state:
+            legacy = HashingTextEmbedder()
+            if self._embedder.identity != legacy.identity:
+                raise RuntimeError(
+                    "profile contains legacy hashing embeddings; use the hashing "
+                    "backend to export/forget them or select a new semantic profile"
+                )
+            stored = legacy.identity
+        if stored is None:
+            self._payloads.set_metadata("embedding_identity", self._embedder.identity)
+            stored = self._payloads.get_metadata("embedding_identity")
+        if stored != self._embedder.identity:
+            raise RuntimeError(
+                "embedding identity does not match this profile; use a new profile "
+                "or perform an explicit re-embedding migration"
+            )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._payloads.close()
+        finally:
+            try:
+                if self._store is not None:
+                    self._store.close()
+            finally:
+                self._lease.close()
+
+    def __enter__(self) -> AgentMemory:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+class AlwaysAvailableMemory:
+    """Read-only encrypted lexical recall for a pre-existing local profile.
+
+    This layer never creates a profile, embeds text, mutates lifecycle state, or
+    presents lexical overlap as semantic recall. It is intended only for bounded
+    degraded operation while the configured embedding service is unavailable.
+    """
+
+    def __init__(
+        self,
+        state_dir: str | os.PathLike[str] | None = None,
+        *,
+        profile: str = "default",
+        scope: str = "local-user",
+        reason: str = "embedding_service_unavailable",
+    ) -> None:
+        profile_name = _validate_profile(profile)
+        self.reason = _validate_text(reason, "availability reason", 128)
+        base = (
+            default_state_dir() if state_dir is None else Path(state_dir).expanduser()
+        )
+        profile_dir = (base / profile_name).absolute()
+        _reject_symlink_components(profile_dir)
+        if profile_dir.is_symlink() or not profile_dir.is_dir():
+            raise RuntimeError(
+                "always-available recall requires an existing local profile"
+            )
+        if os.name != "nt" and stat.S_IMODE(profile_dir.stat().st_mode) & 0o077:
+            raise RuntimeError("availability profile directory must be owner-only")
+        self.profile_dir = profile_dir.absolute()
+        payload_path = self.profile_dir / "payloads.db"
+        if _payload_database_version(payload_path) == LEGACY_PAYLOAD_SCHEMA_VERSION:
+            key = _load_existing_key(self.profile_dir / "agent.key")
+            self._keyring: ProfileKeyring | None = None
+            self._payloads = _EncryptedPayloadStore(
+                payload_path,
+                legacy_key=key,
+                read_only=True,
+            )
+        else:
+            self._keyring = ProfileKeyring(
+                self.profile_dir,
+                scope,
+                create=False,
+            )
+            self._payloads = _EncryptedPayloadStore(
+                payload_path,
+                keyring=self._keyring,
+                read_only=True,
+            )
+
+    def remember(
+        self,
+        topic: str,
+        payload: str,
+        *,
+        effective_at: float | None = None,
+        supersedes: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        del topic, payload, effective_at, supersedes
+        raise RuntimeError("remember is unavailable in read-only always-available mode")
+
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+    ) -> dict[str, Any]:
+        clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= top_k <= MAX_RECALL_RESULTS:
+            raise ValueError(f"top_k must be between 1 and {MAX_RECALL_RESULTS}")
+        if min_score is None:
+            threshold = DEFAULT_AVAILABILITY_MIN_SCORE
+        elif isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise TypeError("min_score must be a finite number or None")
+        else:
+            threshold = float(min_score)
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+        if threshold < DEFAULT_AVAILABILITY_MIN_SCORE:
+            raise ValueError(
+                "always-available min_score cannot be lower than the safe default"
+            )
+        if allow_inferential is not False:
+            raise ValueError(
+                "inferential recall is unavailable without semantic verification"
+            )
+        point_in_time = _validate_optional_timestamp(as_of, "as_of")
+        candidates = self._payloads.availability_candidates(
+            clean_query,
+            as_of=point_in_time,
+        )
+        results: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if candidate.predicate_score < threshold:
+                continue
+            if candidate.matched_features < MIN_AVAILABILITY_FEATURES:
+                continue
+            try:
+                record = self._payloads.get_record(candidate.vine_id)
+            except QuarantinedRecordError:
+                continue
+            if record is None:
+                continue
+            topic, payload = record
+            confidence_score = _availability_confidence(candidate.score)
+            policy = classify(confidence_score)
+            results.append(
+                {
+                    "rank": len(results) + 1,
+                    "vine_id": candidate.vine_id,
+                    "topic": topic,
+                    "topic_protected": self._payloads.metadata_protected,
+                    "score": round(confidence_score, 6),
+                    "availability_score": round(candidate.score, 6),
+                    "semantic_score": None,
+                    "answerability_score": None,
+                    "lexical_score": round(candidate.lexical_score, 6),
+                    "predicate_score": round(candidate.predicate_score, 6),
+                    "matched_features": candidate.matched_features,
+                    "source": "encrypted-keyed-index",
+                    "temporal_status": (
+                        "valid_at_as_of"
+                        if point_in_time is not None
+                        else ("current" if candidate.temporal_current else "superseded")
+                    ),
+                    "effective_at": candidate.effective_at,
+                    "superseded_by": candidate.superseded_by,
+                    "superseded_at": candidate.superseded_at,
+                    "confidence_band": policy.band.value,
+                    "confidence_indicator": (
+                        "Degraded keyed match; semantic verification offline."
+                    ),
+                    "gated": False,
+                    "payload": payload,
+                }
+            )
+            if len(results) >= top_k:
+                break
+        return {
+            "query": clean_query,
+            "as_of": point_in_time,
+            "mode": "always-available-read-only",
+            "degraded": True,
+            "degraded_reason": self.reason,
+            "semantic_available": False,
+            "lifecycle_mutated": False,
+            "availability_strategy": "encrypted-keyed-predicate-v1",
+            "min_score": threshold,
+            "minimum_matched_features": MIN_AVAILABILITY_FEATURES,
+            "results": results,
+            "gated_count": 0,
+            "ranking_margin": None,
+            "ranking_ambiguous": False,
+            "limitations": [
+                "Only strong keyed lexical and predicate overlap is available.",
+                "Paraphrases may be missed until semantic recall is restored.",
+                "Recall does not mutate Echo Veil lifecycle state in this mode.",
+            ],
+        }
+
+    def forget(self, vine_id: str) -> dict[str, Any]:
+        del vine_id
+        raise RuntimeError("forget is unavailable in read-only always-available mode")
+
+    def list_memories(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        return self._payloads.list_records(limit=limit)
+
+    def reindex(self) -> dict[str, Any]:
+        raise RuntimeError("reindex is unavailable in read-only always-available mode")
+
+    def doctor(self) -> dict[str, Any]:
+        indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        return {
+            "adapter_ready": True,
+            "mode": "always-available-read-only",
+            "local_protection_ready": False,
+            "production_ready": False,
+            "degraded": True,
+            "degraded_reason": self.reason,
+            "profile": self.profile_dir.name,
+            "payload_count": len(self._payloads),
+            "security_schema": self._payloads.security_schema,
+            "scope_bound": self._payloads.metadata_protected,
+            "key_id": (
+                self._keyring.active_key_id if self._keyring is not None else "legacy"
+            ),
+            "key_owner_only": True,
+            "semantic_available": False,
+            "writes_available": False,
+            "lifecycle_mutation_available": False,
+            "quarantined_records": self._payloads.quarantine_count(),
+            "retrieval": {
+                "strategy": "encrypted-keyed-predicate-v1",
+                "protected_multivector_count": indexed_count,
+                "unindexed_payload_count": unindexed_count,
+                "lexical_terms": "keyed-hash",
+                "minimum_score": DEFAULT_AVAILABILITY_MIN_SCORE,
+                "minimum_matched_features": MIN_AVAILABILITY_FEATURES,
+            },
+            "limitations": [
+                "Semantic embeddings and answerability verification are offline.",
+                "Only conservative keyed lexical recall is available.",
+                "Remember, forget, reindex, and lifecycle mutation are disabled.",
+                "Restart the adapter after the embedding service is restored.",
+            ],
+        }
+
+    def close(self) -> None:
+        self._payloads.close()
+
+    def __enter__(self) -> AlwaysAvailableMemory:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+def default_state_dir() -> Path:
+    configured = os.environ.get("ECHO_VEIL_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Echo Veil"
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home:
+        return Path(data_home).expanduser() / "echo-veil"
+    return Path.home() / ".local" / "share" / "echo-veil"
+
+
+def _coerce_embedder(
+    embed: TextEmbedder | Callable[[str], NDArray[np.float64]] | None,
+    embedder_id: str | None,
+) -> TextEmbedder:
+    if embed is None:
+        if embedder_id is not None:
+            raise ValueError("embedder_id requires a custom embedding callable")
+        return HashingTextEmbedder()
+    if isinstance(embed, TextEmbedder):
+        if embedder_id is not None:
+            raise ValueError(
+                "embedder_id is only valid for a custom embedding callable"
+            )
+        _validate_embedder_contract(embed)
+        return embed
+    if not callable(embed):
+        raise TypeError("embed must implement TextEmbedder or be callable")
+    if embedder_id is None:
+        raise ValueError(
+            "custom embedding callables require a stable embedder_id for persistence"
+        )
+    return _CallableTextEmbedder(embed, embedder_id)
+
+
+def _validate_embedder_contract(embedder: TextEmbedder) -> None:
+    _validate_text(embedder.identity, "embedding identity", 2048)
+    _validate_text(embedder.name, "embedding backend name", 128)
+    _validate_text(embedder.model, "embedding model", 256)
+    if isinstance(embedder.dimension, bool) or not isinstance(embedder.dimension, int):
+        raise TypeError("embedding dimension must be a positive integer")
+    if embedder.dimension <= 0:
+        raise ValueError("embedding dimension must be a positive integer")
+    if not isinstance(embedder.semantic, bool):
+        raise TypeError("embedding semantic flag must be a bool")
+    score = embedder.default_min_score
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise TypeError("embedding default_min_score must be a finite number")
+    if not math.isfinite(float(score)) or not 0.0 <= float(score) <= 1.0:
+        raise ValueError("embedding default_min_score must be between 0 and 1")
+
+
+def _normalize_embedding_vector(
+    value: NDArray[np.float64],
+    *,
+    expected_dimension: int | None = None,
+    source: str = "embedder",
+) -> NDArray[np.float64]:
+    try:
+        vector = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} returned an invalid embedding vector") from exc
+    if vector.ndim != 1 or vector.size == 0 or not np.all(np.isfinite(vector)):
+        raise ValueError(f"{source} returned an invalid embedding vector")
+    if expected_dimension is not None and vector.shape != (expected_dimension,):
+        raise ValueError(
+            f"{source} returned dimension {vector.size}; expected {expected_dimension}"
+        )
+    magnitude = float(np.linalg.norm(vector))
+    if not math.isfinite(magnitude) or magnitude == 0.0:
+        raise ValueError(f"{source} returned an unusable embedding vector")
+    return vector / magnitude
+
+
+def _embed_document_batch(
+    embedder: TextEmbedder,
+    passages: list[str],
+) -> list[NDArray[np.float64]]:
+    batch = getattr(embedder, "embed_documents", None)
+    if callable(batch):
+        raw_vectors = batch(passages)
+    else:
+        raw_vectors = [embedder.embed_document(passage) for passage in passages]
+    if not isinstance(raw_vectors, list) or len(raw_vectors) != len(passages):
+        raise ValueError("embedder returned an invalid document batch")
+    return [
+        _normalize_embedding_vector(
+            vector,
+            expected_dimension=embedder.dimension,
+        )
+        for vector in raw_vectors
+    ]
+
+
+def _memory_passages(topic: str, payload: str) -> list[str]:
+    prefix = f"Memory topic: {topic}\nMemory content: "
+    if len(prefix) + len(payload) <= MAX_PASSAGE_CHARS:
+        return [prefix + payload]
+
+    chunks: list[str] = []
+    cursor = 0
+    available = max(128, MAX_PASSAGE_CHARS - len(prefix))
+    while cursor < len(payload):
+        end = min(len(payload), cursor + available)
+        if end < len(payload):
+            split = payload.rfind(" ", cursor, end)
+            if split > cursor + available // 2:
+                end = split
+        chunk = payload[cursor:end].strip()
+        if chunk:
+            chunks.append(prefix + chunk)
+        cursor = max(end, cursor + 1)
+        while cursor < len(payload) and payload[cursor].isspace():
+            cursor += 1
+
+    if len(chunks) <= MAX_MEMORY_PASSAGES:
+        return chunks
+    selected: list[str] = []
+    for index in range(MAX_MEMORY_PASSAGES):
+        position = round(index * (len(chunks) - 1) / (MAX_MEMORY_PASSAGES - 1))
+        selected.append(chunks[position])
+    return selected
+
+
+def _lexical_features(text: str, limit: int) -> dict[str, int]:
+    tokens = [
+        token
+        for token in _TOKEN_PATTERN.findall(text.casefold())
+        if token not in _STOPWORDS and len(token) > 1
+    ]
+    features = [f"t:{token}" for token in tokens]
+    features.extend(
+        f"b:{left}\0{right}" for left, right in zip(tokens, tokens[1:], strict=False)
+    )
+    counts: dict[str, int] = {}
+    for feature in features:
+        if feature not in counts and len(counts) >= limit:
+            continue
+        counts[feature] = min(255, counts.get(feature, 0) + 1)
+    return counts
+
+
+def _hybrid_relevance(semantic_score: float | None, lexical_score: float) -> float:
+    semantic = 0.0 if semantic_score is None else min(1.0, max(0.0, semantic_score))
+    lexical = min(1.0, max(0.0, lexical_score))
+    return min(1.0, semantic + LEXICAL_BOOST * lexical * (1.0 - semantic))
+
+
+def _answerability_relevance(
+    relevance_score: float,
+    answerability_score: float | None,
+) -> float:
+    """Add bounded confidence only after an independent answerability pass."""
+    relevance = min(1.0, max(0.0, relevance_score))
+    if answerability_score is None:
+        return relevance
+    answerability = min(1.0, max(0.0, answerability_score))
+    return min(
+        1.0,
+        relevance + ANSWERABILITY_BOOST * answerability * (1.0 - relevance),
+    )
+
+
+def _availability_confidence(availability_score: float) -> float:
+    """Map a qualified raw lexical score into the non-authoritative safe band."""
+    bounded = min(1.0, max(DEFAULT_AVAILABILITY_MIN_SCORE, availability_score))
+    progress = (bounded - DEFAULT_AVAILABILITY_MIN_SCORE) / (
+        1.0 - DEFAULT_AVAILABILITY_MIN_SCORE
+    )
+    return 0.50 + 0.19 * progress
+
+
+def _predicate_query(query: str) -> str:
+    """Mask grammatical subjects while retaining the requested fact or rule.
+
+    The transform is deliberately syntax-only: it does not contain user names,
+    domain vocabularies, or sensitive-attribute lists. This prevents a common
+    failure where a person's identity dominates a query about an absent fact.
+    """
+    focused = re.sub(
+        r"\b(?i:does|do|did)\s+(?:the\s+)?(?:[\w'’-]+\s+){0,3}(?i:have)\b",
+        "is there",
+        query,
+    )
+    focused = re.sub(
+        r"\b[^\W\d_]+(?:-[^\W\d_]+)*(?:['’]s)\b",
+        "",
+        focused,
+    )
+    focused = re.sub(
+        r"\b((?i:does|do|did|is|was|has))\s+([A-Z][\w'’-]*)\b",
+        r"\1",
+        focused,
+    )
+    focused = re.sub(
+        r"(^|[.!?]\s+)((?i:may|should|can|would|will))\s+"
+        r"([A-Z][\w'’-]*)\b",
+        r"\1\2",
+        focused,
+    )
+    focused = re.sub(r"\s+", " ", focused).replace(" ?", "?").strip()
+    return focused or query
+
+
+def _mmr_rank(candidates: list[_RankedCandidate]) -> list[_RankedCandidate]:
+    remaining = list(candidates)
+    selected: list[_RankedCandidate] = []
+    while remaining:
+
+        def selection_key(candidate: _RankedCandidate) -> tuple[int, float, float]:
+            diversity = 0.0
+            if candidate.best_vector is not None:
+                similarities = [
+                    cosine_similarity(candidate.best_vector, prior.best_vector)
+                    for prior in selected
+                    if prior.best_vector is not None
+                    and prior.topic.casefold() != candidate.topic.casefold()
+                ]
+                diversity = max(similarities, default=0.0)
+            mmr = MMR_RELEVANCE_WEIGHT * candidate.relevance_score - (
+                1.0 - MMR_RELEVANCE_WEIGHT
+            ) * max(0.0, diversity)
+            return (
+                1 if candidate.temporal_current else 0,
+                mmr,
+                candidate.effective_at,
+            )
+
+        winner = max(remaining, key=selection_key)
+        selected.append(winner)
+        remaining.remove(winner)
+    return selected
+
+
+def _round_optional(value: float | None) -> float | None:
+    return None if value is None else round(value, 6)
+
+
+def _validate_timestamp(value: float | None, name: str) -> float:
+    if value is None:
+        return time.time()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a finite non-negative timestamp or None")
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative timestamp")
+    return result
+
+
+def _validate_optional_timestamp(value: float | None, name: str) -> float | None:
+    if value is None:
+        return None
+    return _validate_timestamp(value, name)
+
+
+def _validate_vine_ids(
+    values: list[str] | tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if not isinstance(values, (list, tuple)):
+        raise TypeError("supersedes must be a list of vine ids")
+    if len(values) > 20:
+        raise ValueError("supersedes must contain at most 20 vine ids")
+    clean = tuple(_validate_text(value, "superseded vine id", 128) for value in values)
+    if len(set(clean)) != len(clean):
+        raise ValueError("supersedes must not contain duplicate vine ids")
+    return clean
+
+
+def _validate_text(value: str, name: str, max_chars: int) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    result = value.strip()
+    if not result:
+        raise ValueError(f"{name} must be non-empty")
+    if len(result) > max_chars:
+        raise ValueError(f"{name} must be at most {max_chars} characters")
+    return result
+
+
+def _validate_stored_topic(value: object) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError("stored payload topic is invalid")
+    try:
+        return _validate_text(value, "stored payload topic", MAX_TOPIC_CHARS)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("stored payload topic is invalid") from exc
+
+
+def _validate_stored_timestamp(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"stored {name} is invalid")
+    timestamp = float(value)
+    if not math.isfinite(timestamp) or timestamp < 0.0:
+        raise RuntimeError(f"stored {name} is invalid")
+    return timestamp
+
+
+def _validate_profile(value: str) -> str:
+    if not isinstance(value, str) or not _PROFILE_PATTERN.fullmatch(value):
+        raise ValueError(
+            "profile must be 1-64 letters, digits, dots, underscores, or hyphens"
+        )
+    if value in {".", ".."}:
+        raise ValueError("profile must not be a relative path marker")
+    return value
+
+
+def _secure_directory(path: Path) -> Path:
+    candidate = path.absolute()
+    _reject_symlink_components(candidate)
+    candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not candidate.is_dir():
+        raise ValueError("state directory must be a directory")
+    if os.name != "nt":
+        candidate.chmod(0o700)
+    return candidate
+
+
+def _reject_symlink_components(path: Path) -> None:
+    for candidate in reversed((path, *path.parents)):
+        if candidate.is_symlink():
+            raise ValueError("state paths must not contain symbolic links")
+
+
+def _secure_regular_file(path: Path) -> None:
+    _reject_symlink_components(path.absolute())
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{path.name} must be a regular file")
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def _require_secure_regular_file(path: Path, label: str) -> None:
+    try:
+        _reject_symlink_components(path.absolute())
+    except ValueError as exc:
+        raise RuntimeError(f"{label} path must not contain symbolic links") from exc
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{label} must be an existing regular file")
+    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RuntimeError(f"{label} must be owner-only")
+
+
+def _payload_database_version(path: Path) -> int:
+    """Read a profile schema version without creating or mutating the database."""
+
+    if not path.exists():
+        return 0
+    _require_secure_regular_file(path, "payload database")
+    connection = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA trusted_schema = OFF")
+        row = connection.execute("PRAGMA user_version").fetchone()
+        version = 0 if row is None else int(row[0])
+        if version != 0:
+            return version
+
+        # Profiles created before schema versioning have user_version=0.  They
+        # must stay on the legacy compatibility path until an explicit profile
+        # migration; treating them as a fresh scoped-v2 database would mix the
+        # new schema and keyring into the existing encrypted payload store.
+        columns = tuple(
+            (str(item[1]), str(item[2]).upper(), int(item[3]), int(item[5]))
+            for item in connection.execute("PRAGMA table_xinfo(payloads)")
+            if int(item[6]) == 0
+        )
+        legacy_columns = (
+            ("vine_id", "TEXT", 1, 1),
+            ("topic", "TEXT", 1, 0),
+            ("nonce", "BLOB", 1, 0),
+            ("ciphertext", "BLOB", 1, 0),
+            ("content_hash", "TEXT", 1, 0),
+            ("created_at", "REAL", 1, 0),
+            ("effective_at", "REAL", 0, 0),
+            ("superseded_by", "TEXT", 0, 0),
+            ("superseded_at", "REAL", 0, 0),
+        )
+        if columns and columns == legacy_columns[: len(columns)]:
+            return LEGACY_PAYLOAD_SCHEMA_VERSION
+        object_count_row = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchone()
+        if columns or (object_count_row is not None and int(object_count_row[0]) > 0):
+            raise RuntimeError("unversioned payload database schema is not recognized")
+        return 0
+    finally:
+        connection.close()
+
+
+def _load_or_create_key(path: Path) -> bytes:
+    _reject_symlink_components(path.absolute())
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    key = AesGcmCryptoShield.generate_key()
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        descriptor = -1
+    if descriptor >= 0:
+        try:
+            os.write(descriptor, key)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return key
+
+    return _load_existing_key(path)
+
+
+def _load_existing_key(path: Path) -> bytes:
+    _require_secure_regular_file(path, "agent key")
+
+    read_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        read_flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, read_flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("agent key must be a regular file")
+        stored = os.read(descriptor, 33)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    if len(stored) != 32:
+        raise ValueError("agent key must contain exactly 32 bytes")
+    return stored
+
+
+def _aad(vine_id: str) -> bytes:
+    return b"echo-veil-agent-payload-v1\0" + vine_id.encode("utf-8")
+
+
+def _vector_aad(vine_id: str, ordinal: int) -> bytes:
+    return (
+        b"echo-veil-agent-vector-v1\0"
+        + vine_id.encode("utf-8")
+        + b"\0"
+        + str(ordinal).encode("ascii")
+    )

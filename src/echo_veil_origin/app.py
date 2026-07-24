@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -14,29 +13,58 @@ from .core import (
     EnclaveService,
     OriginConfig,
     ProtocolError,
+    _read_owner_only_file,
     origin_token_matches,
 )
+from ._json import strict_json_loads
 from .openfhe_engine import OpenFheCkksEngine
 from .proof_verifier import RistrettoProofVerifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
+async def _read_bounded_request_body(request: Any) -> bytes:
+    """Read an ASGI request without buffering past the protocol limit."""
+    declared_length = request.headers.get("Content-Length")
+    if declared_length is not None:
+        if not declared_length.isascii() or not declared_length.isdigit():
+            raise ProtocolError("invalid request size")
+        if not 0 < int(declared_length) <= MAX_REQUEST_BYTES:
+            raise ProtocolError("invalid request size")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if not isinstance(chunk, bytes):
+            raise ProtocolError("invalid request body")
+        if len(chunk) > MAX_REQUEST_BYTES - len(body):
+            raise ProtocolError("invalid request size")
+        body.extend(chunk)
+    if not body:
+        raise ProtocolError("invalid request size")
+    return bytes(body)
+
+
 def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
+    value = os.environ.get(name, "")
+    if not value or value != value.strip():
         raise RuntimeError(f"{name} is required")
     return value
 
 
 def _read_origin_token(path: str) -> str:
     token_path = Path(path)
-    if not token_path.is_file():
-        raise RuntimeError("origin token file is missing")
-    if os.name == "posix" and token_path.stat().st_mode & 0o077:
-        raise RuntimeError("origin token file permissions must be 0600 or stricter")
-    token = token_path.read_text(encoding="utf-8").strip()
-    if len(token) < 32:
+    raw = _read_owner_only_file(
+        token_path,
+        maximum=4096,
+        label="origin token",
+    )
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("origin token must be UTF-8") from exc
+    if not 32 <= len(token) <= 4096 or any(
+        not 33 <= ord(character) <= 126 for character in token
+    ):
         raise RuntimeError("origin token must contain at least 32 characters")
     return token
 
@@ -94,13 +122,11 @@ def create_app(service: EnclaveService | None = None, origin_token: str | None =
         if not origin_token_matches(origin_token, request.headers.get("Authorization")):
             raise ProtocolError("origin authentication failed")
         content_type = request.headers.get("Content-Type", "")
-        if not content_type.lower().startswith("application/json"):
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
             raise ProtocolError("application/json required")
-        body = await request.body()
-        if not 0 < len(body) <= MAX_REQUEST_BYTES:
-            raise ProtocolError("invalid request size")
+        body = await _read_bounded_request_body(request)
         try:
-            value = json.loads(body)
+            value = strict_json_loads(body)
         except Exception as exc:
             raise ProtocolError("invalid request JSON") from exc
         if not isinstance(value, dict):

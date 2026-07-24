@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "echo-veil": {
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/../..",
+        "--locked",
+        "echo-veil-agent",
+        "mcp"
+      ],
+      "env": {
+        "ECHO_VEIL_PROFILE": "claude-code-qwen3",
+        "ECHO_VEIL_EMBEDDER": "ollama",
+        "ECHO_VEIL_EMBEDDING_MODEL": "qwen3-embedding:latest",
+        "ECHO_VEIL_EMBEDDING_DIMENSION": "1024",
+        "ECHO_VEIL_AVAILABILITY_LAYER": "true"
+      }
+    }
+  }
+}
