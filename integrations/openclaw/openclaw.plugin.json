@@ -2,7 +2,7 @@
   "id": "echo-veil",
   "name": "Echo Veil",
   "description": "Local encrypted, decay-driven memory tools backed by Echo Veil.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "configSchema": {
     "type": "object",
     "properties": {

@@ -8,6 +8,7 @@ import {
   readBoundedBody,
   validatedOrigin,
   validatedTeamDomain,
+  validOriginToken,
   validOriginJson,
 } from "./index.ts";
 
@@ -36,10 +37,18 @@ test("deployment URLs fail closed", () => {
   assert.equal(validatedOrigin("http://origin.example.com"), null);
   assert.equal(validatedOrigin("https://user:pass@origin.example.com"), null);
   assert.equal(validatedTeamDomain("https://example.com"), null);
+  assert.equal(validatedTeamDomain("https://nested.team.cloudflareaccess.com"), null);
   assert.equal(
     validatedTeamDomain("https://team.cloudflareaccess.com")?.origin,
     "https://team.cloudflareaccess.com",
   );
+});
+
+test("origin tokens are bounded printable secrets", () => {
+  assert.equal(validOriginToken("a".repeat(32)), true);
+  assert.equal(validOriginToken("short"), false);
+  assert.equal(validOriginToken(`a${"b".repeat(31)}\n`), false);
+  assert.equal(validOriginToken(`a${"b".repeat(31)}é`), false);
 });
 
 test("content type matching rejects JSON lookalikes", () => {

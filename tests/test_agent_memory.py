@@ -11,7 +11,15 @@ import numpy as np
 import pytest
 
 import echo_veil.agent_cli as agent_cli
-from echo_veil.agent_cli import MAX_REQUEST_BYTES, McpServer, TOOLS, _read_mcp_line
+import echo_veil.agent_security as agent_security
+from echo_veil.agent_cli import (
+    MAX_REQUEST_BYTES,
+    McpServer,
+    TOOLS,
+    _public_error,
+    _read_mcp_line,
+)
+from echo_veil._json import strict_json_loads
 import echo_veil.agent_memory as agent_memory
 from echo_veil.agent_memory import (
     AgentMemory,
@@ -162,6 +170,104 @@ def test_profile_rejects_changed_model_digest(tmp_path: Path) -> None:
         AgentMemory(tmp_path, embed=DigestEmbedder("b" * 64))
 
 
+def test_profile_writer_lease_serializes_fresh_process_snapshots(
+    tmp_path: Path,
+) -> None:
+    first = AgentMemory(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="another writer"):
+            AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01)
+    finally:
+        first.close()
+
+    with AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01) as reopened:
+        assert reopened.doctor()["writer_serialization"] == "profile-sqlite-lease"
+
+
+def test_profile_startup_repairs_lifecycle_record_without_payload(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        orphan = memory.oracle.sprout(
+            "interrupted remember",
+            HashingTextEmbedder()("interrupted remember"),
+        )
+        assert memory.oracle.workspace.get(orphan.vine_id) is not None
+
+    with AgentMemory(tmp_path) as recovered:
+        doctor = recovered.doctor()
+        assert doctor["recovered_incomplete_lifecycle_records"] == 1
+        assert recovered.oracle.workspace.get(orphan.vine_id) is None
+
+
+def test_profile_startup_preserves_and_blocks_payload_without_lifecycle(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        created = memory.remember(
+            "preserve me", "Encrypted payload must not be deleted."
+        )
+        assert memory.oracle.forget(str(created["vine_id"])) is True
+
+    with pytest.raises(RuntimeError, match="automatic deletion is refused"):
+        AgentMemory(tmp_path)
+
+
+def test_state_path_rejects_symbolic_link_components(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable")
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        AgentMemory(linked)
+
+
+def test_payload_database_rejects_unexpected_schema_objects(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path):
+        pass
+    path = tmp_path / "default" / "payloads.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TRIGGER injected_trigger BEFORE DELETE ON payloads "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="schema validation"):
+        AgentMemory(tmp_path)
+
+
+def test_payload_database_rejects_foreign_key_orphans(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path):
+        pass
+    path = tmp_path / "default" / "payloads.db"
+    manifest = json.loads(
+        (tmp_path / "default" / "keyring.json").read_text(encoding="utf-8")
+    )
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        INSERT INTO memory_terms(vine_id, term_hash, term_count, key_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            "missing-vine",
+            b"synthetic-hash!!",
+            1,
+            manifest["active_key_id"],
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="foreign-key integrity"):
+        AgentMemory(tmp_path)
+
+
 def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -176,6 +282,13 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
 
         def read(self, _limit: int) -> bytes:
             return self._body
+
+        def getheader(self, name: str, default: str | None = None) -> str | None:
+            if name == "Content-Type":
+                return "application/json"
+            if name == "Content-Length":
+                return str(len(self._body))
+            return default
 
     class Connection:
         def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
@@ -223,7 +336,7 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     assert np.linalg.norm(document) == pytest.approx(1.0)
     assert np.linalg.norm(query) == pytest.approx(1.0)
     assert np.linalg.norm(answerability) == pytest.approx(1.0)
-    document_body = json.loads(requests[-2][2] or b"{}")
+    document_body = json.loads(requests[-3][2] or b"{}")
     query_body = json.loads(requests[-1][2] or b"{}")
     assert document_body["input"] == ["The launch code is blue."]
     assert query_body["input"][0].startswith("Instruct: ")
@@ -235,6 +348,52 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
         OllamaTextEmbedder(base_url="http://localhost:11434", dimension=32)
     with pytest.raises(ValueError, match="loopback IP literal"):
         OllamaTextEmbedder(base_url="http://192.0.2.1:11434", dimension=32)
+
+
+def test_ollama_embedder_rechecks_mutable_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digests = ["a" * 64, "b" * 64]
+
+    class Response:
+        status = 200
+
+        def getheader(self, name: str, default: str | None = None) -> str | None:
+            if name == "Content-Type":
+                return "application/json"
+            return default
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "qwen3-embedding:latest",
+                            "digest": digests.pop(0),
+                            "details": {"embedding_length": 4096},
+                        }
+                    ]
+                }
+            ).encode()
+
+    class Connection:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def request(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(agent_memory.http.client, "HTTPConnection", Connection)
+    embedder = OllamaTextEmbedder(dimension=32)
+
+    with pytest.raises(RuntimeError, match="identity changed"):
+        embedder.embed_query("Where is the current runbook?")
 
 
 def test_ollama_unavailable_fails_closed_without_hashing_fallback(
@@ -303,6 +462,48 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
 
     assert payload_database.read_bytes() == before
     assert lifecycle_database.read_bytes() == lifecycle_before
+
+
+def test_runtime_embedding_outage_transitions_to_read_only_availability(
+    tmp_path: Path,
+) -> None:
+    class RuntimeOutageEmbedder(_SemanticTestEmbedder):
+        identity = "test:runtime-outage:v1:dimension:32"
+
+        def __init__(self) -> None:
+            self.available = True
+
+        def embed_query(self, text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            if not self.available:
+                raise EmbeddingUnavailable("synthetic runtime outage")
+            return super().embed_query(text)
+
+    embedder = RuntimeOutageEmbedder()
+    primary = AgentMemory(tmp_path, embed=embedder)
+    memory = agent_cli._RuntimeAvailabilityMemory(  # noqa: SLF001 - failover contract
+        primary,
+        tmp_path,
+        "default",
+    )
+    try:
+        memory.remember(
+            "opal harbor recovery procedure",
+            "Use the opal harbor recovery procedure during a deployment outage.",
+        )
+        embedder.available = False
+
+        recalled = memory.recall("opal harbor recovery procedure", top_k=2)
+        doctor = memory.doctor()
+
+        assert recalled["degraded"] is True
+        assert recalled["semantic_available"] is False
+        assert recalled["lifecycle_mutated"] is False
+        assert recalled["results"][0]["topic"] == "opal harbor recovery procedure"
+        assert doctor["runtime_failover_active"] is True
+        with pytest.raises(RuntimeError, match="read-only"):
+            memory.remember("blocked", "Writes stay blocked during the outage.")
+    finally:
+        memory.close()
 
 
 def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
@@ -515,10 +716,238 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
     assert report["profile"] == "default"
     assert "profile_dir" not in report
     assert report["key_owner_only"] is True
+    assert report["security_schema"] == "scoped-v2"
+    assert report["scope_bound"] is True
+    assert report["readiness"] == {
+        "installed": True,
+        "enabled": True,
+        "crypto_initialized": True,
+        "write_wired": True,
+        "index_wired": True,
+        "retrieval_wired": True,
+        "persistence_wired": True,
+        "restart_restored": True,
+        "rotation_ready": True,
+        "healthy": True,
+    }
+    assert report["quarantined_records"] == 0
+    assert report["local_protection_ready"] is True
+    assert report["production_ready"] is False
+    assert report["store_permissions"] == "valid"
+    assert report["reconciliation_backlog"] == 0
+    assert report["failed_decryptions"] == 0
     assert report["retrieval"]["answerability_gate"] == "unavailable"
     assert report["retrieval"]["answerability_min_score"] is None
+    assert report["retrieval"]["metadata"] == "opaque-authenticated"
     assert report["capability_report"]["overall_status"] == "blocked"
     assert any("not the production enclave" in item for item in report["limitations"])
+
+
+def test_scoped_profile_encrypts_content_topics_vectors_and_scope_binding(
+    tmp_path: Path,
+) -> None:
+    topic = "confidential project codename cedar"
+    payload = "The private recovery phrase is cobalt lantern 849."
+    with AgentMemory(tmp_path, scope="workspace:synthetic-alpha") as memory:
+        created = memory.remember(topic, payload)
+        report = memory.doctor()
+
+    profile = tmp_path / "default"
+    for path in (profile / "payloads.db", profile / "echo-veil.db"):
+        persisted = path.read_bytes()
+        assert topic.encode() not in persisted
+        assert payload.encode() not in persisted
+        assert str(created["vine_id"]).encode() in persisted
+    assert report["key_id"].startswith("ev-")
+    assert "scope_id" not in report
+    assert "profile_dir" not in report
+
+    with pytest.raises(PermissionError, match="scope"):
+        AgentMemory(tmp_path, scope="workspace:synthetic-beta")
+
+
+def test_corrupt_record_is_quarantined_without_hiding_healthy_records(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:quarantine") as memory:
+        corrupt = memory.remember("alpha recovery", "Use the alpha recovery path.")
+        healthy = memory.remember("beta recovery", "Use the beta recovery path.")
+
+    connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    try:
+        connection.execute(
+            """
+            UPDATE payloads
+            SET ciphertext = substr(ciphertext, 1, length(ciphertext) - 1) || x'00'
+            WHERE vine_id = ?
+            """,
+            (corrupt["vine_id"],),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with AgentMemory(tmp_path, scope="workspace:quarantine") as memory:
+        assert memory.recall("alpha recovery path")["results"] == []
+        recalled = memory.recall("beta recovery path")
+        report = memory.doctor()
+
+    assert recalled["results"][0]["vine_id"] == healthy["vine_id"]
+    assert recalled["results"][0]["payload"] == "Use the beta recovery path."
+    assert report["quarantined_records"] == 1
+    assert report["readiness"]["healthy"] is False
+    assert "ciphertext" not in json.dumps(report).casefold()
+
+
+def test_crafted_cross_scope_metadata_quarantines_only_the_bad_record(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:metadata") as memory:
+        poisoned = memory.remember("alpha scope", "Alpha remains isolated.")
+        healthy = memory.remember("beta scope", "Beta remains available.")
+
+    connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    try:
+        connection.execute(
+            "UPDATE payloads SET scope_id = ? WHERE vine_id = ?",
+            ("scope-00000000000000000000000000000000", poisoned["vine_id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with AgentMemory(tmp_path, scope="workspace:metadata") as memory:
+        assert memory.recall("alpha scope")["results"] == []
+        recalled = memory.recall("beta scope available")
+        report = memory.doctor()
+
+    assert recalled["results"][0]["vine_id"] == healthy["vine_id"]
+    assert report["quarantined_records"] == 1
+    assert report["production_ready"] is False
+
+
+def test_cross_table_nonce_reuse_stops_profile_without_exposing_content(
+    tmp_path: Path,
+) -> None:
+    secret = "Nonce reuse must never reveal this synthetic secret."
+    with AgentMemory(tmp_path, scope="workspace:nonce") as memory:
+        created = memory.remember("nonce test", secret)
+
+    connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    try:
+        payload_nonce = connection.execute(
+            "SELECT nonce FROM payloads WHERE vine_id = ?",
+            (created["vine_id"],),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE memory_vectors SET nonce = ? WHERE vine_id = ? AND ordinal = 0",
+            (payload_nonce, created["vine_id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="reused AES-GCM nonce") as failure:
+        AgentMemory(tmp_path, scope="workspace:nonce")
+    assert secret not in str(failure.value)
+
+
+def test_security_files_with_broad_permissions_fail_closed(tmp_path: Path) -> None:
+    if agent_security.os.name == "nt":
+        pytest.skip("POSIX permission bits are unavailable")
+    with AgentMemory(tmp_path, scope="workspace:permissions") as memory:
+        key_id = memory.doctor()["key_id"]
+    key_path = tmp_path / "default" / "keys" / f"{key_id}.key"
+    key_path.chmod(0o644)
+    try:
+        with pytest.raises(RuntimeError, match="permissions"):
+            AgentMemory(tmp_path, scope="workspace:permissions")
+    finally:
+        key_path.chmod(0o600)
+
+
+def test_failed_rotation_manifest_commit_keeps_old_key_and_is_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:rotation-commit") as memory:
+        memory.remember("rotation commit", "The old key remains usable.")
+        old_key_id = memory.doctor()["key_id"]
+        key_directory = tmp_path / "default" / "keys"
+        original_key_files = {path.name for path in key_directory.iterdir()}
+        original_write = agent_security._atomic_write_json
+
+        def fail_manifest_write(_path: Path, _payload: dict[str, Any]) -> None:
+            raise OSError("synthetic manifest commit failure")
+
+        monkeypatch.setattr(
+            agent_security,
+            "_atomic_write_json",
+            fail_manifest_write,
+        )
+        with pytest.raises(OSError, match="manifest commit"):
+            memory.rotate_key(confirm=True)
+        assert memory.doctor()["key_id"] == old_key_id
+        assert {path.name for path in key_directory.iterdir()} == original_key_files
+
+        monkeypatch.setattr(agent_security, "_atomic_write_json", original_write)
+        resumed = memory.rotate_key(confirm=True, batch_size=100)
+        assert resumed["state"] == "verified"
+        assert memory.recall("rotation commit")["results"][0]["payload"] == (
+            "The old key remains usable."
+        )
+
+
+def test_key_rotation_is_resumable_restart_safe_and_explicitly_retired(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:rotation") as memory:
+        created = [
+            memory.remember(f"rotation topic {index}", f"rotation payload {index}")
+            for index in range(3)
+        ]
+        first = memory.rotate_key(confirm=True, batch_size=1)
+        assert first["state"] == "migrating"
+        assert first["remaining_key_references"] > 0
+
+    with AgentMemory(tmp_path, scope="workspace:rotation") as memory:
+        second = memory.rotate_key(confirm=True, batch_size=1)
+        third = memory.rotate_key(confirm=True, batch_size=1)
+        assert second["state"] in {"migrating", "verified"}
+        assert third["state"] == "verified"
+        for index, record in enumerate(created):
+            recalled = memory.recall(f"rotation topic {index} payload {index}")
+            assert recalled["results"][0]["vine_id"] == record["vine_id"]
+        retired = memory.retire_previous_key(confirm_backups_accounted_for=True)
+        assert retired["physical_erasure_guaranteed"] is False
+
+    with AgentMemory(tmp_path, scope="workspace:rotation") as memory:
+        assert memory.doctor()["rotation"]["state"] == "idle"
+        assert (
+            memory.recall("rotation topic 2 payload 2")["results"][0]["payload"]
+            == "rotation payload 2"
+        )
+
+
+def test_missing_profile_key_fails_closed_instead_of_resetting_store(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:lost-key") as memory:
+        memory.remember("lost key record", "This record must never look absent.")
+        key_id = memory.doctor()["key_id"]
+    key_path = tmp_path / "default" / "keys" / f"{key_id}.key"
+    missing_path = key_path.with_suffix(".missing")
+    key_path.rename(missing_path)
+    try:
+        with pytest.raises(RuntimeError, match="key"):
+            AgentMemory(tmp_path, scope="workspace:lost-key")
+    finally:
+        missing_path.rename(key_path)
+
+    with AgentMemory(tmp_path, scope="workspace:lost-key") as memory:
+        assert memory.recall("lost key record")["results"][0]["payload"] == (
+            "This record must never look absent."
+        )
 
 
 def test_agent_memory_recalls_an_evicted_payload_from_cold_index(
@@ -553,6 +982,8 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
         "echo_veil_forget",
         "echo_veil_doctor",
         "echo_veil_reindex",
+        "echo_veil_rotate_key",
+        "echo_veil_retire_key",
     ]
 
     with AgentMemory(tmp_path) as memory:
@@ -607,7 +1038,7 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
     assert initialized["result"]["protocolVersion"] == "2025-11-25"
     assert initialized["result"]["serverInfo"]["name"] == "echo-veil"
     assert listed is not None
-    assert len(listed["result"]["tools"]) == 5
+    assert len(listed["result"]["tools"]) == 7
     recall_tool = next(
         tool for tool in listed["result"]["tools"] if tool["name"] == "echo_veil_recall"
     )
@@ -653,3 +1084,37 @@ def test_mcp_line_reader_bounds_and_drains_oversized_requests() -> None:
     assert oversized is True
     assert second == b"{}\n"
     assert second_oversized is False
+
+
+def test_protocol_json_rejects_duplicates_nonfinite_and_wrong_rpc_version(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        strict_json_loads(b'{"action":"doctor","action":"forget"}')
+    with pytest.raises(ValueError, match="non-finite"):
+        strict_json_loads(b'{"score":NaN}')
+    with pytest.raises(ValueError, match="non-finite"):
+        strict_json_loads(b'{"score":1e9999}')
+
+    with AgentMemory(tmp_path) as memory:
+        response = McpServer(memory).handle(
+            {"jsonrpc": "1.0", "id": 1, "method": "tools/list"}
+        )
+    assert response is not None
+    assert response["error"]["code"] == -32600
+
+
+def test_public_adapter_errors_redact_paths_secrets_and_email() -> None:
+    payload = _public_error(
+        RuntimeError(
+            "failed at /sensitive/location/file token=top-secret "
+            "api_key=another-secret Authorization: Bearer third-secret "
+            "operator@example.com"
+        )
+    )
+
+    assert "/sensitive/" not in payload["message"]
+    assert "top-secret" not in payload["message"]
+    assert "another-secret" not in payload["message"]
+    assert "third-secret" not in payload["message"]
+    assert "operator@example.com" not in payload["message"]

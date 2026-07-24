@@ -10,7 +10,7 @@ eventually archived, and contradictory information is preserved as structured
 tension rather than overwritten. This repository implements the core of the
 Echo Veil v1.0 specification (`docs/SPEC.md`).
 
-> **Status: 0.5.0 — protected semantic recall with a conservative availability floor.**
+> **Status: 0.6.0 — scoped protected memory with a conservative availability floor.**
 > The memory lifecycle, conflict handling, drift detection, capability reporting,
 > confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
 > and tested. The repository includes an Azure SEV-SNP origin using OpenFHE CKKS,
@@ -43,13 +43,24 @@ pip install -e ".[dev]"
 ## Agent runtime adapters
 
 Echo Veil includes one local encrypted host adapter used across supported runtimes. It
-provides five opt-in operations: remember, recall, forget, doctor, and protected
-retrieval reindexing. The
+provides five core operations—remember, recall, forget, doctor, and protected
+retrieval reindexing—plus stdio maintenance operations for resumable key
+rotation and explicit old-key retirement. New scoped-v2 profiles bind each
+protected object to its authorization scope, record, schema, and key; encrypt
+topics and retrieval vectors; use keyed opaque index terms; reconcile
+interrupted writes; authenticate tombstones; and quarantine corrupt records
+without serving unauthenticated content. The
 bundled host configurations use the locally installed
 `qwen3-embedding:latest` model through loopback-only Ollama, 1,024-dimensional
 MRL output, AES-GCM protected anchors, an encrypted payload sidecar, durable
 SQLite lifecycle state, and Echo Veil's confidence gate. It does not silently
 capture conversations or download a model at runtime.
+
+This is a local staging boundary. Plaintext is still visible to the authorized
+process and embedding service, and Echo Veil does not automatically protect
+host logs, prompts, transcripts, wiki/graph stores, backups, swap, or physical
+media. The complete threat model and application entry-point contract are in
+[`docs/LOCAL_AGENT_SECURITY.md`](docs/LOCAL_AGENT_SECURITY.md).
 
 Install the model before starting a bundled adapter:
 
@@ -68,14 +79,18 @@ gate, not a universal recall claim.
 See [`docs/QUALITY.md`](docs/QUALITY.md) for methodology and the current
 same-corpus comparison. Echo Veil stores the resolved model digest, dimension,
 and query-instruction identity with each profile and refuses to mix incompatible
-vectors.
+vectors. Because `latest` is mutable, the adapter also re-resolves that identity
+before every embedding batch and stops if the artifact changes during a
+long-lived process.
 
 If the configured local Ollama service or model is unavailable, the executable
 adapter can open an existing profile through an always-available read-only
 layer. It uses only the encrypted keyed predicate index, requires conservative
 term coverage, returns `degraded=true`, and disables remember, forget, reindex,
 inferential recall, and lifecycle mutation. It never substitutes hashing
-vectors or describes the result as semantic retrieval. Disable this path with
+vectors or describes the result as semantic retrieval. A long-lived CLI or MCP
+process makes the same one-way transition if the service becomes unavailable
+during a later embedding call. Disable this path with
 `--no-availability-layer` or `ECHO_VEIL_AVAILABILITY_LAYER=false`.
 
 Agent-facing recall keeps at least two candidates so a close ranking cannot be
@@ -121,7 +136,10 @@ openclaw plugins doctor
 Linked development installs auto-detect the checkout. Packaged installs can set
 the plugin's `projectPath` or use an installed `echo-veil-agent` executable.
 Every host uses a distinct default profile to prevent accidental cross-agent
-sharing. See [`integrations/README.md`](integrations/README.md) for the adapter
+sharing. Writable processes acquire a profile-wide lease before loading live L1
+state; a second writer waits for the configured timeout and then fails closed
+instead of overwriting a stale snapshot. See
+[`integrations/README.md`](integrations/README.md) for the adapter
 matrix and [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) for the
 security and usage contract.
 
@@ -274,8 +292,11 @@ SBOM generation, and provenance requirements are documented in
 - **Durable storage is available without another dependency.** `SQLiteStore`
   checkpoints active L1 vines and commits each L2 index entry, L3 archive payload, and lifecycle/topic metadata
   in one crash-recoverable transaction. It enables WAL mode, full synchronous
-  durability, integrity checks, cross-process writer coordination, and owner-only
-  database-file permissions. Reopening the store restores active, twilight,
+  durability, integrity and foreign-key checks, schema-object validation,
+  cross-process writer coordination, and owner-only database-file permissions.
+  The host adapter additionally reconciles lifecycle records left by an
+  interrupted remember operation and refuses to delete an unexplained encrypted
+  payload orphan automatically. Reopening the store restores active, twilight,
   locked, and focal-crest state as well as searchable lower-tier memory.
 - **SQLite retrieval is indexed.** Stable random-projection LSH signatures are
   stored in indexed SQLite buckets. Lookup selects approximate cosine-neighbor

@@ -31,3 +31,7 @@ Recall preserves both leading candidates when `ranking_ambiguous=true` and
 labels `degraded=true` results as non-semantic, non-authoritative availability
 hints. Each response includes `host_transport.elapsed_ms` so fresh-process RPC
 overhead can be tracked separately from Echo Veil's in-process recall time.
+The child receives only runtime essentials and the explicit local-adapter
+environment allowlist; unrelated API keys and production Echo Veil crypto
+secrets are not inherited. Child stderr is drained but never returned to the
+agent, and timeout/abort handling escalates from termination to forced exit.

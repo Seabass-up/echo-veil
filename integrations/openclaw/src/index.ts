@@ -28,6 +28,50 @@ export type EchoVeilInvocation = {
 };
 
 const MAX_OUTPUT_BYTES = 1_048_576;
+const CHILD_ENV_ALLOWLIST = new Set([
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "USERPROFILE",
+  "UV_CACHE_DIR",
+  "UV_PYTHON",
+  "UV_PYTHON_INSTALL_DIR",
+  "VIRTUAL_ENV",
+  "WINDIR",
+]);
+const CHILD_ECHO_ENV_ALLOWLIST = new Set([
+  "ECHO_VEIL_AVAILABILITY_LAYER",
+  "ECHO_VEIL_CAPACITY",
+  "ECHO_VEIL_EMBEDDER",
+  "ECHO_VEIL_EMBEDDING_DIMENSION",
+  "ECHO_VEIL_EMBEDDING_MODEL",
+  "ECHO_VEIL_EMBEDDING_TIMEOUT",
+  "ECHO_VEIL_OLLAMA_URL",
+  "ECHO_VEIL_PROFILE",
+  "ECHO_VEIL_PROFILE_LOCK_TIMEOUT",
+  "ECHO_VEIL_STATE_DIR",
+]);
+
+export function buildChildEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(source).filter(
+      ([name, value]) =>
+        value !== undefined &&
+        (CHILD_ENV_ALLOWLIST.has(name) || CHILD_ECHO_ENV_ALLOWLIST.has(name)),
+    ),
+  );
+}
 
 export function addRpcTelemetry(value: unknown, elapsedMs: number): unknown {
   if (value === null || Array.isArray(value) || typeof value !== "object") return value;
@@ -42,7 +86,7 @@ export function addRpcTelemetry(value: unknown, elapsedMs: number): unknown {
 }
 
 export function buildInvocation(config: EchoVeilConfig): EchoVeilInvocation {
-  const env = { ...process.env };
+  const env = buildChildEnvironment();
   if (config.stateDir?.trim()) env.ECHO_VEIL_STATE_DIR = config.stateDir.trim();
   env.ECHO_VEIL_PROFILE = config.profile?.trim() || env.ECHO_VEIL_PROFILE || "openclaw-qwen3";
   env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
@@ -104,9 +148,7 @@ export async function runEchoVeilRpc(
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
     let outputBytes = 0;
-    let stderrBytes = 0;
     let settled = false;
 
     const finish = (callback: () => void) => {
@@ -116,12 +158,21 @@ export async function runEchoVeilRpc(
       signal?.removeEventListener("abort", abort);
       callback();
     };
-    const abort = () => {
+    const terminate = () => {
+      if (child.exitCode !== null) return;
       child.kill("SIGTERM");
+      const escalation = setTimeout(() => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }, 1_000);
+      escalation.unref();
+      child.once("close", () => clearTimeout(escalation));
+    };
+    const abort = () => {
+      terminate();
       finish(() => reject(new Error("Echo Veil request aborted")));
     };
     const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
+      terminate();
       finish(() => reject(new Error("Echo Veil request timed out")));
     }, invocation.timeoutMs);
 
@@ -130,35 +181,36 @@ export async function runEchoVeilRpc(
       return;
     }
     signal?.addEventListener("abort", abort, { once: true });
-    child.on("error", (error) => finish(() => reject(error)));
-    child.stdin.on("error", (error) => finish(() => reject(error)));
+    child.on("error", () => finish(() => reject(
+      new Error("Echo Veil process could not be started"),
+    )));
+    child.stdin.on("error", () => finish(() => reject(
+      new Error("Echo Veil request could not be delivered"),
+    )));
     child.stdout.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        child.kill("SIGTERM");
+        terminate();
         finish(() => reject(new Error("Echo Veil response exceeded size limit")));
         return;
       }
       stdout.push(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      const remaining = 16_384 - stderrBytes;
-      if (remaining <= 0) return;
-      const bounded = chunk.subarray(0, remaining);
-      stderr.push(bounded);
-      stderrBytes += bounded.length;
-    });
+    child.stderr.resume();
     child.on("close", (code) => {
       finish(() => {
         const output = Buffer.concat(stdout).toString("utf8").trim();
         if (code !== 0) {
-          const detail = Buffer.concat(stderr).toString("utf8").trim();
-          reject(new Error(detail || `Echo Veil exited with status ${code ?? "unknown"}`));
+          reject(new Error(`Echo Veil exited with status ${code ?? "unknown"}`));
           return;
         }
         try {
           const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-          resolve(addRpcTelemetry(JSON.parse(output), elapsedMs));
+          const decoded: unknown = JSON.parse(output);
+          if (decoded === null || Array.isArray(decoded) || typeof decoded !== "object") {
+            throw new TypeError("invalid RPC response");
+          }
+          resolve(addRpcTelemetry(decoded, elapsedMs));
         } catch {
           reject(new Error("Echo Veil returned invalid JSON"));
         }

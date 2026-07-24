@@ -21,3 +21,7 @@ the extension does not capture prompts automatically or replace Pi's context.
 Recall preserves both leading candidates when `ranking_ambiguous=true`.
 Responses marked `degraded=true` are conservative lexical availability hints,
 not semantic or authoritative recall.
+The child receives only runtime essentials and the explicit local-adapter
+environment allowlist; unrelated API keys and production Echo Veil crypto
+secrets are not inherited. Child stderr is drained but never exposed to the
+agent, and timeout/abort handling escalates from termination to forced exit.

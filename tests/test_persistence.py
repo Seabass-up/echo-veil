@@ -240,6 +240,34 @@ def test_malformed_existing_schema_fails_closed(tmp_path: Path) -> None:
         SQLiteStore(path)
 
 
+def test_sqlite_store_rejects_symbolic_link_path_components(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable")
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        SQLiteStore(linked / "echo-veil.db")
+
+
+def test_sqlite_store_rejects_unexpected_schema_objects(tmp_path: Path) -> None:
+    path = tmp_path / "injected.db"
+    with SQLiteStore(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TRIGGER injected_trigger BEFORE DELETE ON cold_archive "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="schema object mismatch"):
+        SQLiteStore(path)
+
+
 def test_closed_store_rejects_access(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "closed.db")
     store.close()

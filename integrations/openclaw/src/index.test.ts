@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { getToolPluginMetadata } from "openclaw/plugin-sdk/tool-plugin";
 
-import entry, { addRpcTelemetry, buildInvocation } from "./index.js";
+import entry, {
+  addRpcTelemetry,
+  buildChildEnvironment,
+  buildInvocation,
+} from "./index.js";
 
 describe("echo-veil OpenClaw plugin", () => {
   it("declares the native tool contract", () => {
@@ -61,5 +65,19 @@ describe("echo-veil OpenClaw plugin", () => {
         elapsed_ms: 1_891.24,
       },
     });
+  });
+
+  it("withholds unrelated host credentials from the child process", () => {
+    const env = buildChildEnvironment({
+      PATH: "/usr/bin",
+      OPENAI_API_KEY: "must-not-cross-boundary",
+      ECHO_VEIL_CRYPTO_KEY: "must-not-cross-boundary",
+      ECHO_VEIL_PROFILE: "shared",
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.ECHO_VEIL_PROFILE).toBe("shared");
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.ECHO_VEIL_CRYPTO_KEY).toBeUndefined();
   });
 });

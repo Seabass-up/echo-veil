@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { echoVeilTools } from "../extensions/index.js";
-import { buildInvocation } from "../src/runner.js";
+import { buildChildEnvironment, buildInvocation } from "../src/runner.js";
 
 describe("Echo Veil Pi extension", () => {
   it("registers the complete tool contract", () => {
@@ -33,5 +33,19 @@ describe("Echo Veil Pi extension", () => {
       if (previous === undefined) delete process.env.ECHO_VEIL_PROFILE;
       else process.env.ECHO_VEIL_PROFILE = previous;
     }
+  });
+
+  it("withholds unrelated host credentials from the child process", () => {
+    const env = buildChildEnvironment({
+      PATH: "/usr/bin",
+      ANTHROPIC_API_KEY: "must-not-cross-boundary",
+      ECHO_VEIL_CRYPTO_KEY: "must-not-cross-boundary",
+      ECHO_VEIL_PROFILE: "pi-qwen3",
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.ECHO_VEIL_PROFILE).toBe("pi-qwen3");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ECHO_VEIL_CRYPTO_KEY).toBeUndefined();
   });
 });

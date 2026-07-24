@@ -135,6 +135,8 @@ jobs:
           uv run --locked pytest -q tests/test_agent_memory.py tests/test_agent_adapters.py
           npm --prefix integrations/openclaw run check
           npm --prefix integrations/openclaw test
+          npm --prefix integrations/openclaw run build
+          git diff --exit-code -- integrations/openclaw/dist
           npm --prefix integrations/pi run check
           npm --prefix integrations/pi test
 
@@ -287,4 +289,5 @@ jobs:
           file: deploy/enclave/Dockerfile
           pull: true
           push: false
+          platforms: linux/amd64
           tags: echo-veil-enclave-origin:ci

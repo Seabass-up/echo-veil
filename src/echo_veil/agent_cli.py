@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from . import __version__
+from ._json import strict_json_loads
 from .agent_memory import (
     AgentMemory,
     AlwaysAvailableMemory,
@@ -19,6 +22,7 @@ from .agent_memory import (
     DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS,
     EmbeddingUnavailable,
     HashingTextEmbedder,
     OllamaTextEmbedder,
@@ -39,7 +43,150 @@ SERVER_INSTRUCTIONS = (
     "production enclave."
 )
 
-MemoryAdapter = AgentMemory | AlwaysAvailableMemory
+BaseMemoryAdapter = AgentMemory | AlwaysAvailableMemory
+
+
+class _RuntimeAvailabilityMemory:
+    """Transition a live CLI adapter to read-only recall on a real outage."""
+
+    def __init__(
+        self,
+        memory: BaseMemoryAdapter,
+        state_dir: Path | None,
+        profile: str,
+        scope: str = "local-user",
+    ) -> None:
+        self._memory = memory
+        self._state_dir = state_dir
+        self._profile = profile
+        self._scope = scope
+        self._closed = False
+
+    def _degrade(self) -> AlwaysAvailableMemory:
+        if isinstance(self._memory, AlwaysAvailableMemory):
+            return self._memory
+        self._memory.close()
+        self._memory = AlwaysAvailableMemory(
+            self._state_dir,
+            profile=self._profile,
+            scope=self._scope,
+            reason="runtime_embedding_service_unavailable",
+        )
+        return self._memory
+
+    def remember(
+        self,
+        topic: str,
+        payload: str,
+        *,
+        effective_at: float | None = None,
+        supersedes: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._memory.remember(
+                topic,
+                payload,
+                effective_at=effective_at,
+                supersedes=supersedes,
+            )
+        except EmbeddingUnavailable:
+            return self._degrade().remember(
+                topic,
+                payload,
+                effective_at=effective_at,
+                supersedes=supersedes,
+            )
+
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._memory.recall(
+                query,
+                top_k=top_k,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+            )
+        except EmbeddingUnavailable:
+            return self._degrade().recall(
+                query,
+                top_k=top_k,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+            )
+
+    def forget(self, vine_id: str) -> dict[str, Any]:
+        return self._memory.forget(vine_id)
+
+    def reindex(self) -> dict[str, Any]:
+        try:
+            return self._memory.reindex()
+        except EmbeddingUnavailable:
+            return self._degrade().reindex()
+
+    def doctor(self) -> dict[str, Any]:
+        report = dict(self._memory.doctor())
+        report["runtime_failover_enabled"] = True
+        report["runtime_failover_active"] = isinstance(
+            self._memory,
+            AlwaysAvailableMemory,
+        )
+        return report
+
+    def rotate_key(
+        self,
+        *,
+        confirm: bool = False,
+        batch_size: int = 100,
+    ) -> dict[str, Any]:
+        rotate = getattr(self._memory, "rotate_key", None)
+        if not callable(rotate):
+            raise RuntimeError("key rotation is unavailable in read-only mode")
+        return rotate(confirm=confirm, batch_size=batch_size)
+
+    def retire_previous_key(
+        self,
+        *,
+        confirm_backups_accounted_for: bool = False,
+    ) -> dict[str, Any]:
+        retire = getattr(self._memory, "retire_previous_key", None)
+        if not callable(retire):
+            raise RuntimeError("key retirement is unavailable in read-only mode")
+        return retire(confirm_backups_accounted_for=confirm_backups_accounted_for)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._memory.close()
+
+    def __enter__(self) -> _RuntimeAvailabilityMemory:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+MemoryAdapter = AgentMemory | AlwaysAvailableMemory | _RuntimeAvailabilityMemory
+
+_ABSOLUTE_PATH = re.compile(
+    r"(?:[A-Za-z]:[\\/](?:[^\s\\/]+[\\/])+[^\s]+|/(?:[^\s/]+/)+[^\s]+)"
+)
+_EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_ -]?key|authorization|credential|password|private[_ -]?key|"
+    r"secret|token)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[A-Z0-9._~+/=-]+")
+MAX_PUBLIC_ERROR_CHARS = 512
 
 
 TOOLS: tuple[dict[str, Any], ...] = (
@@ -58,7 +205,7 @@ TOOLS: tuple[dict[str, Any], ...] = (
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
-                    "description": "Short, non-secret label for the memory.",
+                    "description": "Short label; scoped-v2 profiles encrypt it at rest.",
                 },
                 "payload": {
                     "type": "string",
@@ -203,6 +350,51 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "openWorldHint": False,
         },
     },
+    {
+        "name": "echo_veil_rotate_key",
+        "description": (
+            "Start or resume a bounded local profile key rotation. New writes use "
+            "the new key immediately; old keys remain available until verification."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["confirm"],
+            "properties": {
+                "confirm": {"const": True},
+                "batch_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "echo_veil_retire_key",
+        "description": (
+            "Retire the verified previous local key only after old-key backups "
+            "have been accounted for. This does not promise physical media erasure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["confirm_backups_accounted_for"],
+            "properties": {"confirm_backups_accounted_for": {"const": True}},
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
 )
 
 
@@ -255,6 +447,27 @@ def dispatch(
         if supplied.get("confirm") is not True:
             raise ValueError("reindex requires confirm=true")
         return memory.reindex()
+    if action in {"rotate_key", "echo_veil_rotate_key"}:
+        _require_only(supplied, {"confirm", "batch_size"})
+        if supplied.get("confirm") is not True:
+            raise ValueError("key rotation requires confirm=true")
+        batch_size = supplied.get("batch_size", 100)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise TypeError("batch_size must be an integer")
+        rotate = getattr(memory, "rotate_key", None)
+        if not callable(rotate):
+            raise RuntimeError("key rotation is unavailable")
+        return rotate(confirm=True, batch_size=batch_size)
+    if action in {"retire_key", "echo_veil_retire_key"}:
+        _require_only(supplied, {"confirm_backups_accounted_for"})
+        if supplied.get("confirm_backups_accounted_for") is not True:
+            raise ValueError(
+                "key retirement requires confirm_backups_accounted_for=true"
+            )
+        retire = getattr(memory, "retire_previous_key", None)
+        if not callable(retire):
+            raise RuntimeError("key retirement is unavailable")
+        return retire(confirm_backups_accounted_for=True)
     raise ValueError(f"unknown Echo Veil action: {action}")
 
 
@@ -264,10 +477,16 @@ class McpServer:
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")
+        if (
+            set(request) - {"jsonrpc", "id", "method", "params"}
+            or request.get("jsonrpc") != "2.0"
+            or not _valid_request_id(request_id, present="id" in request)
+        ):
+            return _rpc_error(None, -32600, "invalid JSON-RPC request")
         method = request.get("method")
         if not isinstance(method, str):
             return _rpc_error(request_id, -32600, "invalid JSON-RPC request")
-        if request_id is None:
+        if "id" not in request:
             # Initialized, cancellation, and progress messages are notifications.
             return None
         if method == "initialize":
@@ -300,7 +519,7 @@ class McpServer:
         try:
             result = dispatch(self.memory, str(params["name"]), arguments)
         except Exception as exc:
-            error = {"error": type(exc).__name__, "message": str(exc)}
+            error = _public_error(exc)
             return _rpc_result(
                 request_id,
                 {
@@ -331,12 +550,17 @@ def run_mcp(memory: MemoryAdapter) -> int:
         if not raw_line.strip():
             continue
         try:
-            parsed = json.loads(raw_line)
+            parsed = strict_json_loads(raw_line)
             if not isinstance(parsed, Mapping):
                 raise ValueError("request must be a JSON object")
             response = server.handle(parsed)
-        except (json.JSONDecodeError, ValueError) as exc:
-            response = _rpc_error(None, -32700, f"invalid JSON: {exc}")
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            RecursionError,
+            ValueError,
+        ):
+            response = _rpc_error(None, -32700, "invalid JSON request")
         if response is not None:
             _write_response(response)
     return 0
@@ -362,9 +586,19 @@ def run_rpc(memory: MemoryAdapter) -> int:
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds size limit")
-    request = json.loads(raw)
+    try:
+        request = strict_json_loads(raw)
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        RecursionError,
+        ValueError,
+    ) as exc:
+        raise ValueError("invalid JSON request") from exc
     if not isinstance(request, Mapping):
         raise ValueError("request must be a JSON object")
+    if set(request) - {"action", "arguments"}:
+        raise ValueError("request contains unexpected fields")
     action = request.get("action")
     arguments = request.get("arguments", {})
     result = dispatch(memory, action, arguments)  # type: ignore[arg-type]
@@ -380,6 +614,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument(
         "--profile", default=os.environ.get("ECHO_VEIL_PROFILE", "default")
+    )
+    parser.add_argument(
+        "--scope",
+        default=os.environ.get("ECHO_VEIL_SCOPE", "local-user"),
+        help="authorization scope bound to this encrypted profile",
     )
     parser.add_argument("--capacity", type=int, default=_capacity_from_env())
     parser.add_argument(
@@ -413,6 +652,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--profile-lock-timeout",
+        type=float,
+        default=_float_from_env(
+            "ECHO_VEIL_PROFILE_LOCK_TIMEOUT",
+            DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS,
+        ),
+        help="seconds to wait for another writer using the same profile",
+    )
+    parser.add_argument(
         "--availability-layer",
         action=argparse.BooleanOptionalAction,
         default=_bool_from_env("ECHO_VEIL_AVAILABILITY_LAYER", True),
@@ -430,19 +678,36 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             embedder = _build_embedder(args)
-            memory: MemoryAdapter = AgentMemory(
+            primary: BaseMemoryAdapter = AgentMemory(
                 args.state_dir,
                 profile=args.profile,
+                scope=args.scope,
                 capacity=args.capacity,
                 embed=embedder,
+                profile_lock_timeout_seconds=args.profile_lock_timeout,
             )
         except EmbeddingUnavailable:
             if args.embedder != "ollama" or not args.availability_layer:
                 raise
-            memory = AlwaysAvailableMemory(
+            primary = AlwaysAvailableMemory(
                 args.state_dir,
                 profile=args.profile,
+                scope=args.scope,
             )
+        memory: MemoryAdapter = (
+            _RuntimeAvailabilityMemory(
+                primary,
+                args.state_dir,
+                args.profile,
+                args.scope,
+            )
+            if (
+                isinstance(primary, AgentMemory)
+                and args.embedder == "ollama"
+                and args.availability_layer
+            )
+            else primary
+        )
         with memory:
             if args.mode == "mcp":
                 return run_mcp(memory)
@@ -453,9 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     except (BrokenPipeError, KeyboardInterrupt):
         return 0
     except Exception as exc:
-        print(
-            _json({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr
-        )
+        print(_json(_public_error(exc)), file=sys.stderr)
         return 1
 
 
@@ -529,6 +792,35 @@ def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
         "id": request_id,
         "error": {"code": code, "message": message},
     }
+
+
+def _valid_request_id(value: Any, *, present: bool) -> bool:
+    if not present:
+        return True
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, str):
+        return 0 < len(value) <= 128
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _public_error(exc: Exception) -> dict[str, str]:
+    allowed = isinstance(exc, (TypeError, ValueError, RuntimeError))
+    message = str(exc).strip() if allowed else ""
+    message = _ABSOLUTE_PATH.sub("<redacted-path>", message)
+    message = _EMAIL.sub("<redacted-email>", message)
+    message = _SECRET_ASSIGNMENT.sub(r"\1=<redacted>", message)
+    message = _BEARER_TOKEN.sub("Bearer <redacted>", message)
+    if (
+        not message
+        or len(message) > MAX_PUBLIC_ERROR_CHARS
+        or any(
+            (ord(character) < 32 and character not in "\t") or ord(character) == 127
+            for character in message
+        )
+    ):
+        message = "Echo Veil operation failed safely"
+    return {"error": type(exc).__name__, "message": message}
 
 
 def _write_response(response: Mapping[str, Any]) -> None:

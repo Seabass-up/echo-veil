@@ -30,6 +30,18 @@ function validConfigValue(value: unknown, maximum = MAX_CONFIG_VALUE_BYTES): val
   );
 }
 
+export function validOriginToken(value: unknown): value is string {
+  if (!validConfigValue(value)) return false;
+  const encoded = new TextEncoder().encode(value);
+  return (
+    encoded.byteLength >= 32 &&
+    [...value].every((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code >= 33 && code <= 126;
+    })
+  );
+}
+
 function hasExactKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
@@ -215,7 +227,7 @@ export default {
         return jsonError(403, "Cloudflare Access validation failed", requestId);
       }
       const origin = validatedOrigin(env.ENCLAVE_ORIGIN);
-      if (!origin || !validConfigValue(env.ENCLAVE_ORIGIN_TOKEN)) {
+      if (!origin || !validOriginToken(env.ENCLAVE_ORIGIN_TOKEN)) {
         logFailure(requestId, url.pathname, "invalid_origin_configuration");
         return jsonError(500, "invalid enclave origin configuration", requestId);
       }
@@ -226,6 +238,7 @@ export default {
           new URL("/healthz", origin).toString(),
           {
             method: "GET",
+            redirect: "manual",
             headers: {
               "Authorization": `Bearer ${env.ENCLAVE_ORIGIN_TOKEN}`,
               "Accept": "application/json",
@@ -300,7 +313,7 @@ export default {
     }
 
     const origin = validatedOrigin(env.ENCLAVE_ORIGIN);
-    if (!origin || !validConfigValue(env.ENCLAVE_ORIGIN_TOKEN)) {
+    if (!origin || !validOriginToken(env.ENCLAVE_ORIGIN_TOKEN)) {
       logFailure(requestId, url.pathname, "invalid_origin_configuration");
       return jsonError(500, "invalid enclave origin configuration", requestId);
     }
@@ -311,6 +324,7 @@ export default {
     try {
       upstream = await env.ENCLAVE_MTLS.fetch(target.toString(), {
         method: "POST",
+        redirect: "manual",
         headers: {
           "Authorization": `Bearer ${env.ENCLAVE_ORIGIN_TOKEN}`,
           "Content-Type": "application/json",
@@ -391,7 +405,12 @@ export function validatedOrigin(value: string): URL | null {
 
 export function validatedTeamDomain(value: string): URL | null {
   const teamDomain = validatedOrigin(value);
-  if (!teamDomain || !teamDomain.hostname.endsWith(".cloudflareaccess.com")) {
+  if (
+    !teamDomain ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/i.test(
+      teamDomain.hostname,
+    )
+  ) {
     return null;
   }
   return teamDomain;

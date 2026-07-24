@@ -52,9 +52,12 @@ Implemented and tested:
   DriftDetector operations.
 - Automatic return-to-topic scoring and reinforcement for twilight vines.
 - A concrete local `AgentMemory` host adapter with caller-selected embeddings,
-  AES-GCM protected anchors, encrypted payload storage, exact-write
-  deduplication, confidence-gated active/cold recall, ambiguity telemetry, and
-  a read-only keyed availability floor for local embedding outages.
+  record/scope/schema/key-bound AES-GCM protected anchors, payloads, topics, and
+  retrieval vectors; keyed minimal lexical metadata; exact-write
+  deduplication; authenticated tombstones; startup reconciliation; resumable
+  key rotation; record quarantine; confidence-gated active/cold recall;
+  ambiguity telemetry; and a read-only keyed availability floor for local
+  embedding outages.
 - A bounded stdio MCP server for Codex, Claude Code, Hermes, OpenCode, Droid,
   and Goose, plus native OpenClaw and Pi packages. Every full adapter shares the
   same `AgentMemory` policy instead of reimplementing lifecycle rules per host.
@@ -108,12 +111,12 @@ Deployment-provided:
    `cycles_since_twilight` parameter, but it is no longer required for correct
    eviction behavior — the internal counter is the default.
 
-4. **The bundled host embedder favors portability over semantic quality.**
-   `HashingTextEmbedder` hashes token and adjacent-token features into a stable
-   384-dimensional vector. It requires no model download or network call and is
-   suitable for smoke tests and modest keyword-oriented local recall. It is not
-   evidence of semantic recall quality; production hosts should inject and
-   benchmark a reviewed embedding model.
+4. **The core has no implicit embedding dependency.** `HashingTextEmbedder`
+   remains a deterministic offline test fixture and keyword-oriented fallback;
+   it is not evidence of semantic quality. Bundled full adapters explicitly use
+   loopback-only Qwen3 embeddings, pin their identity inside each profile, and
+   must benchmark the real corpus. Caller-supplied embedders are separate trust
+   boundaries and may receive plaintext.
 
 ## 3. Deviations from the spec
 
@@ -167,7 +170,9 @@ Deployment-provided:
   memory slot or context engine. This prevents duplicate automatic recall with
   `memory-core`, Active Memory, or Lossless Claw. A future automatic hook must
   define precedence, tenant boundaries, latency budgets, and deduplication
-  before activation. Do not run two processes against one profile concurrently.
+  before activation. Writable adapter processes hold a profile-wide SQLite
+  lease for their lifetime; concurrent callers wait only for the configured
+  bounded timeout and then fail closed.
 - **The local availability layer is degraded recall, not a crypto or semantic
   fallback.** It opens only an existing owner-protected payload database in
   SQLite read-only mode, uses subject-masked keyed term overlap, and returns a
@@ -177,6 +182,14 @@ Deployment-provided:
   threshold, perform inferential recall, or mutate lifecycle state. Only local
   Ollama service/model unavailability activates it; integrity, identity, key,
   schema, and malformed-response failures remain hard stops.
+- **Local scoped-v2 metadata is minimized, not invisible.** Payloads, topics,
+  lifecycle anchors, and retrieval vectors are encrypted; lexical terms and
+  topics are keyed opaque values. Record IDs, random scope IDs, key IDs,
+  schema/dimension data, timestamps, supersession shape, counts, sizes, and
+  access patterns remain visible. Plaintext exists in the authorized process
+  and loopback embedding service. Logs, model context, host stores, swap,
+  snapshots, backups, and physical media are outside this adapter's protection
+  unless separately controlled.
 
 ## 5. Crypto shield: trust boundary
 
@@ -235,12 +248,18 @@ small multi-process deployment:
   the Oracle leaves affected vines pending for retry.
 - WAL mode, `synchronous=FULL`, a busy timeout, and SQLite locking provide crash
   recovery and cross-process writer serialization.
+- The executable adapter adds a profile-wide writer lease before loading L1 and
+  reconciles lifecycle/payload ID sets at startup. Interrupted lifecycle-first
+  remembers are removed safely; unexplained encrypted payload orphans are
+  preserved and block startup for operator review.
 - `Oracle.forget()` uses one `BEGIN IMMEDIATE` transaction to remove matching
   active, index, archive, ANN, and eviction-metadata records. Failures roll back
   before a live Vine is released, allowing the caller to retry.
 - Database files are created with owner-only permissions, versioned with
-  `PRAGMA user_version`, and checked with `PRAGMA quick_check` on open by
-  default. Unknown future schema versions fail closed.
+  `PRAGMA user_version`, and checked with `PRAGMA quick_check` and
+  `foreign_key_check` on open by default. Expected tables, indexes, columns,
+  and foreign-key definitions are validated so injected triggers or altered
+  indexes fail closed. Unknown future schema versions fail closed.
 - Built-in AES and enclave payloads are reconstructed through the algorithm-aware
   protected payload loader. Custom shields may supply a compatible loader.
 - The SQLite index reports `search_strategy="lsh-ann"`. Eight indexed bands of

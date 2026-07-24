@@ -38,6 +38,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from ._json import require_exact_keys, strict_json_loads
 from .vectors import Vector, as_vector, cosine_similarity
 
 AES_256_KEY_BYTES = 32
@@ -50,9 +51,23 @@ DEFAULT_KEY_ENV = "ECHO_VEIL_CRYPTO_KEY"
 
 def _decode_urlsafe_base64(value: str, field_name: str) -> bytes:
     try:
-        return base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
+        encoded = value.encode("ascii")
+        decoded = base64.b64decode(encoded, altchars=b"-_", validate=True)
     except Exception as exc:
         raise ValueError(f"{field_name} is not valid base64") from exc
+    if not hmac.compare_digest(base64.urlsafe_b64encode(decoded), encoded):
+        raise ValueError(f"{field_name} is not canonical URL-safe base64")
+    return decoded
+
+
+def _is_bounded_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 512
+        and value == value.strip()
+        and value.isprintable()
+        and not any(character.isspace() for character in value)
+    )
 
 
 @dataclass(frozen=True)
@@ -169,10 +184,15 @@ class ProtectedVector:
         if len(payload) > MAX_PROTECTED_VECTOR_JSON_BYTES:
             raise ValueError("Invalid protected vector JSON: payload is too large")
         try:
-            decoded = json.loads(payload.decode("utf-8"))
+            decoded = strict_json_loads(payload)
         except Exception as exc:
             raise ValueError("Invalid protected vector JSON") from exc
         if not isinstance(decoded, dict):
+            raise ValueError("Invalid protected vector JSON")
+        if set(decoded) not in (
+            {"algorithm", "nonce_b64", "ciphertext_b64", "shape"},
+            {"algorithm", "nonce_b64", "ciphertext_b64", "shape", "dtype"},
+        ):
             raise ValueError("Invalid protected vector JSON")
         return cls.from_dict(decoded)
 
@@ -192,9 +212,17 @@ class VerifiedEnclave:
     transport_public_key: bytes
 
     def __post_init__(self) -> None:
-        if not self.provider_id or not self.measurement or not self.key_id:
+        if not all(
+            _is_bounded_identifier(value)
+            for value in (self.provider_id, self.measurement, self.key_id)
+        ):
             raise ValueError("verified enclave identifiers must be non-empty")
-        if not math.isfinite(self.expires_at) or self.expires_at <= 0.0:
+        if (
+            isinstance(self.expires_at, bool)
+            or not isinstance(self.expires_at, (int, float))
+            or not math.isfinite(float(self.expires_at))
+            or float(self.expires_at) <= 0.0
+        ):
             raise ValueError("verified enclave expiry must be finite")
         if (
             isinstance(self.ckks_security_bits, bool)
@@ -229,12 +257,25 @@ class EnclaveProtectedVector:
     algorithm: str = "CKKS"
 
     def __post_init__(self) -> None:
-        if not self.provider_id or not self.key_id:
+        if not _is_bounded_identifier(self.provider_id) or not _is_bounded_identifier(
+            self.key_id
+        ):
             raise ValueError("enclave provider_id and key_id must be non-empty")
-        if not isinstance(self.ciphertext, bytes) or not self.ciphertext:
+        if (
+            not isinstance(self.ciphertext, bytes)
+            or not 0 < len(self.ciphertext) <= MAX_PROTECTED_VECTOR_JSON_BYTES
+        ):
             raise ValueError("enclave ciphertext must be non-empty bytes")
-        if len(self.shape) != 1 or self.shape[0] <= 0:
+        if (
+            not isinstance(self.shape, tuple)
+            or len(self.shape) != 1
+            or isinstance(self.shape[0], bool)
+            or not isinstance(self.shape[0], int)
+            or not 0 < self.shape[0] <= MAX_VECTOR_ELEMENTS
+        ):
             raise ValueError("enclave protected vector must have a positive 1-D shape")
+        if self.algorithm != "CKKS":
+            raise ValueError("enclave protected vector algorithm must be CKKS")
 
     def to_json_bytes(self) -> bytes:
         return json.dumps(
@@ -253,20 +294,41 @@ class EnclaveProtectedVector:
 
     @classmethod
     def from_json_bytes(cls, payload: bytes) -> EnclaveProtectedVector:
+        if (
+            not isinstance(payload, bytes)
+            or len(payload) > MAX_PROTECTED_VECTOR_JSON_BYTES
+        ):
+            raise ValueError("Invalid enclave protected vector JSON")
         try:
-            value = json.loads(payload.decode("utf-8"))
+            value = strict_json_loads(payload)
             if not isinstance(value, dict) or value.get("algorithm") != "CKKS":
                 raise ValueError
+            require_exact_keys(
+                value,
+                {"algorithm", "provider_id", "key_id", "ciphertext_b64", "shape"},
+            )
             shape = value["shape"]
-            if not isinstance(shape, list) or len(shape) != 1:
+            provider_id = value["provider_id"]
+            key_id = value["key_id"]
+            ciphertext = value["ciphertext_b64"]
+            if (
+                not isinstance(shape, list)
+                or len(shape) != 1
+                or isinstance(shape[0], bool)
+                or not isinstance(shape[0], int)
+                or not 0 < shape[0] <= MAX_VECTOR_ELEMENTS
+                or not isinstance(provider_id, str)
+                or not 0 < len(provider_id) <= 512
+                or not isinstance(key_id, str)
+                or not 0 < len(key_id) <= 512
+                or not isinstance(ciphertext, str)
+            ):
                 raise ValueError
             return cls(
-                provider_id=str(value["provider_id"]),
-                key_id=str(value["key_id"]),
-                ciphertext=_decode_urlsafe_base64(
-                    str(value["ciphertext_b64"]), "ciphertext_b64"
-                ),
-                shape=(int(shape[0]),),
+                provider_id=provider_id,
+                key_id=key_id,
+                ciphertext=_decode_urlsafe_base64(ciphertext, "ciphertext_b64"),
+                shape=(shape[0],),
             )
         except Exception as exc:
             raise ValueError("Invalid enclave protected vector JSON") from exc
@@ -328,59 +390,129 @@ class Ed25519AttestationVerifier:
         if not isinstance(public_key, Ed25519PublicKey):
             raise TypeError("public_key must be an Ed25519PublicKey")
         measurements = frozenset(allowed_measurements)
-        if not measurements or not all(
-            isinstance(value, str) and value for value in measurements
+        if (
+            not measurements
+            or len(measurements) > 1_000
+            or not all(_is_bounded_identifier(value) for value in measurements)
         ):
-            raise ValueError("allowed_measurements must contain non-empty strings")
-        if maximum_lifetime_seconds <= 0:
-            raise ValueError("maximum_lifetime_seconds must be positive")
+            raise ValueError(
+                "allowed_measurements must contain 1..1000 bounded strings"
+            )
+        if (
+            isinstance(maximum_lifetime_seconds, bool)
+            or not isinstance(maximum_lifetime_seconds, (int, float))
+            or not math.isfinite(float(maximum_lifetime_seconds))
+            or not 0.0 < float(maximum_lifetime_seconds) <= 600.0
+        ):
+            raise ValueError("maximum_lifetime_seconds must be within (0, 600]")
         self._public_key = public_key
         self._measurements = measurements
         self._maximum_lifetime = float(maximum_lifetime_seconds)
 
     def verify(self, evidence: bytes, nonce: bytes) -> VerifiedEnclave:
         try:
-            envelope = json.loads(evidence.decode("utf-8"))
+            if not isinstance(evidence, bytes) or not 0 < len(evidence) <= 65_536:
+                raise ValueError
+            if not isinstance(nonce, bytes) or not 16 <= len(nonce) <= 256:
+                raise ValueError
+            envelope = strict_json_loads(evidence)
             if not isinstance(envelope, dict):
                 raise ValueError
-            payload = _decode_urlsafe_base64(
-                str(envelope["payload_b64"]), "payload_b64"
-            )
-            signature = _decode_urlsafe_base64(
-                str(envelope["signature_b64"]), "signature_b64"
-            )
+            require_exact_keys(envelope, {"payload_b64", "signature_b64"})
+            encoded_payload = envelope["payload_b64"]
+            encoded_signature = envelope["signature_b64"]
+            if not isinstance(encoded_payload, str) or not isinstance(
+                encoded_signature, str
+            ):
+                raise ValueError
+            payload = _decode_urlsafe_base64(encoded_payload, "payload_b64")
+            signature = _decode_urlsafe_base64(encoded_signature, "signature_b64")
             self._public_key.verify(signature, payload)
-            claims = json.loads(payload.decode("utf-8"))
+            claims = strict_json_loads(payload)
             if not isinstance(claims, dict):
                 raise ValueError
-            bound_nonce = _decode_urlsafe_base64(str(claims["nonce_b64"]), "nonce_b64")
+            require_exact_keys(
+                claims,
+                {
+                    "attestation_authority",
+                    "ckks_security_bits",
+                    "expires_at",
+                    "hardware_isolation",
+                    "homomorphic_similarity",
+                    "issued_at",
+                    "key_id",
+                    "measurement",
+                    "nonce_b64",
+                    "platform",
+                    "provider_id",
+                    "region",
+                    "transport_public_key_b64",
+                    "zkp_access_gate",
+                },
+            )
+            encoded_nonce = claims["nonce_b64"]
+            encoded_transport_key = claims["transport_public_key_b64"]
+            if not isinstance(encoded_nonce, str) or not isinstance(
+                encoded_transport_key, str
+            ):
+                raise ValueError
+            bound_nonce = _decode_urlsafe_base64(encoded_nonce, "nonce_b64")
         except Exception as exc:
             raise ValueError(
                 "attestation evidence signature or format is invalid"
             ) from exc
         if not hmac.compare_digest(bound_nonce, nonce):
             raise ValueError("attestation evidence is not bound to this nonce")
-        measurement = str(claims.get("measurement", ""))
+        if (
+            claims.get("attestation_authority") != "azure-key-vault-secure-key-release"
+            or claims.get("platform") != "azure-amd-sev-snp-confidential-vm"
+            or claims.get("hardware_isolation") is not True
+            or claims.get("zkp_access_gate") is not True
+            or claims.get("homomorphic_similarity") is not True
+        ):
+            raise ValueError("attestation evidence capability claims are invalid")
+        measurement_value = claims.get("measurement")
+        provider_value = claims.get("provider_id")
+        key_value = claims.get("key_id")
+        region_value = claims.get("region")
+        if not all(
+            _is_bounded_identifier(value)
+            for value in (measurement_value, provider_value, key_value, region_value)
+        ):
+            raise ValueError("attestation evidence identifiers are invalid")
+        measurement = str(measurement_value)
         if measurement not in self._measurements:
             raise ValueError("attestation measurement is not approved")
-        issued_at = float(claims.get("issued_at", 0.0))
-        expires_at = float(claims.get("expires_at", 0.0))
+        issued_value = claims.get("issued_at")
+        expires_value = claims.get("expires_at")
+        bits_value = claims.get("ckks_security_bits")
+        if (
+            isinstance(issued_value, bool)
+            or not isinstance(issued_value, (int, float))
+            or isinstance(expires_value, bool)
+            or not isinstance(expires_value, (int, float))
+            or isinstance(bits_value, bool)
+            or not isinstance(bits_value, int)
+        ):
+            raise ValueError("attestation evidence numeric claims are invalid")
+        issued_at = float(issued_value)
+        expires_at = float(expires_value)
         current = time.time()
         if issued_at > current + 30.0 or expires_at <= current:
             raise ValueError("attestation evidence is not currently valid")
         if expires_at - issued_at > self._maximum_lifetime:
             raise ValueError("attestation evidence lifetime exceeds policy")
         return VerifiedEnclave(
-            provider_id=str(claims.get("provider_id", "")),
+            provider_id=str(provider_value),
             measurement=measurement,
-            key_id=str(claims.get("key_id", "")),
+            key_id=str(key_value),
             expires_at=expires_at,
-            ckks_security_bits=int(claims.get("ckks_security_bits", 0)),
-            hardware_isolation=claims.get("hardware_isolation") is True,
-            zkp_access_gate=claims.get("zkp_access_gate") is True,
-            homomorphic_similarity=claims.get("homomorphic_similarity") is True,
+            ckks_security_bits=bits_value,
+            hardware_isolation=True,
+            zkp_access_gate=True,
+            homomorphic_similarity=True,
             transport_public_key=_decode_urlsafe_base64(
-                str(claims.get("transport_public_key_b64", "")),
+                encoded_transport_key,
                 "transport_public_key_b64",
             ),
         )
@@ -389,7 +521,7 @@ class Ed25519AttestationVerifier:
 def load_protected_vector(payload: bytes) -> ProtectedVector | EnclaveProtectedVector:
     """Deserialize a built-in protected payload without exposing plaintext."""
     try:
-        value = json.loads(payload.decode("utf-8"))
+        value = strict_json_loads(payload)
     except Exception as exc:
         raise ValueError("Invalid protected vector JSON") from exc
     if not isinstance(value, dict):
@@ -791,7 +923,7 @@ class EnclaveCryptoShield:
             raise ValueError("minimum_security_bits must be at least 128")
         nonce = os.urandom(32)
         evidence = provider.attest(nonce)
-        if not isinstance(evidence, bytes) or not evidence:
+        if not isinstance(evidence, bytes) or not 0 < len(evidence) <= 65_536:
             raise RuntimeError("enclave provider returned invalid attestation evidence")
         verified = verifier.verify(evidence, nonce)
         if not isinstance(verified, VerifiedEnclave):
@@ -811,11 +943,17 @@ class EnclaveCryptoShield:
             )
         provider.bind_attestation(verified)
         challenge = provider.access_challenge()
+        if not isinstance(challenge, bytes) or not 32 <= len(challenge) <= 256:
+            raise RuntimeError("enclave provider returned an invalid ZKP challenge")
         proof = proof_provider.prove(challenge, verified)
-        if not isinstance(proof, bytes) or not proof:
+        if not isinstance(proof, bytes) or not 0 < len(proof) <= 4_096:
             raise RuntimeError("ZKP proof provider returned an invalid proof")
         session = provider.open_session(proof)
-        if not isinstance(session, str) or not session:
+        if (
+            not isinstance(session, str)
+            or not 0 < len(session) <= 4_096
+            or any(not 33 <= ord(character) <= 126 for character in session)
+        ):
             raise RuntimeError("enclave provider rejected the ZKP proof")
         self._provider = provider
         self._verified = verified

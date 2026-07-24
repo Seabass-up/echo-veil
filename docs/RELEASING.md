@@ -79,12 +79,21 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    Droid, and Pi should be smoke-tested in isolated temporary host profiles so
    release checks never mutate an operator's personal agent configuration.
 
+   For a release that promotes an application integration to a protected
+   default, also satisfy the hard gate in
+   [`LOCAL_AGENT_SECURITY.md`](LOCAL_AGENT_SECURITY.md). In particular, run its
+   black-box ordinary-write → disk-confidentiality → fresh-process-restart →
+   authorized-scope-recall test in the actual installed host runtime. A sibling
+   checkout, editable import, source/distribution version mismatch, missing
+   backup/restore exercise, or missing independent security review blocks that
+   promotion even when repository unit tests are green.
+
 5. Merge only after required checks and independent review pass.
 6. Create and push an annotated tag from the protected release commit:
 
    ```bash
-   git tag -a v0.5.0 -m "Echo Veil v0.5.0"
-   git push origin v0.5.0
+   git tag -a v0.6.0 -m "Echo Veil v0.6.0"
+   git push origin v0.6.0
    ```
 
 7. Manually run the `Release` workflow with that exact tag.
@@ -104,6 +113,6 @@ sha256sum --check SHA256SUMS
 For a public repository, verify GitHub provenance with the GitHub CLI:
 
 ```bash
-gh attestation verify echo_veil-0.5.0-py3-none-any.whl \
+gh attestation verify echo_veil-0.6.0-py3-none-any.whl \
   --repo Seabass-up/echo-veil
 ```

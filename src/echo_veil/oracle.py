@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import zlib
+from collections.abc import Callable
 from numbers import Real
 from threading import RLock
 from typing import cast
@@ -125,6 +126,7 @@ class Oracle:
             )
         if normalized_environment == "staging" and not (
             isinstance(shield, AesGcmCryptoShield)
+            or getattr(shield, "staging_ready", False) is True
             or (shield is not None and is_production_crypto_shield(shield))
         ):
             raise RuntimeError(
@@ -175,13 +177,28 @@ class Oracle:
             ):
                 raise RuntimeError("persisted L1 and L2 dimensions disagree")
 
-    def sprout(self, topic: str, anchor: Vector) -> Vine:
+    def sprout(
+        self,
+        topic: str,
+        anchor: Vector,
+        *,
+        vine_id: str | None = None,
+    ) -> Vine:
         with self._lock:
-            vine = Vine(topic=topic, anchor=anchor)
+            vine = (
+                Vine(topic=topic, anchor=anchor)
+                if vine_id is None
+                else Vine(topic=topic, anchor=anchor, vine_id=vine_id)
+            )
             dimension = vine.anchor.size
             self._validate_dimension(vine.anchor, establish=False)
             if not isinstance(self.shield, NullCryptoShield):
-                protected_anchor = self.shield.protect(vine.anchor)
+                contextual_protect = getattr(self.shield, "protect_for_record", None)
+                protected_anchor = (
+                    contextual_protect(vine.anchor, vine.vine_id)
+                    if callable(contextual_protect)
+                    else self.shield.protect(vine.anchor)
+                )
                 if not is_serializable_protected_payload(protected_anchor):
                     raise TypeError(
                         "CryptoShield.protect() must return a payload with "
@@ -202,6 +219,42 @@ class Oracle:
             return
         vines, cycles, crests = self.workspace.persistence_snapshot()
         saver(vines, cycles, crests)
+
+    def rewrap_active_protected_anchors(
+        self,
+        source_key_id: str,
+        transform: Callable[[object], object],
+    ) -> int:
+        """Re-encrypt matching active anchors under the Oracle mutation lock."""
+
+        if not isinstance(source_key_id, str) or not source_key_id.strip():
+            raise ValueError("source_key_id must be a non-empty string")
+        if not callable(transform):
+            raise TypeError("protected-anchor transform must be callable")
+        changed = 0
+        with self._lock:
+            for vine in self.workspace.vines:
+                protected = vine.protected_anchor
+                if (
+                    protected is None
+                    or getattr(protected, "key_id", None) != source_key_id
+                ):
+                    continue
+                replacement = transform(protected)
+                if not is_serializable_protected_payload(replacement):
+                    raise TypeError(
+                        "protected-anchor transform returned an invalid payload"
+                    )
+                record_id = getattr(replacement, "record_id", None)
+                if record_id is not None and record_id != vine.vine_id:
+                    raise RuntimeError(
+                        "rotated protected anchor record binding is invalid"
+                    )
+                vine.protected_anchor = replacement
+                changed += 1
+            if changed:
+                self._persist_workspace()
+        return changed
 
     def _score_vine(self, intent: Vector, vine: Vine, now: float) -> float:
         if vine.protected_anchor is not None:

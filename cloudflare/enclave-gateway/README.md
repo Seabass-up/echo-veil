@@ -32,7 +32,8 @@ checked into `worker-configuration.d.ts` so binding drift fails CI.
 
 The Worker streams request and response bodies through hard byte limits,
 applies a deadline to origin calls, validates endpoint-specific JSON response
-shapes, rejects unexpected query strings and team domains, and returns
+shapes, handles origin redirects manually, rejects unexpected query strings,
+non-canonical team domains, and malformed origin secrets, and returns
 sanitized errors with no upstream body content. Every response carries a fresh
 `X-Request-ID`; structured failure logs contain only that ID, the bounded route,
 and a fixed reason code. Invocation logs and sampled traces are enabled in the

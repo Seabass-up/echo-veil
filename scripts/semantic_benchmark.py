@@ -100,8 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     results: list[dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory(prefix="echo-veil-semantic-") as directory:
+        state_dir = Path(directory).resolve(strict=True)
         with AgentMemory(
-            Path(directory),
+            state_dir,
             profile="benchmark",
             capacity=20,
             embed=embedder,

@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     env, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -12,7 +13,12 @@ use echo_veil_zkp::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+const MAX_STDIN_BYTES: u64 = 16 * 1024;
+const MAX_KEY_FILE_BYTES: u64 = 512;
+const MAX_ALLOWLIST_FILE_BYTES: u64 = 128 * 1024;
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProveInput {
     challenge_b64: String,
     provider_id: String,
@@ -21,6 +27,7 @@ struct ProveInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VerifyInput {
     proof_b64: String,
     provider_id: String,
@@ -55,72 +62,146 @@ fn context(provider_id: String, measurement: String, key_id: String) -> ProofCon
 }
 
 fn read_stdin<T: serde::de::DeserializeOwned>() -> Result<T, String> {
+    read_json(io::stdin(), MAX_STDIN_BYTES)
+}
+
+fn read_json<T: serde::de::DeserializeOwned, R: Read>(
+    reader: R,
+    maximum: u64,
+) -> Result<T, String> {
     let mut raw = Vec::new();
-    io::stdin()
-        .take(16 * 1024)
+    reader
+        .take(maximum + 1)
         .read_to_end(&mut raw)
         .map_err(|error| error.to_string())?;
+    if raw.len() as u64 > maximum {
+        return Err("input exceeds the safety limit".into());
+    }
     serde_json::from_slice(&raw).map_err(|_| "invalid input JSON".into())
 }
 
+fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|_| format!("{label} path is unavailable"))?
+            .join(path)
+    };
+    for component in absolute.ancestors() {
+        match fs::symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("{label} path must not contain symbolic links"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(format!("{label} path is unavailable")),
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, String> {
+    reject_symlink_components(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unreadable"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > maximum {
+        return Err(format!("{label} is not a bounded regular file"));
+    }
+    let mut raw = Vec::new();
+    fs::File::open(path)
+        .map_err(|_| format!("{label} is unreadable"))?
+        .take(maximum + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| format!("{label} is unreadable"))?;
+    if raw.len() as u64 > maximum {
+        return Err(format!("{label} exceeds the safety limit"));
+    }
+    Ok(raw)
+}
+
+fn read_secret_key(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| "key file is unreadable".to_string())?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("key file must be owner-only".into());
+        }
+    }
+    read_bounded_file(path, MAX_KEY_FILE_BYTES, "key file")
+}
+
 fn key_file(args: &[String]) -> Result<PathBuf, String> {
-    let position = args
-        .iter()
-        .position(|value| value == "--key-file")
-        .ok_or_else(|| "--key-file is required".to_string())?;
-    args.get(position + 1)
+    if args.len() != 3 || args.get(1).map(String::as_str) != Some("--key-file") {
+        return Err("exactly --key-file <path> is required".into());
+    }
+    args.get(2)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| "--key-file requires a path".into())
 }
 
 fn public_keys_file(args: &[String]) -> Result<PathBuf, String> {
-    let position = args
-        .iter()
-        .position(|value| value == "--public-keys-file")
-        .ok_or_else(|| "--public-keys-file is required".to_string())?;
-    args.get(position + 1)
+    if args.len() != 3 || args.get(1).map(String::as_str) != Some("--public-keys-file") {
+        return Err("exactly --public-keys-file <path> is required".into());
+    }
+    args.get(2)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| "--public-keys-file requires a path".into())
 }
 
 fn load_allowed(path: &Path) -> Result<Vec<[u8; 32]>, String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let values: Vec<String> = serde_json::from_str(&raw)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|_| "public key allowlist is unreadable".to_string())?;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err("public key allowlist must not be group/world writable".into());
+        }
+    }
+    let raw = read_bounded_file(path, MAX_ALLOWLIST_FILE_BYTES, "public key allowlist")?;
+    let values: Vec<String> = serde_json::from_slice(&raw)
         .map_err(|_| "public key file must be a JSON string array".to_string())?;
     if values.is_empty() || values.len() > 1000 {
         return Err("public key allowlist must contain 1..1000 keys".into());
     }
-    values
+    let decoded = values
         .iter()
         .map(|value| {
             let decoded = URL_SAFE
                 .decode(value)
                 .map_err(|_| "invalid allowlisted public key".to_string())?;
+            if URL_SAFE.encode(&decoded) != *value {
+                return Err("invalid allowlisted public key".into());
+            }
             decoded
                 .try_into()
                 .map_err(|_| "invalid allowlisted public key length".into())
         })
-        .collect()
+        .collect::<Result<Vec<[u8; 32]>, String>>()?;
+    let unique = decoded.iter().copied().collect::<HashSet<_>>();
+    if unique.len() != decoded.len() {
+        return Err("public key allowlist must not contain duplicates".into());
+    }
+    Ok(decoded)
 }
 
 fn write_private_key(path: &Path, value: &[u8]) -> Result<(), String> {
-    if path.exists() {
-        return Err("refusing to overwrite existing key file".into());
-    }
+    reject_symlink_components(path, "key file")?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|error| error.to_string())?;
-        file.write_all(value).map_err(|error| error.to_string())?;
+        options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    fs::write(path, value).map_err(|error| error.to_string())?;
+    let mut file = options
+        .open(path)
+        .map_err(|_| "refusing to overwrite or create key file".to_string())?;
+    file.write_all(value).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -132,7 +213,7 @@ fn run() -> Result<(), String> {
             let path = key_file(&args)?;
             let mut secret = generate_secret().map_err(|error| error.to_string())?;
             let public = public_key(&secret).map_err(|error| error.to_string())?;
-            let encoded = URL_SAFE.encode(secret);
+            let encoded = zeroize::Zeroizing::new(URL_SAFE.encode(secret));
             write_private_key(&path, encoded.as_bytes())?;
             secret.zeroize();
             println!(
@@ -145,8 +226,8 @@ fn run() -> Result<(), String> {
         }
         "public-key" => {
             let path = key_file(&args)?;
-            let secret = decode_secret(&fs::read(path).map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
+            let secret =
+                decode_secret(&read_secret_key(&path)?).map_err(|error| error.to_string())?;
             let public = public_key(&secret).map_err(|error| error.to_string())?;
             println!(
                 "{}",
@@ -162,8 +243,11 @@ fn run() -> Result<(), String> {
             let challenge = URL_SAFE
                 .decode(&input.challenge_b64)
                 .map_err(|_| "invalid challenge_b64".to_string())?;
-            let secret = decode_secret(&fs::read(path).map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
+            if URL_SAFE.encode(&challenge) != input.challenge_b64 {
+                return Err("invalid challenge_b64".into());
+            }
+            let secret =
+                decode_secret(&read_secret_key(&path)?).map_err(|error| error.to_string())?;
             let public = public_key(&secret).map_err(|error| error.to_string())?;
             let proof = prove(
                 &secret,
@@ -187,6 +271,9 @@ fn run() -> Result<(), String> {
             let proof_bytes = URL_SAFE
                 .decode(&input.proof_b64)
                 .map_err(|_| "invalid proof_b64".to_string())?;
+            if URL_SAFE.encode(&proof_bytes) != input.proof_b64 {
+                return Err("invalid proof_b64".into());
+            }
             let proof = decode_proof(&proof_bytes).map_err(|error| error.to_string())?;
             let verified = verify(
                 &proof,
@@ -215,5 +302,33 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("echo-veil-zkp: {error}");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_json_rejects_truncated_or_unknown_input() {
+        let oversized = br#"{"challenge_b64":"value","provider_id":"p","measurement":"m","key_id":"k"} trailing"#;
+        assert!(read_json::<ProveInput, _>(&oversized[..], 16).is_err());
+
+        let unknown = br#"{"challenge_b64":"value","provider_id":"p","measurement":"m","key_id":"k","extra":true}"#;
+        assert!(read_json::<ProveInput, _>(&unknown[..], 1024).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_creation_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let linked = directory.path().join("linked");
+        symlink(&real, &linked).unwrap();
+
+        assert!(write_private_key(&linked.join("identity.key"), b"secret").is_err());
     }
 }

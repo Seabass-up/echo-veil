@@ -26,7 +26,7 @@ class _TestEnclaveProvider:
         return b"vendor-evidence:" + nonce
 
     def access_challenge(self) -> bytes:
-        return b"access-challenge"
+        return b"a" * 32
 
     def bind_attestation(self, enclave: VerifiedEnclave) -> None:
         self.enclave = enclave
@@ -66,7 +66,7 @@ class _TestVerifier:
 
 class _TestProofProvider:
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
-        assert challenge == b"access-challenge"
+        assert challenge == b"a" * 32
         assert enclave.measurement == "trusted-measurement"
         return b"valid-proof"
 
@@ -84,6 +84,21 @@ class _TestLocalCkksEngine:
     def cosine_similarity(self, normalized_intent, ciphertext: bytes) -> float:
         anchor = np.frombuffer(ciphertext, dtype=np.float64)
         return float(np.dot(np.asarray(normalized_intent), anchor))
+
+
+def test_verified_enclave_rejects_whitespace_identifiers() -> None:
+    with pytest.raises(ValueError, match="identifiers"):
+        VerifiedEnclave(
+            provider_id="provider\N{NO-BREAK SPACE}name",
+            measurement="measurement",
+            key_id="key",
+            expires_at=time.time() + 60,
+            ckks_security_bits=128,
+            hardware_isolation=True,
+            zkp_access_gate=True,
+            homomorphic_similarity=True,
+            transport_public_key=b"k" * 32,
+        )
 
 
 def test_aes_gcm_shield_encrypts_anchor_and_computes_similarity() -> None:
@@ -274,14 +289,30 @@ def test_enclave_crypto_shield_requires_verified_ckks_enclave_and_zkp() -> None:
     )
 
 
+def test_enclave_crypto_shield_rejects_short_zkp_challenge() -> None:
+    class ShortChallengeProvider(_TestEnclaveProvider):
+        def access_challenge(self) -> bytes:
+            return b"short"
+
+    with pytest.raises(RuntimeError, match="ZKP challenge"):
+        EnclaveCryptoShield(
+            ShortChallengeProvider(),
+            _TestVerifier(),
+            _TestProofProvider(),
+        )
+
+
 def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
     private_key = Ed25519PrivateKey.generate()
     nonce = b"n" * 32
     now = time.time()
     claims = json.dumps(
         {
+            "attestation_authority": "azure-key-vault-secure-key-release",
             "nonce_b64": base64.urlsafe_b64encode(nonce).decode(),
+            "platform": "azure-amd-sev-snp-confidential-vm",
             "provider_id": "provider",
+            "region": "northamerica",
             "measurement": "approved",
             "key_id": "key-1",
             "issued_at": now,

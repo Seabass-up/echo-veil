@@ -9,6 +9,7 @@ import json
 import math
 import os
 import secrets
+import stat
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -24,6 +25,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from ._json import require_exact_keys, strict_json_loads
 
 MAX_VECTOR_ELEMENTS = 16_384
 MAX_ENVELOPE_FIELD_BYTES = 20 * 1024 * 1024
@@ -61,10 +64,15 @@ def _decode_base64(value: object, field: str, *, maximum: int) -> bytes:
     if not isinstance(value, str) or not value:
         raise ProtocolError(f"invalid {field}")
     try:
-        decoded = base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
+        encoded = value.encode("ascii")
+        decoded = base64.b64decode(encoded, altchars=b"-_", validate=True)
     except Exception as exc:
         raise ProtocolError(f"invalid {field}") from exc
-    if not decoded or len(decoded) > maximum:
+    if (
+        not decoded
+        or len(decoded) > maximum
+        or not hmac.compare_digest(base64.urlsafe_b64encode(decoded), encoded)
+    ):
         raise ProtocolError(f"invalid {field}")
     return decoded
 
@@ -74,11 +82,7 @@ def _encode_base64(value: bytes) -> str:
 
 
 def _read_secret(path: Path, expected_bytes: int, label: str) -> bytes:
-    if not path.is_file():
-        raise RuntimeError(f"{label} file is missing")
-    if os.name == "posix" and path.stat().st_mode & 0o077:
-        raise RuntimeError(f"{label} file permissions must be 0600 or stricter")
-    raw = path.read_bytes().strip()
+    raw = _read_owner_only_file(path, maximum=512, label=label).strip()
     try:
         decoded = base64.b64decode(raw, altchars=b"-_", validate=True)
     except Exception as exc:
@@ -86,6 +90,38 @@ def _read_secret(path: Path, expected_bytes: int, label: str) -> bytes:
     if len(decoded) != expected_bytes:
         raise RuntimeError(f"{label} must decode to {expected_bytes} bytes")
     return decoded
+
+
+def _read_owner_only_file(path: Path, *, maximum: int, label: str) -> bytes:
+    candidate = path.expanduser().absolute()
+    if any(component.is_symlink() for component in (candidate, *candidate.parents)):
+        raise RuntimeError(f"{label} file path must not contain symbolic links")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise RuntimeError(f"{label} file is missing or unreadable") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f"{label} file must be regular")
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError(f"{label} file permissions must be 0600 or stricter")
+        if info.st_size > maximum:
+            raise RuntimeError(f"{label} file exceeds the safety limit")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(descriptor, min(4096, maximum + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise RuntimeError(f"{label} file exceeds the safety limit")
+    return bytes(raw)
 
 
 @dataclass(frozen=True)
@@ -109,7 +145,10 @@ class OriginConfig:
             if (
                 not isinstance(string_value, str)
                 or not string_value
+                or string_value != string_value.strip()
                 or len(string_value) > 512
+                or not string_value.isprintable()
+                or any(character.isspace() for character in string_value)
             ):
                 raise ValueError(f"{label} must be a non-empty bounded string")
         for label, duration_value in (
@@ -117,9 +156,18 @@ class OriginConfig:
             ("session_ttl_seconds", self.session_ttl_seconds),
             ("attestation_ttl_seconds", self.attestation_ttl_seconds),
         ):
-            if not math.isfinite(duration_value) or not 0.0 < duration_value <= 600.0:
+            if (
+                isinstance(duration_value, bool)
+                or not isinstance(duration_value, (int, float))
+                or not math.isfinite(float(duration_value))
+                or not 0.0 < float(duration_value) <= 600.0
+            ):
                 raise ValueError(f"{label} must be within (0, 600]")
-        if not 1 <= self.maximum_vector_elements <= MAX_VECTOR_ELEMENTS:
+        if (
+            isinstance(self.maximum_vector_elements, bool)
+            or not isinstance(self.maximum_vector_elements, int)
+            or not 1 <= self.maximum_vector_elements <= MAX_VECTOR_ELEMENTS
+        ):
             raise ValueError("maximum_vector_elements is outside the safety limit")
 
 
@@ -202,6 +250,17 @@ class EnclaveService:
     ) -> None:
         if ckks.key_id != config.key_id:
             raise RuntimeError("CKKS engine key ID does not match attestation config")
+        if attestation_signer._config != config:
+            raise RuntimeError(
+                "attestation signer config does not match enclave config"
+            )
+        expected_transport_key = self.transport_public_key(transport_key)
+        if not hmac.compare_digest(
+            attestation_signer._transport_public_key, expected_transport_key
+        ):
+            raise RuntimeError(
+                "attestation signer transport key does not match enclave transport key"
+            )
         self.config = config
         self._transport_key = transport_key
         self._attestation_signer = attestation_signer
@@ -226,6 +285,10 @@ class EnclaveService:
         )
 
     def attest(self, request: Mapping[str, object]) -> dict[str, str]:
+        try:
+            require_exact_keys(dict(request), {"nonce_b64"})
+        except ValueError as exc:
+            raise ProtocolError("invalid attestation request") from exc
         nonce = _decode_base64(request.get("nonce_b64"), "nonce_b64", maximum=256)
         return {"evidence_b64": _encode_base64(self._attestation_signer.issue(nonce))}
 
@@ -249,6 +312,13 @@ class EnclaveService:
             "/v1/vector/similarity",
         }:
             raise ProtocolError("unsupported enclave path")
+        try:
+            require_exact_keys(
+                dict(envelope),
+                {"ephemeral_public_key_b64", "nonce_b64", "ciphertext_b64"},
+            )
+        except ValueError as exc:
+            raise ProtocolError("invalid request envelope") from exc
         ephemeral_bytes = _decode_base64(
             envelope.get("ephemeral_public_key_b64"),
             "ephemeral_public_key_b64",
@@ -264,13 +334,6 @@ class EnclaveService:
             raise ProtocolError("invalid envelope key or nonce")
         now = time.time()
         replay_key = hashlib.sha256(ephemeral_bytes + nonce).digest()
-        with self._lock:
-            self._purge(now)
-            if replay_key in self._seen_envelopes:
-                raise ProtocolError("request envelope replayed")
-            if len(self._seen_envelopes) >= MAX_REPLAY_CACHE_ENTRIES:
-                raise ProtocolError("request replay cache is at capacity")
-            self._seen_envelopes[replay_key] = now + 600.0
         try:
             ephemeral = X25519PublicKey.from_public_bytes(ephemeral_bytes)
             key = HKDF(
@@ -280,13 +343,21 @@ class EnclaveService:
                 info=ENVELOPE_INFO + path.encode("ascii"),
             ).derive(self._transport_key.exchange(ephemeral))
             plaintext = AESGCM(key).decrypt(nonce, ciphertext, path.encode("ascii"))
-            request = json.loads(plaintext.decode("utf-8"))
+            request = strict_json_loads(plaintext)
             if not isinstance(request, dict):
                 raise ValueError
         except ProtocolError:
             raise
         except Exception as exc:
             raise ProtocolError("request envelope authentication failed") from exc
+        self._validate_request_schema(path, request)
+        with self._lock:
+            self._purge(now)
+            if replay_key in self._seen_envelopes:
+                raise ProtocolError("request envelope replayed")
+            if len(self._seen_envelopes) >= MAX_REPLAY_CACHE_ENTRIES:
+                raise ProtocolError("request replay cache is at capacity")
+            self._seen_envelopes[replay_key] = now + 600.0
         response = self._dispatch(path, request)
         response_plaintext = json.dumps(
             response, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -304,8 +375,6 @@ class EnclaveService:
 
     def _dispatch(self, path: str, request: Mapping[str, object]) -> dict[str, object]:
         if path == "/v1/challenge":
-            if request:
-                raise ProtocolError("challenge request must be empty")
             challenge = os.urandom(32)
             with self._lock:
                 self._purge(time.time())
@@ -317,7 +386,14 @@ class EnclaveService:
             return {"challenge_b64": _encode_base64(challenge)}
         if path == "/v1/session":
             proof = _decode_base64(request.get("proof_b64"), "proof_b64", maximum=4096)
-            challenge = self._proof_verifier.verify(proof, self.config)
+            try:
+                challenge = self._proof_verifier.verify(proof, self.config)
+            except ProtocolError:
+                raise
+            except Exception as exc:
+                raise ProtocolError("zero-knowledge proof rejected") from exc
+            if not isinstance(challenge, bytes) or not 32 <= len(challenge) <= 256:
+                raise ProtocolError("proof verifier returned an invalid challenge")
             with self._lock:
                 now = time.time()
                 self._purge(now)
@@ -332,12 +408,25 @@ class EnclaveService:
                 self._sessions[new_session] = now + self.config.session_ttl_seconds
             return {"session": new_session}
         session_value = request.get("session")
-        if not isinstance(session_value, str) or not self._valid_session(session_value):
+        if (
+            not isinstance(session_value, str)
+            or not 0 < len(session_value) <= 4_096
+            or any(not 33 <= ord(character) <= 126 for character in session_value)
+            or not self._valid_session(session_value)
+        ):
             raise ProtocolError("invalid or expired enclave session")
         if path == "/v1/vector/encrypt":
             vector = self._vector(request.get("vector"), "vector")
             normalized = self._normalize(vector)
-            ciphertext = self._ckks.encrypt_normalized(normalized)
+            try:
+                ciphertext = self._ckks.encrypt_normalized(normalized)
+            except Exception as exc:
+                raise ProtocolError("CKKS encryption failed") from exc
+            if (
+                not isinstance(ciphertext, bytes)
+                or not 0 < len(ciphertext) <= 16 * 1024 * 1024
+            ):
+                raise ProtocolError("CKKS engine returned an invalid ciphertext")
             return {"ciphertext_b64": _encode_base64(ciphertext)}
         if path == "/v1/vector/similarity":
             intent = self._vector(request.get("intent"), "intent")
@@ -346,15 +435,38 @@ class EnclaveService:
                 "ciphertext_b64",
                 maximum=16 * 1024 * 1024,
             )
-            if self._ckks.ciphertext_dimension(ciphertext) != len(intent):
-                raise ProtocolError("vector dimension mismatch")
-            score = float(
-                self._ckks.cosine_similarity(self._normalize(intent), ciphertext)
-            )
+            try:
+                if self._ckks.ciphertext_dimension(ciphertext) != len(intent):
+                    raise ProtocolError("vector dimension mismatch")
+                score = float(
+                    self._ckks.cosine_similarity(self._normalize(intent), ciphertext)
+                )
+            except ProtocolError:
+                raise
+            except Exception as exc:
+                raise ProtocolError("CKKS similarity failed") from exc
             if not math.isfinite(score) or not -1.0001 <= score <= 1.0001:
                 raise ProtocolError("CKKS engine returned an invalid similarity")
             return {"score": max(-1.0, min(1.0, score))}
         raise ProtocolError("unsupported enclave path")
+
+    @staticmethod
+    def _validate_request_schema(
+        path: str,
+        request: Mapping[str, object],
+    ) -> None:
+        expected_fields = {
+            "/v1/challenge": set(),
+            "/v1/session": {"proof_b64"},
+            "/v1/vector/encrypt": {"session", "vector"},
+            "/v1/vector/similarity": {"session", "intent", "ciphertext_b64"},
+        }.get(path)
+        if expected_fields is None:
+            raise ProtocolError("unsupported enclave path")
+        try:
+            require_exact_keys(dict(request), expected_fields)
+        except ValueError as exc:
+            raise ProtocolError("invalid enclave request schema") from exc
 
     def _vector(self, value: object, label: str) -> list[float]:
         if (
@@ -404,4 +516,6 @@ def origin_token_matches(expected: str, authorization: str | None) -> bool:
     if not expected or not authorization or not authorization.startswith("Bearer "):
         return False
     supplied = authorization.removeprefix("Bearer ")
+    if len(supplied) != len(expected):
+        return False
     return hmac.compare_digest(expected.encode(), supplied.encode())

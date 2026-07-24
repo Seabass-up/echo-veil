@@ -7,7 +7,7 @@ from typing import Any, cast
 
 
 ROOT = Path(__file__).parents[1]
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 HOSTS = (
     "openclaw",
     "hermes",
@@ -112,8 +112,7 @@ def test_adapter_artifacts_have_no_developer_paths_or_personal_identity() -> Non
         for path in (ROOT / "integrations").rglob("*")
         if path.is_file()
         and "node_modules" not in path.parts
-        and "dist" not in path.parts
-        and path.suffix in {".json", ".md", ".ts", ".yaml", ".yml"}
+        and path.suffix in {".js", ".json", ".md", ".ts", ".yaml", ".yml"}
     ]
     for path in files:
         text = path.read_text(encoding="utf-8", errors="strict")

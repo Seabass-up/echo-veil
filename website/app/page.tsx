@@ -103,7 +103,7 @@ export default function Home() {
       <section className="hero shell" id="top">
         <div className="hero-copy">
           <div className="eyebrow">
-            <span className="status-dot" /> v0.5.0 · Protected semantic memory
+            <span className="status-dot" /> v0.6.0 · Scoped protected memory
           </div>
           <h1>
             Memory that knows
@@ -125,7 +125,7 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-proof" aria-label="Product attributes">
-            <span>Release v0.5.0</span>
+            <span>Release v0.6.0</span>
             <span>Open source</span>
             <span>Commercial use free</span>
             <span>Fail-closed production mode</span>
@@ -358,7 +358,7 @@ export default function Home() {
         <div className="cta-orbit" aria-hidden="true"><i /><i /><i /></div>
         <span className="section-index">MEMORY, WITH BETTER JUDGMENT</span>
         <h2>Give your agent<br /><em>a wiser memory.</em></h2>
-        <p>Echo Veil v0.5.0 · Open source under MIT · Free for personal and commercial use.</p>
+        <p>Echo Veil v0.6.0 · Open source under MIT · Free for personal and commercial use.</p>
         <div className="cta-actions">
           <a className="button button-primary" href="https://github.com/Seabass-up/echo-veil">View source on GitHub <span aria-hidden="true">↗</span></a>
           <a className="text-link" href="https://github.com/Seabass-up/echo-veil/blob/master/docs/AGENT_INTEGRATION.md">Read the integration guide <span aria-hidden="true">→</span></a>

@@ -68,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     outcomes: list[dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory(prefix="echo-veil-quality-") as directory:
-        state_dir = Path(directory)
+        # macOS exposes /var through a system symlink. Resolve the fresh,
+        # process-owned temporary directory before applying Echo's stricter
+        # no-symlink state-path policy.
+        state_dir = Path(directory).resolve(strict=True)
         with AgentMemory(
             state_dir,
             profile="quality-qwen3",

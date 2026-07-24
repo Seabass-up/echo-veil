@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 
+from ._json import strict_json_loads
 from .archive import (
     INDEX_KINDS,
     EvictionRecord,
@@ -139,12 +140,16 @@ class SQLiteStore:
             raise ValueError("SQLite URI paths are not supported")
 
         candidate = Path(raw_path).expanduser()
-        if candidate.exists() and candidate.is_symlink():
-            raise ValueError("database path must not be a symbolic link")
+        absolute_candidate = candidate.absolute()
+        if any(
+            component.is_symlink()
+            for component in (absolute_candidate, *absolute_candidate.parents)
+        ):
+            raise ValueError("database path must not contain symbolic links")
         if candidate.exists() and not candidate.is_file():
             raise ValueError("database path must reference a regular file")
         candidate.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return str(candidate.absolute()), True
+        return str(absolute_candidate), True
 
     @staticmethod
     def _secure_database_file(database_path: str) -> None:
@@ -271,6 +276,9 @@ class SQLiteStore:
                     "ON ann_buckets(band, bucket, key)"
                 )
                 if version == 1:
+                    self._migrate_v1_eviction_metadata_locked()
+                self._validate_schema_objects_locked()
+                if version == 1:
                     self._backfill_ann_locked()
                 self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self._commit_locked()
@@ -310,19 +318,274 @@ class SQLiteStore:
             rows = self._connection.execute(f"PRAGMA table_info({table})").fetchall()
             actual = tuple(str(row[1]) for row in rows)
             if actual != expected:
-                raise RuntimeError(
-                    f"SQLite schema mismatch for {table}: "
-                    f"expected {expected}, got {actual}"
+                raise RuntimeError("SQLite schema mismatch")
+
+    def _migrate_v1_eviction_metadata_locked(self) -> None:
+        expected = (("metadata_index", "key", "key", "NO ACTION", "CASCADE"),)
+        actual = tuple(
+            (
+                str(row[2]),
+                str(row[3]),
+                str(row[4]),
+                str(row[5]),
+                str(row[6]),
+            )
+            for row in self._connection.execute(
+                "PRAGMA foreign_key_list(eviction_metadata)"
+            )
+        )
+        if actual == expected:
+            return
+        if actual:
+            raise RuntimeError("SQLite schema foreign-key mismatch")
+        self._connection.execute(
+            "ALTER TABLE eviction_metadata RENAME TO eviction_metadata_v1"
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE eviction_metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                metadata_json TEXT NOT NULL,
+                FOREIGN KEY(key) REFERENCES metadata_index(key)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            INSERT INTO eviction_metadata(key, metadata_json)
+            SELECT key, metadata_json FROM eviction_metadata_v1
+            """
+        )
+        self._connection.execute("DROP TABLE eviction_metadata_v1")
+
+    def _validate_schema_objects_locked(self) -> None:
+        tables = {
+            "metadata_index",
+            "ann_buckets",
+            "active_workspace",
+            "cold_archive",
+            "eviction_metadata",
+        }
+        expected_objects = {
+            *(("table", table, table) for table in tables),
+            ("index", "idx_metadata_kind", "metadata_index"),
+            ("index", "idx_ann_lookup", "ann_buckets"),
+        }
+        actual_objects = {
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in self._connection.execute(
+                "SELECT type, name, tbl_name FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if actual_objects != expected_objects:
+            raise RuntimeError("SQLite schema object mismatch")
+        index_columns = {
+            "idx_metadata_kind": ("kind",),
+            "idx_ann_lookup": ("band", "bucket", "key"),
+        }
+        for index_name, expected_columns in index_columns.items():
+            actual_columns = tuple(
+                str(row[2])
+                for row in self._connection.execute(f"PRAGMA index_info({index_name})")
+            )
+            if actual_columns != expected_columns:
+                raise RuntimeError("SQLite schema index mismatch")
+        expected_foreign_keys = {
+            "ann_buckets": (("metadata_index", "key", "key", "NO ACTION", "CASCADE"),),
+            "eviction_metadata": (
+                ("metadata_index", "key", "key", "NO ACTION", "CASCADE"),
+            ),
+        }
+        for table, expected in expected_foreign_keys.items():
+            actual = tuple(
+                (
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    str(row[5]),
+                    str(row[6]),
                 )
+                for row in self._connection.execute(f"PRAGMA foreign_key_list({table})")
+            )
+            if actual != expected:
+                raise RuntimeError("SQLite schema foreign-key mismatch")
 
     def verify_integrity(self) -> None:
         """Raise if SQLite reports any structural database corruption."""
         with self._lock:
             self._ensure_open_locked()
             rows = self._connection.execute("PRAGMA quick_check").fetchall()
+            foreign_key_rows = self._connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
         results = tuple(str(row[0]) for row in rows)
         if results != ("ok",):
-            raise RuntimeError("SQLite integrity check failed: " + "; ".join(results))
+            raise RuntimeError("SQLite integrity check failed")
+        if foreign_key_rows:
+            raise RuntimeError("SQLite foreign-key integrity check failed")
+
+    def managed_state_ids(
+        self,
+    ) -> tuple[set[str], set[str], set[str], set[str]]:
+        """Return local tier IDs for adapter-level crash-consistency checks."""
+
+        with self._lock:
+            self._ensure_open_locked()
+            tables = (
+                "active_workspace",
+                "metadata_index",
+                "cold_archive",
+                "eviction_metadata",
+            )
+            values = []
+            for table in tables:
+                # Table identifiers come exclusively from the immutable tuple
+                # above; no caller or persisted value can influence this SQL.
+                query = f"SELECT key FROM {table}"  # nosec B608
+                rows = self._connection.execute(query).fetchall()
+                values.append({str(row[0]) for row in rows})
+        return values[0], values[1], values[2], values[3]
+
+    def rotate_protected_payloads(
+        self,
+        *,
+        source_key_id: str,
+        limit: int,
+        transform: Callable[[object], object],
+    ) -> dict[str, int]:
+        """Re-encrypt a bounded set of protected lifecycle anchors.
+
+        Each record is updated transactionally across its active workspace or
+        matching L2/L3 copies.  Multi-key shields keep an interrupted rotation
+        readable; a later call resumes by scanning for the old non-secret key
+        identifier.
+        """
+
+        if not isinstance(source_key_id, str) or not source_key_id.strip():
+            raise ValueError("source_key_id must be a non-empty string")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("rotation limit must be between 1 and 1000")
+        if not callable(transform):
+            raise TypeError("rotation transform must be callable")
+
+        with self._lock:
+            self._ensure_open_locked()
+            active_rows = self._connection.execute(
+                """
+                SELECT key, payload
+                FROM active_workspace
+                WHERE payload_kind = 'protected'
+                ORDER BY key
+                """
+            ).fetchall()
+            indexed_rows = self._connection.execute(
+                """
+                SELECT key, payload
+                FROM metadata_index
+                WHERE kind = 'protected_anchor'
+                ORDER BY key
+                """
+            ).fetchall()
+
+        candidates: list[str] = []
+        decoded_by_key: dict[str, object] = {}
+        for key_raw, payload_raw in (*active_rows, *indexed_rows):
+            key = str(key_raw)
+            decoded = self._loader(bytes(payload_raw))
+            if getattr(decoded, "key_id", None) != source_key_id:
+                continue
+            record_id = getattr(decoded, "record_id", None)
+            if record_id is not None and record_id != key:
+                raise RuntimeError("protected lifecycle record ID binding is invalid")
+            if key not in decoded_by_key:
+                candidates.append(key)
+                decoded_by_key[key] = decoded
+            if len(candidates) >= limit:
+                break
+
+        migrated = 0
+        for key in candidates:
+            replacement = transform(decoded_by_key[key])
+            if not is_serializable_protected_payload(replacement):
+                raise TypeError("rotation transform returned an invalid payload")
+            replacement_record_id = getattr(replacement, "record_id", None)
+            if replacement_record_id is not None and replacement_record_id != key:
+                raise RuntimeError("rotated lifecycle record ID binding is invalid")
+            encoded = self._validate_payload(
+                replacement.to_json_bytes(),
+                "rotated protected",
+            )
+            with self._lock:
+                self._ensure_open_locked()
+                self._begin_locked()
+                try:
+                    active = self._connection.execute(
+                        """
+                        UPDATE active_workspace
+                        SET payload = ?
+                        WHERE key = ? AND payload_kind = 'protected'
+                        """,
+                        (encoded, key),
+                    ).rowcount
+                    indexed = self._connection.execute(
+                        """
+                        UPDATE metadata_index
+                        SET payload = ?, updated_at = ?
+                        WHERE key = ? AND kind = 'protected_anchor'
+                        """,
+                        (encoded, time.time(), key),
+                    ).rowcount
+                    archived = self._connection.execute(
+                        """
+                        UPDATE cold_archive
+                        SET payload = ?, updated_at = ?
+                        WHERE key = ?
+                        """,
+                        (encoded, time.time(), key),
+                    ).rowcount
+                    if not active and (indexed != 1 or archived != 1):
+                        raise RuntimeError(
+                            "protected lifecycle tiers disagree during rotation"
+                        )
+                    self._commit_locked()
+                except Exception:
+                    self._rollback_locked()
+                    raise
+            migrated += 1
+
+        remaining = self.count_protected_payloads_for_key(source_key_id)
+        return {"migrated": migrated, "remaining": remaining}
+
+    def count_protected_payloads_for_key(self, key_id: str) -> int:
+        """Count distinct lifecycle records still bound to ``key_id``."""
+
+        if not isinstance(key_id, str) or not key_id.strip():
+            raise ValueError("key_id must be a non-empty string")
+        with self._lock:
+            self._ensure_open_locked()
+            rows = self._connection.execute(
+                """
+                SELECT key, payload
+                FROM active_workspace
+                WHERE payload_kind = 'protected'
+                UNION ALL
+                SELECT key, payload
+                FROM metadata_index
+                WHERE kind = 'protected_anchor'
+                """
+            ).fetchall()
+        matching: set[str] = set()
+        for key_raw, payload_raw in rows:
+            decoded = self._loader(bytes(payload_raw))
+            if getattr(decoded, "key_id", None) == key_id:
+                matching.add(str(key_raw))
+        return len(matching)
 
     def commit_evictions(self, records: list[EvictionRecord]) -> None:
         """Atomically commit matching L2 and L3 records for all evictions."""
@@ -581,7 +844,7 @@ class SQLiteStore:
         if row is None:
             return None
         try:
-            decoded = json.loads(str(row[0]))
+            decoded = strict_json_loads(str(row[0]))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("persisted eviction metadata is invalid JSON") from exc
         if not isinstance(decoded, dict):

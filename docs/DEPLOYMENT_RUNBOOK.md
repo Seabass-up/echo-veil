@@ -6,8 +6,10 @@ verification material exists.
 ## 1. Build and review
 
 1. Run the Python, Rust, Worker, Bicep, and OpenTofu validation commands from CI.
-2. Build `deploy/enclave/Dockerfile`, scan the resulting image, and publish it by
-   immutable digest. Record the digest and software bill of materials.
+2. Build `deploy/enclave/Dockerfile` for `linux/amd64`, scan the resulting image,
+   and publish it by immutable digest. The build performs a non-root OpenFHE
+   import check and fails on an incompatible native wheel. Record the digest and
+   software bill of materials.
 3. Have the independent reviewer approve the threat model, the Ristretto proof
    protocol, OpenFHE parameters, image digest, and rollback procedure.
 

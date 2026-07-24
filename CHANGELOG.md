@@ -5,6 +5,58 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-24
+
+### Changed
+
+- Upgraded new local agent profiles to a scoped-v2 security format that
+  encrypts topics with payloads, protects retrieval vectors, minimizes lexical
+  metadata with keyed hashes, and binds every encrypted object to its
+  scope/record/schema/key identity.
+- Reordered scoped-v2 remember into a recoverable pending-payload → durable
+  lifecycle → commit protocol with stable record IDs and startup
+  reconciliation; unexplained committed orphans remain operator-visible.
+- Serialized each writable local adapter profile with an owner-only SQLite
+  lease, added bounded lock-wait configuration, and reconciled interrupted
+  lifecycle-first writes before a profile becomes available.
+- Revalidated mutable Ollama model tags before every embedding batch so a
+  long-lived adapter cannot silently continue after the resolved artifact or
+  maximum dimension changes.
+- Allowed long-lived CLI/MCP processes to transition from semantic recall to
+  the explicit read-only availability layer when an Ollama outage begins after
+  startup; identity and malformed-response failures remain hard stops.
+- Added strict schema-version, schema-object, foreign-key, and integrity checks
+  to the local lifecycle and encrypted payload databases.
+
+### Security
+
+- Replaced raw-key profile metadata with an owner-only key-reference manifest,
+  added resumable multi-key rotation and separately confirmed retirement, and
+  authenticated deletion tombstones.
+- Added nonce uniqueness constraints, cross-table reuse detection, scope
+  binding, record-level corruption quarantine, lost-key hard failure, opaque
+  diagnostics, and granular local readiness reporting.
+- Rejected duplicate JSON keys, non-finite numbers, unknown protocol fields,
+  malformed JSON-RPC envelopes, non-canonical base64, and oversized encrypted
+  records across the adapter, gateway client, attestation, origin, and CKKS
+  boundaries.
+- Bounded proof-helper input/output and trust files, withheld unrelated host
+  credentials from Python, OpenClaw, and Pi child processes, discarded child
+  stderr, and added timeout termination escalation without enabling a shell.
+- Refused Cloudflare and origin redirects that could forward Access, bearer, or
+  mTLS credentials; tightened origin-token and team-domain validation; and
+  prevented unauthenticated envelopes from consuming replay-cache capacity.
+- Rejected symlinked state/secret paths, incomplete or permissive CKKS key
+  state, unexpected SQLite triggers, and attestation signer/config/transport-key
+  mismatches.
+- Added CSP, HSTS, framing, MIME, referrer, and browser-permission policy to the
+  product Worker and limited the public brochure endpoint to GET and HEAD.
+- Allowlisted the enclave container build context, normalized source ownership
+  and permissions for its non-root runtime, and pinned patched Cloudflare/site
+  transitive dependencies so high-severity dependency audits pass.
+- Added the tracked OpenClaw distribution to deterministic security scanning,
+  release-file validation, and a CI rebuild/no-diff gate.
+
 ## [0.5.0] - 2026-07-21
 
 ### Changed
@@ -109,6 +161,7 @@ All notable changes to Echo Veil are documented here. The project follows
 - Secret generation, replay controls, bounded inputs, and encrypted key-transfer
   tooling are included and tested.
 
-[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Seabass-up/echo-veil/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Seabass-up/echo-veil/compare/v0.3.0...v0.5.0
 [0.4.0]: https://github.com/Seabass-up/echo-veil/tree/08de0b2de7d5e63c82209c9afaa54450a2aaec15

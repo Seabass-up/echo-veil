@@ -15,8 +15,14 @@ The runnable development example is
 single local OS user. It creates an owner-only profile directory, protects
 vectors with AES-GCM, encrypts authorized payloads in a separate SQLite
 database, and performs confidence-gated active/cold recall. Exact remember
-retries are deduplicated. Topics remain plaintext metadata and the local mode
-does not satisfy the production enclave profile.
+retries are deduplicated. New scoped-v2 profiles encrypt topics with their
+payloads, store only opaque keyed topic and lexical tokens, bind every encrypted
+object to its scope/record/schema/key metadata, and support resumable key
+rotation. Legacy-v1 profiles keep their original plaintext topic metadata until
+they are explicitly migrated; they are reported unhealthy rather than silently
+rewritten. The local mode does not satisfy the production enclave profile. See
+[`LOCAL_AGENT_SECURITY.md`](LOCAL_AGENT_SECURITY.md) for the complete boundary,
+entry-point matrix, and release gate.
 
 The bundled full adapters explicitly select `qwen3-embedding:latest` through a
 loopback-only Ollama client. Documents are embedded without a prefix; recall
@@ -48,10 +54,12 @@ assembly, or authoritative delivery.
 
 The layer is SQLite read-only and cannot create a profile, remember, forget,
 reindex, lower its safe threshold, authorize inferential recall, or mutate decay
-and reinforcement state. Paraphrases may be missed. Corrupt storage, invalid
-keys, model-identity mismatch, malformed embedding responses, and other trust
-failures still stop the adapter rather than entering degraded mode. Disable the
-outage path with `--no-availability-layer` or
+and reinforcement state. A long-lived CLI or MCP process makes a one-way
+transition into this mode if a later embedding call detects a service outage.
+Paraphrases may be missed. Corrupt storage, invalid keys, model-identity
+mismatch, malformed embedding responses, and other trust failures still stop
+the adapter rather than entering degraded mode. Disable the outage path with
+`--no-availability-layer` or
 `ECHO_VEIL_AVAILABILITY_LAYER=false`.
 
 ```bash
@@ -95,19 +103,36 @@ stdio MCP configuration surfaces. Every full adapter exposes:
 - `echo_veil_doctor` — adapter and core readiness reporting; and
 - `echo_veil_reindex` — explicitly confirmed protected retrieval-index rebuilds.
 
+The stdio MCP/RPC server also exposes `echo_veil_rotate_key` for confirmed,
+bounded, resumable re-encryption and `echo_veil_retire_key` for separately
+confirmed old-key retirement after backup accounting. Native hosts that do not
+yet declare those maintenance schemas must use the same versioned CLI boundary;
+they must not implement rotation themselves.
+
 Existing host memory providers and context engines remain unchanged. Echo Veil
 is not injected into every prompt and does not replace host-native memory. This
 avoids duplicate automatic recall while the policy layer is evaluated.
 
-`ECHO_VEIL_STATE_DIR` and `ECHO_VEIL_PROFILE` select storage. The embedding
+`ECHO_VEIL_STATE_DIR`, `ECHO_VEIL_PROFILE`, and `ECHO_VEIL_SCOPE` select the
+storage and authorization boundary. The embedding
 backend is selected with `ECHO_VEIL_EMBEDDER`; Ollama model, dimension, URL, and
 timeout use the corresponding `ECHO_VEIL_EMBEDDING_*` and
 `ECHO_VEIL_OLLAMA_URL` variables. `ECHO_VEIL_AVAILABILITY_LAYER` controls the
-read-only outage path. Bundled adapters use a versioned Qwen3 profile per host.
-Profiles are authorization and concurrency
+read-only outage path. `ECHO_VEIL_PROFILE_LOCK_TIMEOUT` controls how long a
+writable process waits for the profile-wide lease. Bundled adapters use a
+versioned Qwen3 profile per host. Profiles are authorization and concurrency
 boundaries: share one only when the hosts represent the same local user and
-authorization domain, and avoid simultaneous writers because live L1 remains
-process memory even though SQLite persistence is cross-process safe.
+authorization domain. One writable process owns a profile at a time; a second
+writer waits and then fails closed rather than loading and later persisting a
+stale process-local L1 snapshot.
+
+The adapter payload and lifecycle databases cannot share one SQLite
+transaction. Startup therefore checks their ID sets before serving requests.
+Lifecycle state without an encrypted payload is treated as an interrupted
+remember and removed through `Oracle.forget()`. An encrypted payload without
+lifecycle state is preserved and blocks startup because automatic deletion
+would be ambiguous. Restore or audit that record explicitly; do not weaken the
+check.
 
 Embedding identity is immutable for a non-empty profile. To move a hashing
 profile to Qwen3, use the explicit in-process migration below. It decrypts one
@@ -123,7 +148,8 @@ uv run --locked python scripts/migrate_hashing_profile.py \
 
 Do not copy or mix old vectors. If the resolved `latest` tag digest changes,
 review the model change and migrate to a new profile instead of weakening the
-mismatch check.
+mismatch check. Long-lived processes recheck the resolved digest and maximum
+dimension before every embedding batch.
 
 The bundled adapter's retrieval path uses encrypted passage vectors with
 MaxSim, keyed-hash lexical features, topic-aware MMR diversity, and explicit
@@ -261,6 +287,15 @@ secrets, raw protected vectors, proofs, or attestation credentials.
 
 - Call `oracle.capability_report().as_dict()` at startup and surface blockers in
   readiness/health reporting.
+- For `AgentMemory`, use `doctor()` and retain each readiness fact separately.
+  Do not collapse installation, supported version, enablement, crypto, write,
+  index, retrieval, persistence, restart, rotation, and health into one flag.
+  Do not log the profile path, raw scope, queries, payloads, vectors, keys, or
+  exception representations that may contain them.
+- Rotate a scoped-v2 profile with repeated confirmed `rotate_key()` calls until
+  it reports `verified`. Retire the previous key only after record-reference
+  verification and an explicit backup-accounting confirmation. Legacy-v1
+  profiles must migrate to a fresh scoped-v2 profile first.
 - Keep one embedding model/version and dimension per Oracle/store. Migrate to a
   new profile when changing dimensions or model identity; use only the reviewed
   hashing-to-Qwen migration above for legacy adapter profiles.
