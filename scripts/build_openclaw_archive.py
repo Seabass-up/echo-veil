@@ -8,6 +8,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import tarfile
 import tempfile
 from io import BytesIO
@@ -150,7 +151,7 @@ def build_archive(root: Path, output_dir: Path, epoch: int) -> Path:
                         archive.addfile(member, BytesIO(payload))
         assert temporary_name is not None
         os.replace(temporary_name, destination)
-        os.chmod(destination, 0o644)
+        os.chmod(destination, 0o600)
         temporary_name = None
     finally:
         if temporary_name is not None:
@@ -175,7 +176,8 @@ def main() -> int:
     try:
         archive = build_archive(args.root, args.output_dir, args.epoch)
     except (ArchiveError, OSError) as exc:
-        parser.error(str(exc))
+        print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+        return 2
     print(archive)
     return 0
 
