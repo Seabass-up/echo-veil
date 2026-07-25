@@ -1,0 +1,42 @@
+{
+  "description": "Fail-closed Echo Veil memory preflight for Claude Code.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host claude-code --hook-mode prompt",
+            "timeout": 30,
+            "statusMessage": "Loading shielded Echo Veil context"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host claude-code --hook-mode prompt",
+            "timeout": 30,
+            "statusMessage": "Rechecking expanded prompt memory"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host claude-code --hook-mode agent",
+            "timeout": 30,
+            "statusMessage": "Shielding Claude subagent context"
+          }
+        ]
+      }
+    ]
+  }
+}

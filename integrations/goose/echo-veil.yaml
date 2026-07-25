@@ -2,17 +2,58 @@ version: 1.0.0
 title: Echo Veil memory
 description: Opt-in, encrypted, confidence-gated local memory tools.
 instructions: |
-  Use echo_veil_remember only when the user explicitly intends durable capture.
+  Use Echo Veil as the only mutable agent-memory authority. Treat host notes,
+  source files, curated documents, and legacy memory as read-only evidence,
+  never as a plaintext fallback.
+  Call echo_veil_doctor before the first memory-dependent operation in a
+  session and after any availability or integrity error.
+  For every substantive task, call echo_veil_recall with a minimal,
+  intent-focused query and at least two result slots. Skip recall only when the
+  request is trivial and wholly self-contained.
+  Use echo_veil_remember only when the user explicitly intends memory capture.
+  Store compact intent/outcome seed crystals, not raw transcripts. Raw dialogue
+  may exist only as bounded, expiring Live state.
+  Use echo_veil_refresh_live to update active state; never silently overwrite it.
+  Create Live, Short-Term, or typed Contextual Logic records; create Long-Term
+  only through echo_veil_promote with an explicit reason.
   Use echo_veil_recall before relying on stored facts and respect gated results.
+  Use echo_veil_context when a decision or causal explanation needs its bounded,
+  authenticated support trace. Linked evidence is not independently query-scored.
+  Use echo_veil_list only for bounded administrative inventory. It is not
+  semantic recall, does not mutate lifecycle state, and must never be injected
+  wholesale into model context.
+  State returned layers and provenance, follow promotion/archive recommendations,
+  and say cleanly when no stored memory answers the query.
   Preserve both leading recall candidates when ranking_ambiguous=true.
+  Preserve every returned possible-conflict group member when
+  competing_memory_detected=true. Never invent a resolution; use explicit
+  supersession or protected Contextual Logic.
   Treat degraded=true as conservative lexical availability only, never as
   semantic or authoritative recall.
   Use echo_veil_forget only for an explicit erasure request.
+  Use echo_veil_reindex only after explicit confirmation; it is a protected
+  lifecycle mutation, not an ordinary read.
   Do not describe the local staging adapter as a production enclave.
+  If the Echo Veil tools are absent, stop before substantive work and report
+  that the required memory extension was not loaded. Do not continue with a
+  host-memory substitute. When using this recipe, do not launch Goose with
+  --no-profile; Goose 1.41.0 suppresses recipe-defined extensions under that
+  flag.
+  If required Echo protection is unavailable, stop memory-dependent work
+  rather than consulting or writing a host plaintext fallback.
+  This portable recipe is policy-driven. For a repository-owned headless gate
+  that completes protected preflight before Goose starts, use
+  echo-veil-shielded-run goose as documented in integrations/goose/README.md.
 extensions:
   - type: stdio
     name: echo-veil
     cmd: echo-veil-agent
-    args: ["--profile", "goose-qwen3", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
+    args: ["--profile", "echo-universal-qwen3-v1", "--scope", "local-user", "--caller", "goose", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
 prompt: |
-  Echo Veil is ready. Wait for a user request before remembering or forgetting.
+  Echo Veil is the exclusive mutable memory authority. Begin with
+  echo_veil_doctor. If local protection is ready, call echo_veil_recall with
+  the minimal query "Echo Veil singular memory authority current state",
+  top_k 2, and inferential recall disabled. Preserve ambiguity, conflicts,
+  layers, and provenance; say cleanly when no stored result answers. Do not
+  remember, refresh, promote, forget, or reindex without a separate explicit
+  request.

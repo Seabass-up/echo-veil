@@ -1,12 +1,12 @@
-"""Echo Veil: a tiered, decay-driven memory architecture for conversational agents.
+"""Echo Veil: a shielded four-layer living-memory substrate for AI agents.
 
-This package implements the Echo Veil v1.0 core, including durable tiered
-storage and a fail-closed adapter for attested CKKS enclave providers.
+This package implements semantic memory policy, durable tiered storage, and a
+fail-closed adapter for attested CKKS enclave providers.
 """
 
 from __future__ import annotations
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
 from .agent_memory import AgentMemory, HashingTextEmbedder, OllamaTextEmbedder
@@ -35,6 +35,7 @@ from .crypto_shield import (
 )
 from .drift import DriftDetector
 from .deployment import build_production_enclave_shield_from_env
+from .memory_layers import LogicKind, MemoryLayer, MemoryLayerContract
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteColdArchive, SQLiteMetadataIndex, SQLiteStore
 from .proximity import ProximityConfig, proximity_score, time_decay
@@ -48,6 +49,9 @@ __all__ = [
     "AgentMemory",
     "HashingTextEmbedder",
     "OllamaTextEmbedder",
+    "MemoryLayer",
+    "MemoryLayerContract",
+    "LogicKind",
     "Oracle",
     "GenerationGated",
     "SQLiteStore",

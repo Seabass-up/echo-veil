@@ -1,8 +1,9 @@
 {
   "id": "echo-veil",
   "name": "Echo Veil",
-  "description": "Local encrypted, decay-driven memory tools backed by Echo Veil.",
-  "version": "0.6.0",
+  "description": "Shielded four-layer living-memory tools backed by Echo Veil.",
+  "version": "0.7.0",
+  "kind": "memory",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -33,8 +34,12 @@
   "contracts": {
     "tools": [
       "echo_veil_remember",
+      "echo_veil_refresh_live",
+      "echo_veil_promote",
       "echo_veil_recall",
+      "echo_veil_context",
       "echo_veil_forget",
+      "echo_veil_list",
       "echo_veil_doctor",
       "echo_veil_reindex"
     ]
@@ -43,8 +48,17 @@
     "echo_veil_remember": {
       "optional": true
     },
+    "echo_veil_refresh_live": {
+      "optional": true
+    },
+    "echo_veil_promote": {
+      "optional": true
+    },
     "echo_veil_forget": {
       "optional": true
+    },
+    "echo_veil_list": {
+      "replaySafe": true
     },
     "echo_veil_doctor": {
       "replaySafe": true

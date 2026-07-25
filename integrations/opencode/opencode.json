@@ -6,7 +6,11 @@
       "command": [
         "echo-veil-agent",
         "--profile",
-        "opencode-qwen3",
+        "echo-universal-qwen3-v1",
+        "--scope",
+        "local-user",
+        "--caller",
+        "opencode",
         "--embedder",
         "ollama",
         "--embedding-model",
@@ -21,6 +25,11 @@
   },
   "permission": {
     "echo-veil_echo_veil_remember": "ask",
-    "echo-veil_echo_veil_forget": "ask"
+    "echo-veil_echo_veil_refresh_live": "ask",
+    "echo-veil_echo_veil_promote": "ask",
+    "echo-veil_echo_veil_recall": "ask",
+    "echo-veil_echo_veil_context": "ask",
+    "echo-veil_echo_veil_forget": "ask",
+    "echo-veil_echo_veil_reindex": "ask"
   }
 }

@@ -28,12 +28,13 @@ import stat
 import sys
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -47,6 +48,7 @@ from .agent_security import (
     KeyUnavailable,
     ProfileKeyring,
     ScopedAesGcmShield,
+    ScopedProtectedBlob,
     ScopedProtectedVector,
     opaque_topic,
     scoped_aad,
@@ -57,6 +59,13 @@ from .crypto_shield import AesGcmCryptoShield
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteStore
 from .proximity import time_decay
+from .memory_layers import (
+    LogicKind,
+    MemoryLayer,
+    MemoryLayerContract,
+    migrated_short_term_contract,
+    new_memory_contract,
+)
 from .vectors import cosine_similarity
 from .workspace import WorkspaceConfig
 
@@ -64,6 +73,10 @@ DEFAULT_EMBEDDING_DIMENSION = 384
 DEFAULT_OLLAMA_EMBEDDING_DIMENSION = 1024
 DEFAULT_OLLAMA_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_KEEP_ALIVE_SECONDS = 300
+MAX_OLLAMA_KEEP_ALIVE_SECONDS = 3_600
+MAX_OLLAMA_CONTEXT_LENGTH = 262_144
+MAX_OLLAMA_GPU_LAYERS = 2_048
 DEFAULT_SEMANTIC_MIN_SCORE = 0.44
 DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
 DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
@@ -71,8 +84,24 @@ DEFAULT_HASHING_MIN_SCORE = 0.35
 DEFAULT_CAPACITY = 400
 MAX_TOPIC_CHARS = 512
 MAX_PAYLOAD_CHARS = 100_000
+MAX_LIVE_MEMORY_CHARS = 20_000
+MAX_SHORT_TERM_MEMORY_CHARS = 12_000
+MAX_LONG_TERM_MEMORY_CHARS = 2_000
+MAX_CONTEXTUAL_LOGIC_MEMORY_CHARS = 4_000
+MAX_AGENT_MEMORY_WRITE_CHARS = max(
+    MAX_LIVE_MEMORY_CHARS,
+    MAX_SHORT_TERM_MEMORY_CHARS,
+    MAX_LONG_TERM_MEMORY_CHARS,
+    MAX_CONTEXTUAL_LOGIC_MEMORY_CHARS,
+)
+MEMORY_CONTENT_POLICY = "bounded-seed-crystal-v1"
 MAX_QUERY_CHARS = 20_000
 MAX_RECALL_RESULTS = 20
+MAX_CONTEXT_RECORDS = 20
+MAX_CONTEXT_DEPTH = 2
+MAX_CONTEXT_EDGES = 40
+MAX_COMPETING_MEMORY_GROUPS = 4
+MAX_COMPETING_MEMORY_IDS = 3
 MAX_EMBEDDING_RESPONSE_BYTES = 4_194_304
 DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 30.0
 MAX_MEMORY_PASSAGES = 12
@@ -98,6 +127,8 @@ MIN_AVAILABILITY_FEATURES = 2
 AMBIGUOUS_RANKING_MARGIN = 0.05
 MMR_RELEVANCE_WEIGHT = 0.88
 RETRIEVAL_SCHEMA_VERSION = "protected-hybrid-maxsim-v1"
+MEMORY_CONTRACT_SCHEMA = "shielded-four-layer-v1"
+MEMORY_CONTRACT_METADATA_PREFIX = "memory_contract:"
 MEMORY_QUERY_INSTRUCTION = (
     "Given a memory recall query, retrieve the stored personal or operational "
     "memory that answers it"
@@ -110,6 +141,15 @@ _PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 _EMBEDDER_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
 _TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+_TRANSCRIPT_ROLE_LINE = re.compile(
+    r"(?im)^[ \t]{0,8}"
+    r"(user|assistant|system|developer|tool|human|agent)"
+    r"[ \t]*:[ \t]*\S"
+)
+_TRANSCRIPT_JSON_ROLE = re.compile(
+    r'(?i)"role"[ \t\r\n]*:[ \t\r\n]*'
+    r'"(?:user|assistant|system|developer|tool)"'
+)
 _STOPWORDS = frozenset(
     {
         "a",
@@ -187,6 +227,25 @@ class _AvailabilityCandidate:
     superseded_by: str | None
     superseded_at: float | None
     temporal_current: bool
+
+
+class _CompetingCandidate(Protocol):
+    """Minimum protected metadata needed to preserve a competing pair."""
+
+    @property
+    def vine_id(self) -> str: ...
+
+    @property
+    def topic(self) -> str: ...
+
+    @property
+    def temporal_current(self) -> bool: ...
+
+
+_CompetingCandidateT = TypeVar(
+    "_CompetingCandidateT",
+    bound=_CompetingCandidate,
+)
 
 
 class EmbeddingUnavailable(RuntimeError):
@@ -342,6 +401,9 @@ class OllamaTextEmbedder:
         dimension: int = DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
         timeout_seconds: float = DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
         query_instruction: str = MEMORY_QUERY_INSTRUCTION,
+        keep_alive_seconds: int = DEFAULT_OLLAMA_KEEP_ALIVE_SECONDS,
+        context_length: int | None = None,
+        gpu_layers: int | None = None,
     ) -> None:
         if not isinstance(model, str) or not _MODEL_PATTERN.fullmatch(model):
             raise ValueError("Ollama model must be a safe non-empty model name")
@@ -358,6 +420,24 @@ class OllamaTextEmbedder:
             raise ValueError(
                 "embedding timeout must be positive and at most 120 seconds"
             )
+        if isinstance(keep_alive_seconds, bool) or not isinstance(
+            keep_alive_seconds, int
+        ):
+            raise TypeError("embedding keep-alive must be an integer number of seconds")
+        if not 0 <= keep_alive_seconds <= MAX_OLLAMA_KEEP_ALIVE_SECONDS:
+            raise ValueError("embedding keep-alive must be between 0 and 3600 seconds")
+        if context_length is not None:
+            if isinstance(context_length, bool) or not isinstance(context_length, int):
+                raise TypeError("embedding context length must be an integer")
+            if not 512 <= context_length <= MAX_OLLAMA_CONTEXT_LENGTH:
+                raise ValueError(
+                    "embedding context length must be between 512 and 262144"
+                )
+        if gpu_layers is not None:
+            if isinstance(gpu_layers, bool) or not isinstance(gpu_layers, int):
+                raise TypeError("embedding GPU layers must be an integer")
+            if not 0 <= gpu_layers <= MAX_OLLAMA_GPU_LAYERS:
+                raise ValueError("embedding GPU layers must be between 0 and 2048")
         instruction = _validate_text(
             query_instruction,
             "query instruction",
@@ -391,6 +471,12 @@ class OllamaTextEmbedder:
         self._port = port
         self._timeout_seconds = timeout
         self._query_instruction = instruction
+        self._keep_alive = f"{keep_alive_seconds}s"
+        self._runtime_options: dict[str, int] = {}
+        if context_length is not None:
+            self._runtime_options["num_ctx"] = context_length
+        if gpu_layers is not None:
+            self._runtime_options["num_gpu"] = gpu_layers
         self.name = "ollama"
         self.model = model if ":" in model else f"{model}:latest"
         self.dimension = dimension
@@ -458,17 +544,16 @@ class OllamaTextEmbedder:
 
     def _embed_batch(self, texts: list[str]) -> list[NDArray[np.float64]]:
         self._assert_model_identity()
-        response = self._request_json(
-            "POST",
-            "/api/embed",
-            {
-                "model": self.model,
-                "input": texts,
-                "dimensions": self.dimension,
-                "truncate": False,
-                "keep_alive": "5m",
-            },
-        )
+        request: dict[str, object] = {
+            "model": self.model,
+            "input": texts,
+            "dimensions": self.dimension,
+            "truncate": False,
+            "keep_alive": self._keep_alive,
+        }
+        if self._runtime_options:
+            request["options"] = dict(self._runtime_options)
+        response = self._request_json("POST", "/api/embed", request)
         embeddings = response.get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
             raise RuntimeError("local Ollama returned an invalid embedding response")
@@ -867,7 +952,13 @@ class _LegacyEncryptedPayloadStore:
         vectors: list[NDArray[np.float64]],
         effective_at: float,
         supersedes: tuple[str, ...],
+        contract: MemoryLayerContract | None = None,
     ) -> None:
+        if contract is not None:
+            raise RuntimeError(
+                "legacy profiles are migration-only because their layer metadata "
+                "cannot satisfy the scoped shield contract"
+            )
         nonce = os.urandom(12)
         ciphertext = self._cipher.encrypt(nonce, payload.encode("utf-8"), _aad(vine_id))
         created_at = time.time()
@@ -981,6 +1072,10 @@ class _LegacyEncryptedPayloadStore:
             )
             self._connection.execute(
                 "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM adapter_metadata WHERE key = ?",
+                (_memory_contract_key(vine_id),),
             )
             self._connection.execute(
                 """
@@ -1278,7 +1373,16 @@ class _LegacyEncryptedPayloadStore:
         predicate = self._lexical_matches(_predicate_query(query))
         if not predicate:
             return []
-        placeholders = ",".join("?" for _ in predicate)
+        candidate_ids = sorted(
+            predicate,
+            key=lambda vine_id: (
+                predicate[vine_id][0],
+                predicate[vine_id][1],
+                vine_id,
+            ),
+            reverse=True,
+        )[:MAX_RETRIEVAL_CANDIDATES]
+        placeholders = ",".join("?" for _ in candidate_ids)
         candidate_query = (
             "SELECT vine_id, topic, effective_at, superseded_by, superseded_at "
             "FROM payloads "
@@ -1286,7 +1390,7 @@ class _LegacyEncryptedPayloadStore:
         )
         rows = self._connection.execute(
             candidate_query,
-            tuple(sorted(predicate)),
+            tuple(candidate_ids),
         ).fetchall()
         candidates: list[_AvailabilityCandidate] = []
         for row in rows:
@@ -1349,6 +1453,30 @@ class _LegacyEncryptedPayloadStore:
             (key, value),
         )
 
+    def initialize_memory_contracts(self) -> int:
+        """Legacy profiles cannot claim the shielded four-layer contract."""
+
+        return 0
+
+    def get_memory_contract(self, vine_id: str) -> MemoryLayerContract:
+        del vine_id
+        raise RuntimeError(
+            "legacy profiles are migration-only; layer metadata is not fully shielded"
+        )
+
+    def set_memory_contract(
+        self,
+        vine_id: str,
+        contract: MemoryLayerContract,
+    ) -> None:
+        del vine_id, contract
+        raise RuntimeError(
+            "legacy profiles are migration-only; layer metadata is not fully shielded"
+        )
+
+    def memory_contract_counts(self) -> dict[str, int]:
+        return {layer.value: 0 for layer in MemoryLayer}
+
     def close(self) -> None:
         self._connection.close()
 
@@ -1381,6 +1509,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 raise KeyUnavailable("legacy profile key is unavailable")
             self._secure_schema = False
             self._keyring = None
+            self._contract_shield: ScopedAesGcmShield | None = None
             super().__init__(path, legacy_key, read_only=read_only)
             return
         if existing_version not in {0, PAYLOAD_SCHEMA_VERSION}:
@@ -1390,6 +1519,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
 
         self._secure_schema = True
         self._keyring = keyring
+        self._contract_shield = ScopedAesGcmShield(keyring)
         self.path = path
         self._read_only = read_only
         if read_only:
@@ -1643,6 +1773,46 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 raise RuntimeError(
                     "payload database foreign-key integrity check failed"
                 )
+        contract_orphan = self._connection.execute(
+            """
+            SELECT 1
+            FROM adapter_metadata AS contract
+            LEFT JOIN payloads
+              ON contract.key = 'memory_contract:' || payloads.vine_id
+            WHERE contract.key LIKE 'memory_contract:%'
+              AND payloads.vine_id IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        if contract_orphan is not None:
+            raise RuntimeError(
+                "payload database memory-contract integrity check failed"
+            )
+        contract_schema = self._connection.execute(
+            """
+            SELECT value FROM adapter_metadata
+            WHERE key = 'memory_contract_schema'
+            """
+        ).fetchone()
+        if (
+            contract_schema is not None
+            and str(contract_schema[0]) == MEMORY_CONTRACT_SCHEMA
+        ):
+            missing_contract = self._connection.execute(
+                """
+                SELECT 1
+                FROM payloads
+                LEFT JOIN adapter_metadata AS contract
+                  ON contract.key = 'memory_contract:' || payloads.vine_id
+                WHERE payloads.operation_state = 'committed'
+                  AND contract.key IS NULL
+                LIMIT 1
+                """
+            ).fetchone()
+            if missing_contract is not None:
+                raise RuntimeError(
+                    "payload database memory-contract integrity check failed"
+                )
         reused = self._connection.execute(
             """
             SELECT 1
@@ -1687,6 +1857,195 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         keyring = self._require_keyring()
         return self._content_digest(keyring.active_key(), topic, payload)
 
+    def _require_contract_shield(self) -> ScopedAesGcmShield:
+        if self._contract_shield is None:
+            raise RuntimeError("scoped memory-contract shield is unavailable")
+        return self._contract_shield
+
+    def _encode_memory_contract(
+        self,
+        vine_id: str,
+        contract: MemoryLayerContract,
+    ) -> str:
+        if not isinstance(contract, MemoryLayerContract):
+            raise TypeError("memory contract must be a MemoryLayerContract")
+        protected = self._require_contract_shield().protect_blob_for_record(
+            contract.to_json_bytes(),
+            vine_id,
+            object_type="memory-contract",
+        )
+        return protected.to_json_bytes().decode("ascii")
+
+    def _decode_memory_contract(
+        self,
+        vine_id: str,
+        encoded: str,
+    ) -> MemoryLayerContract:
+        try:
+            protected = ScopedProtectedBlob.from_json_bytes(encoded.encode("ascii"))
+            if (
+                protected.record_id != vine_id
+                or protected.object_type != "memory-contract"
+            ):
+                raise ValueError("memory contract record binding is invalid")
+            plaintext = bytearray(
+                self._require_contract_shield().reveal_blob(protected)
+            )
+            try:
+                return MemoryLayerContract.from_json_bytes(bytes(plaintext))
+            finally:
+                for index in range(len(plaintext)):
+                    plaintext[index] = 0
+        except Exception as exc:
+            self._quarantine(vine_id, "memory_contract_authentication")
+            raise QuarantinedRecordError(
+                "protected memory contract is quarantined"
+            ) from exc
+
+    def initialize_memory_contracts(self) -> int:
+        """Attach shielded short-term contracts to pre-contract secure records."""
+
+        if not self._secure_schema:
+            return 0
+        keyring = self._require_keyring()
+        feature_enabled = keyring.has_feature(MEMORY_CONTRACT_SCHEMA)
+        stored_schema = self.get_metadata("memory_contract_schema")
+        if stored_schema not in {None, MEMORY_CONTRACT_SCHEMA}:
+            raise RuntimeError("memory contract schema is unsupported")
+        if feature_enabled and stored_schema != MEMORY_CONTRACT_SCHEMA:
+            raise RuntimeError("required protected memory contract schema is missing")
+        contract_count_row = self._connection.execute(
+            """
+            SELECT COUNT(*) FROM adapter_metadata
+            WHERE key LIKE 'memory_contract:%'
+            """
+        ).fetchone()
+        contract_count = 0 if contract_count_row is None else int(contract_count_row[0])
+        if stored_schema is None and contract_count:
+            raise RuntimeError(
+                "memory contract schema marker is missing from a protected profile"
+            )
+        rows = self._connection.execute(
+            """
+            SELECT vine_id, created_at
+            FROM payloads
+            WHERE operation_state = 'committed'
+            ORDER BY created_at, vine_id
+            """
+        ).fetchall()
+        missing: list[tuple[str, str]] = []
+        for vine_id_raw, created_at_raw in rows:
+            vine_id = str(vine_id_raw)
+            existing = self.get_metadata(_memory_contract_key(vine_id))
+            if existing is not None:
+                self._decode_memory_contract(vine_id, existing)
+                continue
+            if stored_schema == MEMORY_CONTRACT_SCHEMA:
+                self._quarantine(vine_id, "memory_contract_missing")
+                raise RuntimeError("protected memory contract is missing")
+            contract = migrated_short_term_contract(
+                created_at=_validate_stored_timestamp(created_at_raw, "created_at")
+            )
+            missing.append((vine_id, self._encode_memory_contract(vine_id, contract)))
+        if self._read_only:
+            if (
+                not feature_enabled
+                or stored_schema != MEMORY_CONTRACT_SCHEMA
+                or missing
+            ):
+                raise RuntimeError(
+                    "always-available recall requires migrated shielded layer contracts"
+                )
+            return 0
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.executemany(
+                "INSERT INTO adapter_metadata(key, value) VALUES (?, ?)",
+                [(_memory_contract_key(vine_id), value) for vine_id, value in missing],
+            )
+            self._connection.execute(
+                """
+                INSERT INTO adapter_metadata(key, value)
+                VALUES ('memory_contract_schema', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (MEMORY_CONTRACT_SCHEMA,),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+        keyring.enable_feature(MEMORY_CONTRACT_SCHEMA)
+        return len(missing)
+
+    def get_memory_contract(self, vine_id: str) -> MemoryLayerContract:
+        if not self._secure_schema:
+            return super().get_memory_contract(vine_id)
+        row = self._connection.execute(
+            "SELECT value FROM adapter_metadata WHERE key = ?",
+            (_memory_contract_key(vine_id),),
+        ).fetchone()
+        if row is None:
+            self._quarantine(vine_id, "memory_contract_missing")
+            raise QuarantinedRecordError("protected memory contract is missing")
+        return self._decode_memory_contract(vine_id, str(row[0]))
+
+    def set_memory_contract(
+        self,
+        vine_id: str,
+        contract: MemoryLayerContract,
+    ) -> None:
+        if not self._secure_schema:
+            return super().set_memory_contract(vine_id, contract)
+        value = self._encode_memory_contract(vine_id, contract)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            exists = self._connection.execute(
+                """
+                SELECT 1 FROM payloads
+                WHERE vine_id = ? AND operation_state = 'committed'
+                """,
+                (vine_id,),
+            ).fetchone()
+            if exists is None:
+                raise KeyError("memory does not exist")
+            self._connection.execute(
+                """
+                INSERT INTO adapter_metadata(key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_memory_contract_key(vine_id), value),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+
+    def memory_contract_counts(self) -> dict[str, int]:
+        counts = {layer.value: 0 for layer in MemoryLayer}
+        if not self._secure_schema:
+            return counts
+        rows = self._connection.execute(
+            """
+            SELECT payloads.vine_id, adapter_metadata.value
+            FROM payloads
+            JOIN adapter_metadata
+              ON adapter_metadata.key = 'memory_contract:' || payloads.vine_id
+            LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+            WHERE payloads.operation_state = 'committed'
+              AND quarantine.vine_id IS NULL
+            ORDER BY payloads.created_at, payloads.vine_id
+            """
+        ).fetchall()
+        for vine_id_raw, encoded_raw in rows:
+            contract = self._decode_memory_contract(
+                str(vine_id_raw),
+                str(encoded_raw),
+            )
+            counts[contract.layer.value] += 1
+        return counts
+
     def find_duplicate(self, topic: str, payload: str) -> tuple[str, str] | None:
         if not self._secure_schema:
             return super().find_by_hash(super().digest(topic, payload))
@@ -1712,8 +2071,14 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             if row is None:
                 continue
             record = self.get_record(str(row[0]))
-            if record is not None and hmac.compare_digest(record[0], topic):
-                if hmac.compare_digest(record[1], payload):
+            if record is not None and hmac.compare_digest(
+                record[0].encode("utf-8"),
+                topic.encode("utf-8"),
+            ):
+                if hmac.compare_digest(
+                    record[1].encode("utf-8"),
+                    payload.encode("utf-8"),
+                ):
                     return str(row[0]), record[0]
         return None
 
@@ -1746,6 +2111,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         vectors: list[NDArray[np.float64]],
         effective_at: float,
         supersedes: tuple[str, ...],
+        contract: MemoryLayerContract | None = None,
     ) -> None:
         if not self._secure_schema:
             return super().put(
@@ -1756,7 +2122,10 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 vectors=vectors,
                 effective_at=effective_at,
                 supersedes=supersedes,
+                contract=contract,
             )
+        if not isinstance(contract, MemoryLayerContract):
+            raise TypeError("secure memories require a protected layer contract")
         keyring = self._require_keyring()
         key_id = keyring.active_key_id
         key = keyring.active_key()
@@ -1787,6 +2156,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             MAX_LEXICAL_FEATURES,
             key,
         )
+        contract_value = self._encode_memory_contract(vine_id, contract)
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             for prior_id in supersedes:
@@ -1872,6 +2242,13 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                     for term_hash, count in terms.items()
                 ],
             )
+            self._connection.execute(
+                """
+                INSERT INTO adapter_metadata(key, value)
+                VALUES (?, ?)
+                """,
+                (_memory_contract_key(vine_id), contract_value),
+            )
             for prior_id in supersedes:
                 self._connection.execute(
                     """
@@ -1923,7 +2300,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             return _validate_stored_topic(row[0]), payload
         row = self._connection.execute(
             """
-            SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+            SELECT topic, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
                    key_id, scope_id, format_version
             FROM payloads
             WHERE vine_id = ? AND operation_state = 'committed'
@@ -1932,7 +2309,62 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         ).fetchone()
         if row is None:
             return None
-        return self._decrypt_record(vine_id, row)
+        stored_topic_token = _validate_stored_topic(row[0])
+        record = self._decrypt_record(vine_id, row[1:])
+        keyring = self._require_keyring()
+        expected_topic_token = opaque_topic(
+            keyring.key(str(row[3])),
+            str(row[4]),
+            record[0],
+        )
+        if not hmac.compare_digest(stored_topic_token, expected_topic_token):
+            self._quarantine(vine_id, "topic_binding")
+            raise QuarantinedRecordError("encrypted record is quarantined")
+        return record
+
+    def get_record_details(self, vine_id: str) -> dict[str, Any] | None:
+        """Return one authenticated record with its bounded temporal metadata."""
+
+        clean_id = _validate_text(vine_id, "vine_id", 128)
+        if not self._secure_schema:
+            row = self._connection.execute(
+                """
+                SELECT effective_at, superseded_by, superseded_at
+                FROM payloads
+                WHERE vine_id = ?
+                """,
+                (clean_id,),
+            ).fetchone()
+        else:
+            row = self._connection.execute(
+                """
+                SELECT payloads.effective_at, payloads.superseded_by,
+                       payloads.superseded_at
+                FROM payloads
+                LEFT JOIN quarantine ON quarantine.vine_id = payloads.vine_id
+                WHERE payloads.vine_id = ?
+                  AND payloads.operation_state = 'committed'
+                  AND quarantine.vine_id IS NULL
+                """,
+                (clean_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        record = self.get_record(clean_id)
+        if record is None:
+            return None
+        return {
+            "vine_id": clean_id,
+            "topic": record[0],
+            "payload": record[1],
+            "effective_at": _validate_stored_timestamp(row[0], "effective_at"),
+            "superseded_by": None if row[1] is None else str(row[1]),
+            "superseded_at": (
+                None
+                if row[2] is None
+                else _validate_stored_timestamp(row[2], "superseded_at")
+            ),
+        }
 
     def _get_pending_record(self, vine_id: str) -> tuple[str, str] | None:
         row = self._connection.execute(
@@ -2005,6 +2437,10 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             )
             self._connection.execute(
                 "DELETE FROM memory_terms WHERE vine_id = ?", (vine_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM adapter_metadata WHERE key = ?",
+                (_memory_contract_key(vine_id),),
             )
             self._connection.execute(
                 """
@@ -2382,7 +2818,16 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         predicate = self._lexical_matches(_predicate_query(query))
         if not predicate:
             return []
-        placeholders = ",".join("?" for _ in predicate)
+        candidate_ids = sorted(
+            predicate,
+            key=lambda vine_id: (
+                predicate[vine_id][0],
+                predicate[vine_id][1],
+                vine_id,
+            ),
+            reverse=True,
+        )[:MAX_RETRIEVAL_CANDIDATES]
+        placeholders = ",".join("?" for _ in candidate_ids)
         candidate_query = (
             "SELECT payloads.vine_id, payloads.topic, payloads.effective_at, "
             "payloads.superseded_by, payloads.superseded_at "
@@ -2394,7 +2839,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         )
         rows = self._connection.execute(
             candidate_query,
-            tuple(sorted(predicate)),
+            tuple(candidate_ids),
         ).fetchall()
         candidates: list[_AvailabilityCandidate] = []
         for row in rows:
@@ -2550,7 +2995,23 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         counts = [
             self._connection.execute(query, (key_id,)).fetchone() for query in queries
         ]
-        return sum(0 if row is None else int(row[0]) for row in counts)
+        total = sum(0 if row is None else int(row[0]) for row in counts)
+        contract_rows = self._connection.execute(
+            """
+            SELECT value FROM adapter_metadata
+            WHERE key LIKE 'memory_contract:%'
+            """
+        ).fetchall()
+        for row in contract_rows:
+            try:
+                protected = ScopedProtectedBlob.from_json_bytes(
+                    str(row[0]).encode("ascii")
+                )
+            except Exception as exc:
+                raise RuntimeError("protected memory contract is corrupt") from exc
+            if protected.key_id == key_id:
+                total += 1
+        return total
 
     def rotate_batch(
         self,
@@ -2774,6 +3235,13 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         if row is None:
             return
         topic, payload = self._decrypt_record(vine_id, row)
+        contract = self.get_memory_contract(vine_id)
+        contract_value = self._encode_memory_contract(vine_id, contract)
+        protected_contract = ScopedProtectedBlob.from_json_bytes(
+            contract_value.encode("ascii")
+        )
+        if protected_contract.key_id != target_key_id:
+            raise RuntimeError("memory contract rotation target is inconsistent")
         vector_rows = self._connection.execute(
             """
             SELECT ordinal, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
@@ -2911,6 +3379,14 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                         (vine_id, term_hash, count, target_key_id)
                         for term_hash, count in terms.items()
                     ],
+                )
+                self._connection.execute(
+                    """
+                    UPDATE adapter_metadata
+                    SET value = ?
+                    WHERE key = ?
+                    """,
+                    (contract_value, _memory_contract_key(vine_id)),
                 )
                 self._connection.execute("COMMIT")
             except Exception:
@@ -3090,6 +3566,8 @@ class AgentMemory:
         )
         self._closed = False
         self._recovered_lifecycle_orphans = 0
+        self._migrated_memory_contracts = 0
+        self._expired_live_pruned = 0
         self._restored_on_startup = False
         self._store: SQLiteStore | None = None
         self._keyring: ProfileKeyring | None = None
@@ -3127,6 +3605,10 @@ class AgentMemory:
             )
             self._recovered_lifecycle_orphans = self._recover_incomplete_operations()
             self._bind_embedding_identity()
+            self._migrated_memory_contracts = (
+                self._payloads.initialize_memory_contracts()
+            )
+            self._expired_live_pruned = self._prune_expired_live_memory()
             self._restored_on_startup = True
         except Exception:
             payloads = getattr(self, "_payloads", None)
@@ -3149,19 +3631,54 @@ class AgentMemory:
         *,
         effective_at: float | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
+        layer: MemoryLayer | str = MemoryLayer.SHORT_TERM,
+        provenance: list[str] | tuple[str, ...] | None = None,
+        promotion_reason: str | None = None,
+        expires_at: float | None = None,
+        logic_kind: LogicKind | str | None = None,
+        related_ids: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; fully shielded memory "
+                "requires a scoped-v2 profile"
+            )
         clean_topic = _validate_text(topic, "topic", MAX_TOPIC_CHARS)
         clean_payload = _validate_text(payload, "payload", MAX_PAYLOAD_CHARS)
         effective = _validate_timestamp(effective_at, "effective_at")
         superseded_ids = _validate_vine_ids(supersedes)
+        contract = new_memory_contract(
+            layer,
+            provenance=provenance,
+            promotion_reason=promotion_reason,
+            expires_at=expires_at,
+            logic_kind=logic_kind,
+            related_ids=related_ids,
+        )
+        _validate_memory_content_policy(
+            contract.layer,
+            clean_payload,
+            operation="memory write",
+        )
+        if contract.layer == MemoryLayer.CONTEXTUAL_LOGIC:
+            self._prune_expired_live_memory()
+            missing_related = [
+                vine_id
+                for vine_id in contract.related_ids
+                if not self._managed_exists(vine_id)
+            ]
+            if missing_related:
+                raise ValueError("contextual-logic memory references an unknown memory")
         content_hash = self._payloads.digest(clean_topic, clean_payload)
         existing = self._payloads.find_duplicate(clean_topic, clean_payload)
         if existing is not None and self._managed_exists(existing[0]):
+            existing_contract = self._payloads.get_memory_contract(existing[0])
             return {
                 "vine_id": existing[0],
                 "topic": existing[1],
                 "created": False,
                 "duplicate": True,
+                **_public_record_contract(existing_contract, clean_payload),
             }
         if existing is not None:
             self._payloads.delete(existing[0], tombstone=False)
@@ -3169,61 +3686,27 @@ class AgentMemory:
         passages = _memory_passages(clean_topic, clean_payload)
         vectors = _embed_document_batch(self._embedder, passages)
         primary = _normalize_embedding_vector(np.mean(np.stack(vectors), axis=0))
-        if self._payloads.metadata_protected:
-            vine_id = uuid.uuid4().hex
-            self._payloads.put(
-                vine_id,
-                clean_topic,
-                clean_payload,
-                content_hash,
-                vectors=vectors,
-                effective_at=effective,
-                supersedes=superseded_ids,
-            )
-            try:
-                vine = self.oracle.sprout(
-                    self._payloads.topic_token(clean_topic),
-                    primary,
-                    vine_id=vine_id,
-                )
-                self._payloads.mark_committed(vine_id)
-            except Exception:
-                self.oracle.forget(vine_id)
-                self._payloads.delete(vine_id, tombstone=False)
-                raise
-            return {
-                "vine_id": vine.vine_id,
-                "topic": clean_topic,
-                "created": True,
-                "duplicate": False,
-                "effective_at": effective,
-                "supersedes": list(superseded_ids),
-            }
-
-        vine = self.oracle.sprout(clean_topic, primary)
+        vine_id = uuid.uuid4().hex
+        self._payloads.put(
+            vine_id,
+            clean_topic,
+            clean_payload,
+            content_hash,
+            vectors=vectors,
+            effective_at=effective,
+            supersedes=superseded_ids,
+            contract=contract,
+        )
         try:
-            self._payloads.put(
-                vine.vine_id,
-                clean_topic,
-                clean_payload,
-                content_hash,
-                vectors=vectors,
-                effective_at=effective,
-                supersedes=superseded_ids,
+            vine = self.oracle.sprout(
+                self._payloads.topic_token(clean_topic),
+                primary,
+                vine_id=vine_id,
             )
-        except sqlite3.IntegrityError:
-            self.oracle.forget(vine.vine_id)
-            winner = self._payloads.find_duplicate(clean_topic, clean_payload)
-            if winner is None:
-                raise
-            return {
-                "vine_id": winner[0],
-                "topic": winner[1],
-                "created": False,
-                "duplicate": True,
-            }
+            self._payloads.mark_committed(vine_id)
         except Exception:
-            self.oracle.forget(vine.vine_id)
+            self.oracle.forget(vine_id)
+            self._payloads.delete(vine_id, tombstone=False)
             raise
         return {
             "vine_id": vine.vine_id,
@@ -3232,6 +3715,117 @@ class AgentMemory:
             "duplicate": False,
             "effective_at": effective,
             "supersedes": list(superseded_ids),
+            **_public_record_contract(contract, clean_payload),
+        }
+
+    def refresh_live(
+        self,
+        vine_id: str,
+        payload: str,
+        *,
+        provenance: list[str] | tuple[str, ...] | None = None,
+        expires_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Refresh Live state, preserving changed content as supersession history."""
+
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; protected Live refresh "
+                "requires a scoped-v2 profile"
+            )
+        clean_id = _validate_text(vine_id, "vine_id", 128)
+        clean_payload = _validate_text(payload, "payload", MAX_PAYLOAD_CHARS)
+        self._prune_expired_live_memory()
+        if not self._managed_exists(clean_id):
+            raise KeyError("live memory does not exist or has expired")
+        current = self._payloads.get_memory_contract(clean_id)
+        if current.layer != MemoryLayer.LIVE:
+            raise ValueError("only live memory can be refreshed")
+        details = self._payloads.get_record_details(clean_id)
+        if details is None:
+            raise KeyError("live memory does not exist")
+        if details["superseded_by"] is not None:
+            raise ValueError("superseded live memory cannot be refreshed")
+        refreshed_contract = current.refresh_live(
+            provenance=provenance,
+            expires_at=expires_at,
+        )
+        _validate_memory_content_policy(
+            MemoryLayer.LIVE,
+            clean_payload,
+            operation="live memory refresh",
+        )
+        prior_payload = str(details["payload"])
+        if hmac.compare_digest(
+            clean_payload.encode("utf-8"),
+            prior_payload.encode("utf-8"),
+        ):
+            self._payloads.set_memory_contract(clean_id, refreshed_contract)
+            return {
+                "vine_id": clean_id,
+                "previous_vine_id": clean_id,
+                "topic": str(details["topic"]),
+                "created": False,
+                "duplicate": False,
+                "refreshed": True,
+                "content_changed": False,
+                "effective_at": float(details["effective_at"]),
+                "supersedes": [],
+                **_public_record_contract(refreshed_contract, clean_payload),
+            }
+
+        refreshed = self.remember(
+            str(details["topic"]),
+            clean_payload,
+            supersedes=[clean_id],
+            layer=MemoryLayer.LIVE,
+            provenance=list(refreshed_contract.provenance),
+            expires_at=refreshed_contract.expires_at,
+        )
+        return {
+            **refreshed,
+            "previous_vine_id": clean_id,
+            "refreshed": True,
+            "content_changed": True,
+        }
+
+    def promote(
+        self,
+        vine_id: str,
+        target_layer: MemoryLayer | str,
+        *,
+        reason: str,
+        provenance: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Deliberately promote live→short-term or short-term→long-term."""
+
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; protected promotion is unavailable"
+            )
+        clean_id = _validate_text(vine_id, "vine_id", 128)
+        if not self._managed_exists(clean_id):
+            raise KeyError("memory does not exist")
+        current = self._payloads.get_memory_contract(clean_id)
+        promoted = current.promote(
+            target_layer,
+            reason=reason,
+            provenance=provenance,
+        )
+        record = self._payloads.get_record(clean_id)
+        if record is None:
+            raise KeyError("memory does not exist")
+        _validate_memory_content_policy(
+            promoted.layer,
+            record[1],
+            operation=(f"{current.layer.value} to {promoted.layer.value} promotion"),
+        )
+        self._payloads.set_memory_contract(clean_id, promoted)
+        return {
+            "vine_id": clean_id,
+            "promoted": True,
+            "previous_layer": current.layer.value,
+            **_public_record_contract(promoted, record[1]),
         }
 
     def recall(
@@ -3242,8 +3836,15 @@ class AgentMemory:
         min_score: float | None = None,
         allow_inferential: bool = False,
         as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; fully shielded recall "
+                "requires a scoped-v2 profile"
+            )
         clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
+        expired_live_pruned = self._prune_expired_live_memory()
         if isinstance(top_k, bool) or not isinstance(top_k, int):
             raise TypeError("top_k must be an integer")
         if not 1 <= top_k <= MAX_RECALL_RESULTS:
@@ -3259,6 +3860,7 @@ class AgentMemory:
         if not isinstance(allow_inferential, bool):
             raise TypeError("allow_inferential must be a bool")
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
+        requested_layers = _validate_memory_layers(layers)
 
         retrieval_query_embed = getattr(self._embedder, "embed_retrieval_queries", None)
         answerability_embed = getattr(self._embedder, "embed_answerability_query", None)
@@ -3303,6 +3905,7 @@ class AgentMemory:
             answerability_intent,
         )
         candidates: list[_RankedCandidate] = []
+        contracts: dict[str, MemoryLayerContract] = {}
         answerability_rejected_count = 0
         for vine_id, item in stored.items():
             if point_in_time is not None and item.effective_at > point_in_time:
@@ -3314,6 +3917,15 @@ class AgentMemory:
                 )
                 if not temporal_current:
                     continue
+            try:
+                contract = self._payloads.get_memory_contract(vine_id)
+            except QuarantinedRecordError:
+                continue
+            if contract.is_expired():
+                continue
+            if requested_layers is not None and contract.layer not in requested_layers:
+                continue
+            contracts[vine_id] = contract
             vine = active.get(vine_id)
             lifecycle_score: float | None = None
             semantic_score = item.semantic_score
@@ -3361,19 +3973,26 @@ class AgentMemory:
                 )
             )
 
-        ranked = _mmr_rank(candidates)
+        ranked = _prioritize_competing_candidates(_mmr_rank(candidates))
 
         results: list[dict[str, Any]] = []
-        result_topic_tokens: list[str] = []
-        gated_count = 0
+        result_candidates: list[_RankedCandidate] = []
+        scan_limit = 2 if top_k == 1 else top_k
         for candidate in ranked:
             vine_id = candidate.vine_id
             score = candidate.relevance_score
             policy = classify(score)
+            contract = contracts[vine_id]
+            contract_fields = _public_contract(contract)
+            try:
+                record = self._payloads.get_record(vine_id)
+            except QuarantinedRecordError:
+                continue
+            if record is None:
+                continue
             try:
                 self.oracle.check_generation_gate(score, override=allow_inferential)
             except GenerationGated:
-                gated_count += 1
                 results.append(
                     {
                         "vine_id": vine_id,
@@ -3407,16 +4026,10 @@ class AgentMemory:
                         "confidence_indicator": policy.indicator,
                         "gated": True,
                         "payload": None,
+                        **contract_fields,
                     }
                 )
-                result_topic_tokens.append(candidate.topic)
             else:
-                try:
-                    record = self._payloads.get_record(vine_id)
-                except QuarantinedRecordError:
-                    continue
-                if record is None:
-                    continue
                 topic, payload = record
                 if candidate.source == "active":
                     self.oracle.reinforce(vine_id)
@@ -3449,14 +4062,37 @@ class AgentMemory:
                         "confidence_indicator": policy.indicator,
                         "gated": False,
                         "payload": payload,
+                        **_public_record_contract(contract, payload),
                     }
                 )
-                result_topic_tokens.append(candidate.topic)
-            if len(results) >= top_k:
+            result_candidates.append(candidate)
+            if len(results) >= scan_limit:
                 break
+
+        competing_pair_auto_expanded = (
+            top_k == 1
+            and len(result_candidates) >= 2
+            and _is_competing_pair(result_candidates[0], result_candidates[1])
+        )
+        effective_top_k = 2 if competing_pair_auto_expanded else top_k
+        if len(results) > effective_top_k:
+            del results[effective_top_k:]
+            del result_candidates[effective_top_k:]
 
         for rank, result in enumerate(results, start=1):
             result["rank"] = rank
+        competing_groups, competing_groups_omitted = _annotate_competing_memories(
+            results,
+            result_candidates,
+        )
+        competing_memory_detected = bool(competing_groups)
+        result_topic_tokens = [candidate.topic for candidate in result_candidates]
+        result_layers = {
+            str(result["memory_layer"])
+            for result in results
+            if isinstance(result.get("memory_layer"), str)
+        }
+        gated_count = sum(result.get("gated") is True for result in results)
         ranking_margin = (
             None
             if len(results) < 2
@@ -3478,27 +4114,143 @@ class AgentMemory:
             "gated_count": gated_count,
             "ranking_margin": ranking_margin,
             "ranking_ambiguous": ranking_ambiguous,
+            "requested_top_k": top_k,
+            "effective_top_k": effective_top_k,
+            "competing_memory_detected": competing_memory_detected,
+            "competing_pair_preserved": competing_memory_detected,
+            "competing_pair_auto_expanded": competing_pair_auto_expanded,
+            "competing_memory_groups": competing_groups,
+            "competing_memory_groups_omitted": competing_groups_omitted,
             "lifecycle": lifecycle,
+            "layers_involved": sorted(result_layers),
+            "requested_layers": (
+                [layer.value for layer in MemoryLayer]
+                if requested_layers is None
+                else [layer.value for layer in requested_layers]
+            ),
+            "expired_live_pruned": expired_live_pruned,
+            "memory_contract": {
+                "minimal_ranked_context": True,
+                "provenance_included": True,
+                "shielded_layer_metadata": True,
+                "protected_conflict_basis": True,
+                "conflict_compatibility_inferred": False,
+            },
         }
+
+    def context(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        max_depth: int = 1,
+        max_records: int = 8,
+    ) -> dict[str, Any]:
+        """Recall protected logic roots, then traverse only authenticated links."""
+
+        depth = _validate_context_bound(max_depth, "max_depth", MAX_CONTEXT_DEPTH)
+        record_limit = _validate_context_bound(
+            max_records,
+            "max_records",
+            MAX_CONTEXT_RECORDS,
+        )
+        root_recall = self.recall(
+            query,
+            top_k=2,
+            min_score=min_score,
+            allow_inferential=allow_inferential,
+            as_of=as_of,
+            layers=[MemoryLayer.CONTEXTUAL_LOGIC.value],
+        )
+        return _build_context_response(
+            self._payloads,
+            root_recall,
+            max_depth=depth,
+            max_records=record_limit,
+        )
 
     def forget(self, vine_id: str) -> dict[str, Any]:
         clean_id = _validate_text(vine_id, "vine_id", 128)
+        dependent_ids = self._contextual_dependents(clean_id)
+        cascaded: list[str] = []
+        for dependent_id in dependent_ids:
+            dependent_payload_deleted = self._payloads.delete(dependent_id)
+            dependent_lifecycle_deleted = self.oracle.forget(dependent_id)
+            if dependent_payload_deleted or dependent_lifecycle_deleted:
+                cascaded.append(dependent_id)
         # Revoke content access before cleaning derived lifecycle state.
         payload_deleted = self._payloads.delete(clean_id)
         memory_deleted = self.oracle.forget(clean_id)
         return {
             "vine_id": clean_id,
-            "forgotten": payload_deleted or memory_deleted,
+            "forgotten": payload_deleted or memory_deleted or bool(cascaded),
             "payload_deleted": payload_deleted,
             "lifecycle_deleted": memory_deleted,
+            "cascade_deleted_contextual_logic": cascaded,
         }
 
-    def list_memories(self, *, limit: int = 1000) -> list[dict[str, Any]]:
-        """List authorized profile records without exposing storage locations."""
+    def list_memories(
+        self,
+        *,
+        limit: int = 1000,
+        layers: list[str] | tuple[str, ...] | None = None,
+        topic_prefix: str | None = None,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List a bounded authorized inventory without retrieval-side effects."""
 
-        return self._payloads.list_records(limit=limit)
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; fully shielded listing "
+                "requires a scoped-v2 profile"
+            )
+        bounded_limit = _validate_context_bound(limit, "limit", 1000)
+        requested_layers = _validate_memory_layers(layers)
+        clean_prefix = (
+            None
+            if topic_prefix is None
+            else _validate_text(topic_prefix, "topic_prefix", MAX_TOPIC_CHARS)
+        )
+        if not isinstance(newest_first, bool):
+            raise TypeError("newest_first must be a boolean")
+        self._prune_expired_live_memory()
+        records = self._payloads.list_records(limit=1000)
+        result: list[dict[str, Any]] = []
+        for record in records:
+            vine_id = str(record["vine_id"])
+            try:
+                contract = self._payloads.get_memory_contract(vine_id)
+            except QuarantinedRecordError:
+                continue
+            if requested_layers is not None and contract.layer not in requested_layers:
+                continue
+            if clean_prefix is not None and not str(record["topic"]).startswith(
+                clean_prefix
+            ):
+                continue
+            result.append(
+                {
+                    **record,
+                    **_public_record_contract(contract, str(record["payload"])),
+                }
+            )
+        if newest_first:
+            result.sort(
+                key=lambda item: (
+                    float(item["effective_at"]),
+                    str(item["vine_id"]),
+                ),
+                reverse=True,
+            )
+        return result[:bounded_limit]
 
     def reindex(self) -> dict[str, Any]:
+        if not self._payloads.metadata_protected:
+            raise RuntimeError(
+                "legacy profiles are migration-only; protected reindexing is unavailable"
+            )
         started = time.perf_counter()
         record_ids = self._payloads.record_ids_for_reindex()
         updated = 0
@@ -3540,6 +4292,31 @@ class AgentMemory:
             raise ValueError("target profile must be empty")
 
         records = self._payloads.records_for_migration()
+        source_contracts: dict[str, MemoryLayerContract] = {}
+        for record in records:
+            payload = self._payloads.get(record.vine_id)
+            if payload is None:
+                raise RuntimeError("payload disappeared during migration preflight")
+            try:
+                source_contract = (
+                    self._payloads.get_memory_contract(record.vine_id)
+                    if self._payloads.metadata_protected
+                    else None
+                )
+                policy_layer = (
+                    MemoryLayer.SHORT_TERM
+                    if source_contract is None
+                    else source_contract.layer
+                )
+                _validate_memory_content_policy(
+                    policy_layer,
+                    payload,
+                    operation="profile migration",
+                )
+                if source_contract is not None:
+                    source_contracts[record.vine_id] = source_contract
+            finally:
+                payload = ""
         predecessors: dict[str, list[str]] = {}
         source_ids = {record.vine_id for record in records}
         for record in records:
@@ -3564,6 +4341,13 @@ class AgentMemory:
                         raise RuntimeError(
                             "payload disappeared during profile migration"
                         )
+                    source_contract = source_contracts.get(source_id)
+                    temporary_layer = (
+                        MemoryLayer.LIVE
+                        if source_contract is not None
+                        and source_contract.layer == MemoryLayer.LIVE
+                        else MemoryLayer.SHORT_TERM
+                    )
                     try:
                         result = target.remember(
                             record.topic,
@@ -3572,6 +4356,14 @@ class AgentMemory:
                             supersedes=[
                                 migrated_ids[prior_id] for prior_id in prior_ids
                             ],
+                            layer=temporary_layer,
+                            provenance=["migration:profile-transfer"],
+                            expires_at=(
+                                source_contract.expires_at
+                                if temporary_layer == MemoryLayer.LIVE
+                                and source_contract is not None
+                                else None
+                            ),
                         )
                     finally:
                         payload = ""
@@ -3584,6 +4376,29 @@ class AgentMemory:
                     raise RuntimeError(
                         "source profile contains cyclic supersession history"
                     )
+            if self._payloads.metadata_protected:
+                for source_id, target_id in migrated_ids.items():
+                    contract = source_contracts[source_id]
+                    if contract.related_ids:
+                        try:
+                            related_ids = tuple(
+                                migrated_ids[related_id]
+                                for related_id in contract.related_ids
+                            )
+                        except KeyError as exc:
+                            raise RuntimeError(
+                                "source memory contract references an unknown record"
+                            ) from exc
+                        contract = MemoryLayerContract(
+                            layer=contract.layer,
+                            provenance=contract.provenance,
+                            expires_at=contract.expires_at,
+                            review_at=contract.review_at,
+                            promotion_history=contract.promotion_history,
+                            logic_kind=contract.logic_kind,
+                            related_ids=related_ids,
+                        )
+                    target._payloads.set_memory_contract(target_id, contract)
         except Exception:
             for target_id in reversed(created_target_ids):
                 target.forget(target_id)
@@ -3701,6 +4516,7 @@ class AgentMemory:
     def doctor(self) -> dict[str, Any]:
         capability = self.oracle.capability_report().as_dict()
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        layer_counts = self._payloads.memory_contract_counts()
         quarantine_count = self._payloads.quarantine_count()
         answerability_ready = self._embedder.semantic and (
             callable(getattr(self._embedder, "embed_retrieval_queries", None))
@@ -3718,16 +4534,34 @@ class AgentMemory:
                 rotation_remaining += self._store.count_protected_payloads_for_key(
                     rotation_state["from"]
                 )
-        rotation_ready = scoped and quarantine_count == 0 and unindexed_count == 0
+        protected_contract_count = sum(layer_counts.values())
+        contract_gap = max(0, len(self._payloads) - protected_contract_count)
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        active_ids, indexed_ids, archived_ids, metadata_ids = (
+            self._store.managed_state_ids()
+        )
+        if indexed_ids != archived_ids or indexed_ids != metadata_ids:
+            raise RuntimeError("memory lifecycle tier integrity check failed")
+        lifecycle_ids = active_ids | indexed_ids
+        payload_ids = set(self._payloads.record_ids_for_reindex())
+        unpaired_lifecycle_ids = lifecycle_ids.symmetric_difference(payload_ids)
+        all_layers_shielded = (
+            scoped and contract_gap == 0 and not unpaired_lifecycle_ids
+        )
+        rotation_ready = (
+            all_layers_shielded and quarantine_count == 0 and unindexed_count == 0
+        )
         healthy = (
             scoped
+            and all_layers_shielded
             and self._restored_on_startup
             and quarantine_count == 0
             and unindexed_count == 0
         )
         return {
-            "adapter_ready": True,
-            "mode": "local-staging",
+            "adapter_ready": healthy,
+            "mode": "local-staging" if scoped else "legacy-migration-only",
             "local_protection_ready": healthy,
             "production_ready": False,
             "profile": self.profile_dir.name,
@@ -3747,12 +4581,17 @@ class AgentMemory:
             "readiness": {
                 "installed": True,
                 "enabled": True,
-                "crypto_initialized": True,
-                "write_wired": True,
-                "index_wired": True,
-                "retrieval_wired": True,
-                "persistence_wired": True,
+                "crypto_initialized": scoped,
+                "write_wired": scoped,
+                "index_wired": scoped,
+                "retrieval_wired": scoped,
+                "persistence_wired": scoped,
                 "restart_restored": self._restored_on_startup,
+                "layer_contract_wired": all_layers_shielded,
+                "context_trace_wired": all_layers_shielded,
+                "competing_memory_wired": all_layers_shielded,
+                "content_policy_wired": all_layers_shielded,
+                "live_refresh_wired": all_layers_shielded,
                 "rotation_ready": rotation_ready,
                 "healthy": healthy,
             },
@@ -3761,10 +4600,36 @@ class AgentMemory:
                 "remaining_key_references": rotation_remaining,
             },
             "reconciliation_backlog": len(self._payloads.pending_ids()),
+            "migrated_memory_contracts": self._migrated_memory_contracts,
+            "expired_live_pruned": self._expired_live_pruned,
             "quarantined_records": quarantine_count,
             "failed_decryptions": quarantine_count,
             "authenticated_deletion_records": self._payloads.tombstone_count(),
             "plaintext_fallback_attempts": 0,
+            "memory_layers": {
+                "contract": MEMORY_CONTRACT_SCHEMA,
+                "semantic_layers": [layer.value for layer in MemoryLayer],
+                "all_records_shielded": all_layers_shielded,
+                "protected_record_count": protected_contract_count,
+                "unprotected_record_count": contract_gap,
+                "unpaired_lifecycle_record_count": len(unpaired_lifecycle_ids),
+                "counts": layer_counts,
+                "promotion_policy": "explicit-live-to-short-to-long",
+                "contextual_logic_links": "record-bound-encrypted",
+                "layer_filtering": "authenticated-no-score-rewrite",
+                "context_trace": "bounded-authenticated-outgoing-v1",
+                "competing_memory": "bounded-authenticated-topic-v1",
+                "content_policy": MEMORY_CONTENT_POLICY,
+                "payload_limits_chars": {
+                    "live": MAX_LIVE_MEMORY_CHARS,
+                    "short_term": MAX_SHORT_TERM_MEMORY_CHARS,
+                    "long_term": MAX_LONG_TERM_MEMORY_CHARS,
+                    "contextual_logic": MAX_CONTEXTUAL_LOGIC_MEMORY_CHARS,
+                },
+                "raw_transcript_retention": "live-only",
+                "automatic_content_rewriting": False,
+                "live_refresh": "protected-supersession-or-renewal-v1",
+            },
             "retrieval": {
                 "strategy": RETRIEVAL_SCHEMA_VERSION,
                 "protected_multivector_count": indexed_count,
@@ -3773,6 +4638,7 @@ class AgentMemory:
                 "lexical_terms": "keyed-hash",
                 "diversity_ranking": "topic-aware-mmr",
                 "temporal_history": "explicit-supersession",
+                "competing_memory": "possible-conflict-no-inference-v1",
                 "answerability_gate": (
                     "semantic-predicate-v1" if answerability_ready else "unavailable"
                 ),
@@ -3809,16 +4675,72 @@ class AgentMemory:
                         "migrate it to a new scoped-v2 profile."
                     ]
                 ),
+                *(
+                    []
+                    if all_layers_shielded
+                    else [
+                        "The four-layer contract or lifecycle pairing is incomplete; "
+                        "the adapter is not healthy until it is reconciled."
+                    ]
+                ),
                 "AES-GCM local staging is not the production enclave profile.",
                 "Python cannot guarantee complete in-process plaintext zeroization.",
             ],
         }
 
+    def _prune_expired_live_memory(self) -> int:
+        """Remove expired Live records without promoting or archiving them."""
+
+        if not self._payloads.metadata_protected:
+            return 0
+        expired: list[str] = []
+        for vine_id in self._payloads.record_ids_for_reindex():
+            try:
+                contract = self._payloads.get_memory_contract(vine_id)
+            except QuarantinedRecordError:
+                continue
+            if contract.layer == MemoryLayer.LIVE and contract.is_expired():
+                expired.append(vine_id)
+        for vine_id in expired:
+            self.forget(vine_id)
+        return len(expired)
+
+    def _contextual_dependents(self, vine_id: str) -> list[str]:
+        """Return transitive protected logic dependents in deletion order."""
+
+        reverse_links: dict[str, list[str]] = {}
+        for candidate_id in self._payloads.record_ids_for_reindex():
+            try:
+                contract = self._payloads.get_memory_contract(candidate_id)
+            except QuarantinedRecordError:
+                continue
+            if contract.layer != MemoryLayer.CONTEXTUAL_LOGIC:
+                continue
+            for related_id in contract.related_ids:
+                reverse_links.setdefault(related_id, []).append(candidate_id)
+
+        ordered: list[str] = []
+        seen = {vine_id}
+
+        def visit(target_id: str) -> None:
+            for dependent_id in sorted(reverse_links.get(target_id, ())):
+                if dependent_id in seen:
+                    continue
+                seen.add(dependent_id)
+                visit(dependent_id)
+                ordered.append(dependent_id)
+
+        visit(vine_id)
+        return ordered
+
     def _managed_exists(self, vine_id: str) -> bool:
-        return (
+        lifecycle_exists = (
             self.oracle.workspace.get(vine_id) is not None
             or self.oracle.archived_metadata(vine_id) is not None
         )
+        if not lifecycle_exists:
+            return False
+        return vine_id in set(self._payloads.record_ids_for_reindex())
 
     def _recover_incomplete_operations(self) -> int:
         if self._store is None:
@@ -3926,12 +4848,9 @@ class AlwaysAvailableMemory:
         self.profile_dir = profile_dir.absolute()
         payload_path = self.profile_dir / "payloads.db"
         if _payload_database_version(payload_path) == LEGACY_PAYLOAD_SCHEMA_VERSION:
-            key = _load_existing_key(self.profile_dir / "agent.key")
-            self._keyring: ProfileKeyring | None = None
-            self._payloads = _EncryptedPayloadStore(
-                payload_path,
-                legacy_key=key,
-                read_only=True,
+            raise RuntimeError(
+                "always-available recall requires a scoped-v2 profile because "
+                "legacy topic and layer metadata are not fully shielded"
             )
         else:
             self._keyring = ProfileKeyring(
@@ -3944,6 +4863,7 @@ class AlwaysAvailableMemory:
                 keyring=self._keyring,
                 read_only=True,
             )
+            self._payloads.initialize_memory_contracts()
 
     def remember(
         self,
@@ -3952,9 +4872,50 @@ class AlwaysAvailableMemory:
         *,
         effective_at: float | None = None,
         supersedes: list[str] | tuple[str, ...] | None = None,
+        layer: MemoryLayer | str = MemoryLayer.SHORT_TERM,
+        provenance: list[str] | tuple[str, ...] | None = None,
+        promotion_reason: str | None = None,
+        expires_at: float | None = None,
+        logic_kind: LogicKind | str | None = None,
+        related_ids: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        del topic, payload, effective_at, supersedes
+        del (
+            topic,
+            payload,
+            effective_at,
+            supersedes,
+            layer,
+            provenance,
+            promotion_reason,
+            expires_at,
+            logic_kind,
+            related_ids,
+        )
         raise RuntimeError("remember is unavailable in read-only always-available mode")
+
+    def promote(
+        self,
+        vine_id: str,
+        target_layer: MemoryLayer | str,
+        *,
+        reason: str,
+        provenance: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        del vine_id, target_layer, reason, provenance
+        raise RuntimeError("promote is unavailable in read-only always-available mode")
+
+    def refresh_live(
+        self,
+        vine_id: str,
+        payload: str,
+        *,
+        provenance: list[str] | tuple[str, ...] | None = None,
+        expires_at: float | None = None,
+    ) -> dict[str, Any]:
+        del vine_id, payload, provenance, expires_at
+        raise RuntimeError(
+            "refresh_live is unavailable in read-only always-available mode"
+        )
 
     def recall(
         self,
@@ -3964,6 +4925,7 @@ class AlwaysAvailableMemory:
         min_score: float | None = None,
         allow_inferential: bool = False,
         as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
         if isinstance(top_k, bool) or not isinstance(top_k, int):
@@ -3987,19 +4949,31 @@ class AlwaysAvailableMemory:
                 "inferential recall is unavailable without semantic verification"
             )
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
-        candidates = self._payloads.availability_candidates(
-            clean_query,
-            as_of=point_in_time,
+        requested_layers = _validate_memory_layers(layers)
+        candidates = _prioritize_competing_candidates(
+            self._payloads.availability_candidates(
+                clean_query,
+                as_of=point_in_time,
+            )
         )
         results: list[dict[str, Any]] = []
+        result_candidates: list[_AvailabilityCandidate] = []
+        expired_live_suppressed = 0
+        scan_limit = 2 if top_k == 1 else top_k
         for candidate in candidates:
             if candidate.predicate_score < threshold:
                 continue
             if candidate.matched_features < MIN_AVAILABILITY_FEATURES:
                 continue
             try:
+                contract = self._payloads.get_memory_contract(candidate.vine_id)
                 record = self._payloads.get_record(candidate.vine_id)
             except QuarantinedRecordError:
+                continue
+            if contract.is_expired():
+                expired_live_suppressed += 1
+                continue
+            if requested_layers is not None and contract.layer not in requested_layers:
                 continue
             if record is None:
                 continue
@@ -4034,10 +5008,33 @@ class AlwaysAvailableMemory:
                     ),
                     "gated": False,
                     "payload": payload,
+                    **_public_record_contract(contract, payload),
                 }
             )
-            if len(results) >= top_k:
+            result_candidates.append(candidate)
+            if len(results) >= scan_limit:
                 break
+        competing_pair_auto_expanded = (
+            top_k == 1
+            and len(result_candidates) >= 2
+            and _is_competing_pair(result_candidates[0], result_candidates[1])
+        )
+        effective_top_k = 2 if competing_pair_auto_expanded else top_k
+        if len(results) > effective_top_k:
+            del results[effective_top_k:]
+            del result_candidates[effective_top_k:]
+        for rank, result in enumerate(results, start=1):
+            result["rank"] = rank
+        competing_groups, competing_groups_omitted = _annotate_competing_memories(
+            results,
+            result_candidates,
+        )
+        competing_memory_detected = bool(competing_groups)
+        result_layers = {
+            str(result["memory_layer"])
+            for result in results
+            if isinstance(result.get("memory_layer"), str)
+        }
         return {
             "query": clean_query,
             "as_of": point_in_time,
@@ -4053,6 +5050,27 @@ class AlwaysAvailableMemory:
             "gated_count": 0,
             "ranking_margin": None,
             "ranking_ambiguous": False,
+            "requested_top_k": top_k,
+            "effective_top_k": effective_top_k,
+            "competing_memory_detected": competing_memory_detected,
+            "competing_pair_preserved": competing_memory_detected,
+            "competing_pair_auto_expanded": competing_pair_auto_expanded,
+            "competing_memory_groups": competing_groups,
+            "competing_memory_groups_omitted": competing_groups_omitted,
+            "layers_involved": sorted(result_layers),
+            "requested_layers": (
+                [layer.value for layer in MemoryLayer]
+                if requested_layers is None
+                else [layer.value for layer in requested_layers]
+            ),
+            "expired_live_suppressed": expired_live_suppressed,
+            "memory_contract": {
+                "minimal_ranked_context": True,
+                "provenance_included": True,
+                "shielded_layer_metadata": True,
+                "protected_conflict_basis": True,
+                "conflict_compatibility_inferred": False,
+            },
             "limitations": [
                 "Only strong keyed lexical and predicate overlap is available.",
                 "Paraphrases may be missed until semantic recall is restored.",
@@ -4060,18 +5078,95 @@ class AlwaysAvailableMemory:
             ],
         }
 
+    def context(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        max_depth: int = 1,
+        max_records: int = 8,
+    ) -> dict[str, Any]:
+        depth = _validate_context_bound(max_depth, "max_depth", MAX_CONTEXT_DEPTH)
+        record_limit = _validate_context_bound(
+            max_records,
+            "max_records",
+            MAX_CONTEXT_RECORDS,
+        )
+        root_recall = self.recall(
+            query,
+            top_k=2,
+            min_score=min_score,
+            allow_inferential=allow_inferential,
+            as_of=as_of,
+            layers=[MemoryLayer.CONTEXTUAL_LOGIC.value],
+        )
+        return _build_context_response(
+            self._payloads,
+            root_recall,
+            max_depth=depth,
+            max_records=record_limit,
+        )
+
     def forget(self, vine_id: str) -> dict[str, Any]:
         del vine_id
         raise RuntimeError("forget is unavailable in read-only always-available mode")
 
-    def list_memories(self, *, limit: int = 1000) -> list[dict[str, Any]]:
-        return self._payloads.list_records(limit=limit)
+    def list_memories(
+        self,
+        *,
+        limit: int = 1000,
+        layers: list[str] | tuple[str, ...] | None = None,
+        topic_prefix: str | None = None,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = _validate_context_bound(limit, "limit", 1000)
+        requested_layers = _validate_memory_layers(layers)
+        clean_prefix = (
+            None
+            if topic_prefix is None
+            else _validate_text(topic_prefix, "topic_prefix", MAX_TOPIC_CHARS)
+        )
+        if not isinstance(newest_first, bool):
+            raise TypeError("newest_first must be a boolean")
+        records = self._payloads.list_records(limit=1000)
+        result: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                contract = self._payloads.get_memory_contract(str(record["vine_id"]))
+            except QuarantinedRecordError:
+                continue
+            if contract.is_expired():
+                continue
+            if requested_layers is not None and contract.layer not in requested_layers:
+                continue
+            if clean_prefix is not None and not str(record["topic"]).startswith(
+                clean_prefix
+            ):
+                continue
+            result.append(
+                {
+                    **record,
+                    **_public_record_contract(contract, str(record["payload"])),
+                }
+            )
+        if newest_first:
+            result.sort(
+                key=lambda item: (
+                    float(item["effective_at"]),
+                    str(item["vine_id"]),
+                ),
+                reverse=True,
+            )
+        return result[:bounded_limit]
 
     def reindex(self) -> dict[str, Any]:
         raise RuntimeError("reindex is unavailable in read-only always-available mode")
 
     def doctor(self) -> dict[str, Any]:
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
+        layer_counts = self._payloads.memory_contract_counts()
         return {
             "adapter_ready": True,
             "mode": "always-available-read-only",
@@ -4090,12 +5185,35 @@ class AlwaysAvailableMemory:
             "semantic_available": False,
             "writes_available": False,
             "lifecycle_mutation_available": False,
+            "memory_layers": {
+                "contract": MEMORY_CONTRACT_SCHEMA,
+                "semantic_layers": [layer.value for layer in MemoryLayer],
+                "all_records_shielded": sum(layer_counts.values())
+                == len(self._payloads),
+                "counts": layer_counts,
+                "lifecycle_mutation_available": False,
+                "layer_filtering": "authenticated-no-score-rewrite",
+                "context_trace": "bounded-authenticated-outgoing-v1",
+                "competing_memory": "bounded-authenticated-topic-v1",
+                "content_policy": MEMORY_CONTENT_POLICY,
+                "payload_limits_chars": {
+                    "live": MAX_LIVE_MEMORY_CHARS,
+                    "short_term": MAX_SHORT_TERM_MEMORY_CHARS,
+                    "long_term": MAX_LONG_TERM_MEMORY_CHARS,
+                    "contextual_logic": MAX_CONTEXTUAL_LOGIC_MEMORY_CHARS,
+                },
+                "raw_transcript_retention": "live-only",
+                "automatic_content_rewriting": False,
+                "live_refresh": "unavailable-read-only",
+            },
             "quarantined_records": self._payloads.quarantine_count(),
             "retrieval": {
                 "strategy": "encrypted-keyed-predicate-v1",
                 "protected_multivector_count": indexed_count,
                 "unindexed_payload_count": unindexed_count,
+                "candidate_limit": MAX_RETRIEVAL_CANDIDATES,
                 "lexical_terms": "keyed-hash",
+                "competing_memory": "possible-conflict-no-inference-v1",
                 "minimum_score": DEFAULT_AVAILABILITY_MIN_SCORE,
                 "minimum_matched_features": MIN_AVAILABILITY_FEATURES,
             },
@@ -4247,6 +5365,93 @@ def _memory_passages(topic: str, payload: str) -> list[str]:
     return selected
 
 
+def _memory_payload_limit(layer: MemoryLayer) -> int:
+    limits = {
+        MemoryLayer.LIVE: MAX_LIVE_MEMORY_CHARS,
+        MemoryLayer.SHORT_TERM: MAX_SHORT_TERM_MEMORY_CHARS,
+        MemoryLayer.LONG_TERM: MAX_LONG_TERM_MEMORY_CHARS,
+        MemoryLayer.CONTEXTUAL_LOGIC: MAX_CONTEXTUAL_LOGIC_MEMORY_CHARS,
+    }
+    return limits[layer]
+
+
+def _looks_like_raw_transcript(payload: str) -> bool:
+    role_lines = _TRANSCRIPT_ROLE_LINE.findall(payload)
+    if len(role_lines) >= 2 and len({role.casefold() for role in role_lines}) >= 2:
+        return True
+    if len(_TRANSCRIPT_JSON_ROLE.findall(payload)) >= 2:
+        return True
+    return payload.count("<|im_start|>") >= 2 or payload.count("<|im_end|>") >= 2
+
+
+def _memory_content_policy(
+    layer: MemoryLayer,
+    payload: str,
+) -> dict[str, Any]:
+    raw_transcript = _looks_like_raw_transcript(payload)
+    within_layer_limit = len(payload) <= _memory_payload_limit(layer)
+    policy_compliant = within_layer_limit and (
+        layer == MemoryLayer.LIVE or not raw_transcript
+    )
+    long_term_ready = len(payload) <= MAX_LONG_TERM_MEMORY_CHARS and not raw_transcript
+    return {
+        "policy": MEMORY_CONTENT_POLICY,
+        "character_count": len(payload),
+        "layer_character_limit": _memory_payload_limit(layer),
+        "raw_transcript_detected": raw_transcript,
+        "policy_compliant": policy_compliant,
+        "long_term_ready": long_term_ready,
+        "compaction_required_for_promotion": (
+            layer != MemoryLayer.LONG_TERM and not long_term_ready
+        ),
+        "automatic_rewriting_performed": False,
+    }
+
+
+def _validate_memory_content_policy(
+    layer: MemoryLayer,
+    payload: str,
+    *,
+    operation: str,
+) -> None:
+    limit = _memory_payload_limit(layer)
+    if len(payload) > limit:
+        raise ValueError(
+            f"{operation} exceeds the {limit}-character {layer.value} memory "
+            "limit; keep full source material in the authorized host store and "
+            "write a compact intent/outcome memory"
+        )
+    if layer != MemoryLayer.LIVE and _looks_like_raw_transcript(payload):
+        raise ValueError(
+            f"{operation} appears to contain a raw transcript; keep the transcript "
+            "in the authorized host source and write a compact seed crystal"
+        )
+
+
+def _public_record_contract(
+    contract: MemoryLayerContract,
+    payload: str,
+) -> dict[str, Any]:
+    public = _public_contract(contract)
+    content_policy = _memory_content_policy(contract.layer, payload)
+    if (
+        contract.layer == MemoryLayer.LIVE
+        and content_policy["compaction_required_for_promotion"] is True
+    ):
+        public["promotion_recommendation"] = (
+            "compact_before_short_term_promotion_or_discard"
+        )
+    elif (
+        contract.layer == MemoryLayer.SHORT_TERM
+        and content_policy["compaction_required_for_promotion"] is True
+    ):
+        public["promotion_recommendation"] = (
+            "compact_seed_crystal_before_long_term_promotion"
+        )
+    public["content_policy"] = content_policy
+    return public
+
+
 def _lexical_features(text: str, limit: int) -> dict[str, int]:
     tokens = [
         token
@@ -4357,8 +5562,354 @@ def _mmr_rank(candidates: list[_RankedCandidate]) -> list[_RankedCandidate]:
     return selected
 
 
+def _prioritize_competing_candidates(
+    candidates: Sequence[_CompetingCandidateT],
+) -> list[_CompetingCandidateT]:
+    """Keep the strongest current same-topic partner beside its first result."""
+
+    remaining = list(candidates)
+    prioritized: list[_CompetingCandidateT] = []
+    while remaining:
+        candidate = remaining.pop(0)
+        prioritized.append(candidate)
+        if not candidate.temporal_current:
+            continue
+        protected_topic = candidate.topic.casefold()
+        partner_index = next(
+            (
+                index
+                for index, possible_partner in enumerate(remaining)
+                if possible_partner.temporal_current
+                and possible_partner.topic.casefold() == protected_topic
+            ),
+            None,
+        )
+        if partner_index is not None:
+            prioritized.append(remaining.pop(partner_index))
+    return prioritized
+
+
+def _is_competing_pair(
+    first: _CompetingCandidate,
+    second: _CompetingCandidate,
+) -> bool:
+    return (
+        first.temporal_current
+        and second.temporal_current
+        and first.vine_id != second.vine_id
+        and first.topic.casefold() == second.topic.casefold()
+    )
+
+
+def _annotate_competing_memories(
+    results: list[dict[str, Any]],
+    candidates: Sequence[_CompetingCandidate],
+) -> tuple[list[dict[str, Any]], int]:
+    """Label bounded same-topic groups without claiming semantic contradiction."""
+
+    if len(results) != len(candidates):
+        raise RuntimeError("recall result and protected topic metadata diverged")
+    for result in results:
+        result["possible_conflict"] = False
+        result["competing_memory_group"] = None
+
+    grouped_indexes: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        if candidate.temporal_current:
+            grouped_indexes.setdefault(candidate.topic.casefold(), []).append(index)
+    competing = [indexes for indexes in grouped_indexes.values() if len(indexes) >= 2]
+    competing.sort(key=lambda indexes: indexes[0])
+    visible_groups = competing[:MAX_COMPETING_MEMORY_GROUPS]
+    groups: list[dict[str, Any]] = []
+    for ordinal, indexes in enumerate(visible_groups, start=1):
+        group_id = f"competing-{ordinal}"
+        for index in indexes:
+            results[index]["possible_conflict"] = True
+            results[index]["competing_memory_group"] = group_id
+        member_ids = [str(results[index]["vine_id"]) for index in indexes]
+        groups.append(
+            {
+                "group_id": group_id,
+                "status": "possible_conflict",
+                "returned_member_count": len(member_ids),
+                "member_ids": member_ids[:MAX_COMPETING_MEMORY_IDS],
+                "member_ids_truncated": len(member_ids) > MAX_COMPETING_MEMORY_IDS,
+                "basis": (
+                    "Multiple returned current records share one authenticated "
+                    "protected topic; compatibility was not inferred."
+                ),
+                "protected_topic_basis": True,
+                "topic_exposed": False,
+                "resolution_status": "not_evaluated",
+                "resolution_guidance": (
+                    "Preserve and review every returned member. Explicitly "
+                    "supersede an obsolete fact, or store a protected Contextual "
+                    "Logic contradiction_resolution that links the evidence."
+                ),
+            }
+        )
+    return groups, max(0, len(competing) - len(visible_groups))
+
+
 def _round_optional(value: float | None) -> float | None:
     return None if value is None else round(value, 6)
+
+
+def _build_context_response(
+    payloads: _EncryptedPayloadStore,
+    root_recall: dict[str, Any],
+    *,
+    max_depth: int,
+    max_records: int,
+) -> dict[str, Any]:
+    """Expand only authenticated outgoing links from confidence-checked roots."""
+
+    raw_roots = root_recall.get("results")
+    roots = list(raw_roots) if isinstance(raw_roots, list) else []
+    point_in_time_raw = root_recall.get("as_of")
+    point_in_time = (
+        float(point_in_time_raw)
+        if isinstance(point_in_time_raw, (int, float))
+        and not isinstance(point_in_time_raw, bool)
+        else None
+    )
+    queue: deque[tuple[str, str, int, str, tuple[str, ...]]] = deque()
+    root_expansion: list[dict[str, Any]] = []
+    visited = {
+        str(root["vine_id"])
+        for root in roots
+        if isinstance(root, dict) and isinstance(root.get("vine_id"), str)
+    }
+    incomplete = False
+
+    for root in roots:
+        if not isinstance(root, dict) or not isinstance(root.get("vine_id"), str):
+            incomplete = True
+            continue
+        root_id = str(root["vine_id"])
+        if root.get("gated") is True:
+            root_expansion.append(
+                {
+                    "vine_id": root_id,
+                    "expanded": False,
+                    "status": "confidence_gated",
+                }
+            )
+            incomplete = True
+            continue
+        try:
+            contract = payloads.get_memory_contract(root_id)
+        except QuarantinedRecordError:
+            root_expansion.append(
+                {
+                    "vine_id": root_id,
+                    "expanded": False,
+                    "status": "authentication_failed",
+                }
+            )
+            incomplete = True
+            continue
+        if (
+            contract.layer != MemoryLayer.CONTEXTUAL_LOGIC
+            or contract.logic_kind is None
+        ):
+            root_expansion.append(
+                {
+                    "vine_id": root_id,
+                    "expanded": False,
+                    "status": "invalid_logic_root",
+                }
+            )
+            incomplete = True
+            continue
+        root_expansion.append(
+            {
+                "vine_id": root_id,
+                "expanded": True,
+                "status": "authenticated",
+            }
+        )
+        for related_id in contract.related_ids:
+            queue.append(
+                (
+                    root_id,
+                    related_id,
+                    1,
+                    contract.logic_kind.value,
+                    (root_id,),
+                )
+            )
+
+    evidence: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    while queue and len(evidence) < max_records and len(edges) < MAX_CONTEXT_EDGES:
+        parent_id, target_id, depth, logic_kind, path = queue.popleft()
+        edge = {
+            "from": parent_id,
+            "to": target_id,
+            "depth": depth,
+            "logic_kind": logic_kind,
+        }
+        if target_id in path:
+            edges.append({**edge, "status": "cycle_blocked"})
+            incomplete = True
+            continue
+        if target_id in visited:
+            edges.append({**edge, "status": "already_included"})
+            continue
+        try:
+            contract = payloads.get_memory_contract(target_id)
+        except QuarantinedRecordError:
+            edges.append({**edge, "status": "authentication_failed"})
+            incomplete = True
+            continue
+        try:
+            details = payloads.get_record_details(target_id)
+        except QuarantinedRecordError:
+            edges.append({**edge, "status": "authentication_failed"})
+            incomplete = True
+            continue
+        if details is None:
+            edges.append({**edge, "status": "missing"})
+            incomplete = True
+            continue
+        if contract.is_expired():
+            edges.append({**edge, "status": "expired"})
+            incomplete = True
+            continue
+        effective_at = float(details["effective_at"])
+        superseded_at_raw = details["superseded_at"]
+        superseded_at = None if superseded_at_raw is None else float(superseded_at_raw)
+        temporal_current = details["superseded_by"] is None
+        if point_in_time is not None:
+            temporal_current = effective_at <= point_in_time and (
+                superseded_at is None or point_in_time < superseded_at
+            )
+            if not temporal_current:
+                edges.append({**edge, "status": "not_valid_at_as_of"})
+                incomplete = True
+                continue
+        visited.add(target_id)
+        edges.append({**edge, "status": "included"})
+        evidence.append(
+            {
+                "vine_id": target_id,
+                "topic": details["topic"],
+                "topic_protected": payloads.metadata_protected,
+                "payload": details["payload"],
+                "depth": depth,
+                "temporal_status": (
+                    "valid_at_as_of"
+                    if point_in_time is not None
+                    else ("current" if temporal_current else "superseded")
+                ),
+                "effective_at": effective_at,
+                "superseded_by": details["superseded_by"],
+                "superseded_at": superseded_at,
+                "query_scored": False,
+                "confidence_band": None,
+                "confidence_basis": "protected_contextual_link",
+                "confidence_indicator": (
+                    "Authenticated contextual link; this evidence was not "
+                    "independently query-scored."
+                ),
+                **_public_record_contract(contract, str(details["payload"])),
+            }
+        )
+        if (
+            depth < max_depth
+            and contract.layer == MemoryLayer.CONTEXTUAL_LOGIC
+            and contract.logic_kind is not None
+        ):
+            next_path = (*path, target_id)
+            for related_id in contract.related_ids:
+                queue.append(
+                    (
+                        target_id,
+                        related_id,
+                        depth + 1,
+                        contract.logic_kind.value,
+                        next_path,
+                    )
+                )
+
+    queued_links_omitted = len(queue)
+    truncated = queued_links_omitted > 0
+    incomplete = incomplete or truncated
+    response = {
+        "query": root_recall.get("query"),
+        "as_of": root_recall.get("as_of"),
+        "mode": root_recall.get("mode", "semantic"),
+        "degraded": bool(root_recall.get("degraded", False)),
+        "semantic_available": root_recall.get("semantic_available", True),
+        "logic_roots": roots,
+        "root_expansion": root_expansion,
+        "evidence": evidence,
+        "context_edges": edges,
+        "max_depth": max_depth,
+        "max_records": max_records,
+        "truncated": truncated,
+        "queued_links_omitted": queued_links_omitted,
+        "incomplete": incomplete,
+        "ranking_margin": root_recall.get("ranking_margin"),
+        "ranking_ambiguous": bool(root_recall.get("ranking_ambiguous", False)),
+        "competing_memory_detected": bool(
+            root_recall.get("competing_memory_detected", False)
+        ),
+        "competing_pair_preserved": bool(
+            root_recall.get("competing_pair_preserved", False)
+        ),
+        "competing_memory_groups": root_recall.get(
+            "competing_memory_groups",
+            [],
+        ),
+        "competing_memory_groups_omitted": root_recall.get(
+            "competing_memory_groups_omitted",
+            0,
+        ),
+        "gated_count": root_recall.get("gated_count", 0),
+        "lifecycle": root_recall.get("lifecycle"),
+        "lifecycle_mutated": root_recall.get("lifecycle_mutated", True),
+        "context_contract": {
+            "query_driven_roots": True,
+            "root_confidence_gates_preserved": True,
+            "outgoing_links_only": True,
+            "evidence_query_scored": False,
+            "synthesis_performed": False,
+            "layer_relationships_protected": payloads.metadata_protected,
+        },
+    }
+    if "degraded_reason" in root_recall:
+        response["degraded_reason"] = root_recall["degraded_reason"]
+    if "limitations" in root_recall:
+        response["limitations"] = root_recall["limitations"]
+    return response
+
+
+def _public_contract(contract: MemoryLayerContract) -> dict[str, Any]:
+    recommendations = contract.recommendations()
+    promotion_history = [event.as_dict() for event in contract.promotion_history]
+    return {
+        "memory_layer": contract.layer.value,
+        "provenance": list(contract.provenance),
+        "expires_at": contract.expires_at,
+        "review_at": contract.review_at,
+        "promotion_evidence": (
+            None if not promotion_history else promotion_history[-1]
+        ),
+        "promotion_history": promotion_history,
+        "contextual_logic": (
+            None
+            if contract.logic_kind is None
+            else {
+                "kind": contract.logic_kind.value,
+                "related_ids": list(contract.related_ids),
+            }
+        ),
+        "promotion_recommendation": recommendations["promotion"],
+        "archive_recommendation": recommendations["archive"],
+        "layer_contract_protected": True,
+    }
 
 
 def _validate_timestamp(value: float | None, name: str) -> float:
@@ -4378,6 +5929,42 @@ def _validate_optional_timestamp(value: float | None, name: str) -> float | None
     return _validate_timestamp(value, name)
 
 
+def _validate_memory_layers(
+    values: list[str] | tuple[str, ...] | None,
+) -> tuple[MemoryLayer, ...] | None:
+    if values is None:
+        return None
+    if not isinstance(values, (list, tuple)):
+        raise TypeError("layers must be a list of memory-layer names or None")
+    if not 1 <= len(values) <= len(MemoryLayer):
+        raise ValueError(f"layers must contain between 1 and {len(MemoryLayer)} values")
+    parsed: list[MemoryLayer] = []
+    for value in values:
+        clean = _validate_text(value, "memory layer", 32)
+        try:
+            parsed.append(MemoryLayer(clean))
+        except ValueError as exc:
+            raise ValueError(f"unsupported memory layer: {clean}") from exc
+    if len(set(parsed)) != len(parsed):
+        raise ValueError("layers must not contain duplicate values")
+    requested = frozenset(parsed)
+    return tuple(layer for layer in MemoryLayer if layer in requested)
+
+
+def _validate_context_bound(
+    value: int,
+    name: str,
+    maximum: int,
+    *,
+    minimum: int = 1,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def _validate_vine_ids(
     values: list[str] | tuple[str, ...] | None,
 ) -> tuple[str, ...]:
@@ -4391,6 +5978,14 @@ def _validate_vine_ids(
     if len(set(clean)) != len(clean):
         raise ValueError("supersedes must not contain duplicate vine ids")
     return clean
+
+
+def _memory_contract_key(vine_id: str) -> str:
+    clean_id = _validate_text(vine_id, "vine_id", 128)
+    key = f"{MEMORY_CONTRACT_METADATA_PREFIX}{clean_id}"
+    if len(key) > 64:
+        raise ValueError("vine_id is too long for protected contract metadata")
+    return key
 
 
 def _validate_text(value: str, name: str, max_chars: int) -> str:

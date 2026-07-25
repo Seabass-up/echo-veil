@@ -1,7 +1,7 @@
 {
   "name": "echo-veil",
-  "version": "0.6.0",
-  "description": "Local encrypted, decay-driven memory tools for Claude Code.",
+  "version": "0.7.0",
+  "description": "Shielded four-layer living-memory tools for Claude Code.",
   "author": {
     "name": "Algo-cli.com",
     "url": "https://github.com/Seabass-up"

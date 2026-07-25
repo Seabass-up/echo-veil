@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing annotated release tag, such as v0.4.0
+        description: Existing annotated semantic-version release tag
         required: true
         type: string
 
@@ -52,15 +52,30 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/openclaw/package-lock.json
+
       - name: Build and validate distributions
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export SOURCE_DATE_EPOCH="$(
+            python3 -c \
+              'import json; print(json.load(open("integrations/openclaw/deployment-lock.json"))["source_date_epoch"])'
+          )"
           uv build --no-sources --out-dir release
           python scripts/normalize_sdist.py release/*.tar.gz
-          uvx --from twine==6.2.0 twine check release/*
-          python scripts/release_check.py --tag "$RELEASE_TAG" --dist release
+          npm pack ./integrations/openclaw --ignore-scripts \
+            --pack-destination release
+          uvx --from twine==6.2.0 twine check release/echo_veil-*
+          python scripts/release_check.py \
+            --tag "$RELEASE_TAG" \
+            --dist release \
+            --plugin-archive release/openclaw-plugin-*.tgz
 
       - name: Smoke-test wheel
         run: |
@@ -80,7 +95,12 @@ jobs:
 
       - name: Generate checksums
         working-directory: release
-        run: sha256sum echo_veil-* > SHA256SUMS
+        run: >-
+          sha256sum
+          echo_veil-*
+          openclaw-plugin-*
+          echo-veil-*.sbom.cdx.json
+          > SHA256SUMS
 
       - name: Upload immutable candidate bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

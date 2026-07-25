@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "profile": "echo-universal-qwen3-v1",
+  "scope": "local-user",
+  "shared_source_artifacts": [
+    "src/echo_veil/agent_cli.py",
+    "src/echo_veil/agent_memory.py",
+    "src/echo_veil/agent_preflight.py",
+    "src/echo_veil/guarded_runner.py",
+    "src/echo_veil/memory_layers.py"
+  ],
+  "shared_source_digest": "sha256:9f4d715afd00c0590dde50f622ced92a7f40d32a8b882c592644dd3053246aa2",
+  "hosts": [
+    {
+      "id": "algo-cli",
+      "display_name": "Algo CLI",
+      "adapter": "In-process protected-memory bridge",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Required-protection ordinary chat and Agent Block turns",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.18.0",
+      "source_artifacts": ["integrations/algo-cli/README.md"],
+      "source_digest": "sha256:b2d02f582fe83053bc8d17daa2f8b6014f5e0625874aecc1e639ed489ec5d95c",
+      "checks": [
+        "Installed readiness and four-layer bridge suite",
+        "Healthy ordinary-turn protected context",
+        "Disabled-Echo zero-model-call stop",
+        "Semantic outage degraded read-only behavior",
+        "Large-model QoS and prompt-budget qualification",
+        "Exact archive-hash installation and path-silent one-shot qualification"
+      ],
+      "remaining": [
+        "The Algo implementation lives in a separate repository and must retain its own source and installed-wheel gates",
+        "Algo release governance is blocked by an unauthorized dirty hardening set and stale qualification source digest",
+        "Production enclave readiness is not asserted"
+      ]
+    },
+    {
+      "id": "aip",
+      "display_name": "AIP",
+      "adapter": "Artifact-bound provider gate and fresh-process RPC backend",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Installed 0.1.1 runtime model generation through the Echo-bound provider registry",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.1.1",
+      "artifact_binding": {
+        "kind": "pep610-wheel-sha256-v1",
+        "distribution": "autonomous-intelligence-platform",
+        "version": "0.1.1",
+        "sha256": "ffb845152beb7f110a4b3f0e5978497e0a7d5639a6a39576e6bb7d5fe7d5d005",
+        "receipt_schema": 1,
+        "memory_contract": "echo-veil-singular-authority-v1",
+        "profile": "echo-universal-qwen3-v1",
+        "scope": "local-user",
+        "caller": "aip",
+        "plaintext_fallback": false
+      },
+      "source_artifacts": ["integrations/aip/README.md"],
+      "source_digest": "sha256:d39417e7f4cfdfff79fe235586d42df4ad09a043a67138d85880e40bf0c2577b",
+      "checks": [
+        "AIP repository suite passed 273 tests",
+        "Every runtime provider wraps infer, stream, and vision behind semantic Echo preflight",
+        "Direct Agent, SDK, workflow, and chat routes share the same provider gate",
+        "Forced preflight outage produced zero underlying provider calls",
+        "Installed wheel identity and Python source integrity are checked from a payload-silent receipt",
+        "Live isolated four-layer write, refresh, promotion, recall, Contextual Logic, and restart",
+        "Simulated semantic outage preserved degraded read-only metadata and blocked writes",
+        "Repository backend contract and shared-domain behavior"
+      ],
+      "remaining": [
+        "The AIP implementation lives in a separate non-Git checkout",
+        "Production enclave readiness is not asserted"
+      ]
+    },
+    {
+      "id": "openclaw",
+      "display_name": "OpenClaw",
+      "adapter": "Exclusive native memory plugin and nine tools",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Models pinned to the OpenClaw runtime with all required Echo hooks",
+      "tested_on": "2026-07-25",
+      "tested_version": "2026.7.1-2",
+      "source_artifacts": [
+        "integrations/openclaw/deployment-lock.json",
+        "integrations/openclaw/openclaw.plugin.json",
+        "integrations/openclaw/src/index.ts",
+        "integrations/openclaw/dist/index.js",
+        "integrations/openclaw/tests/validate-openclaw-loader.mjs",
+        "scripts/verify_openclaw_deployment.py"
+      ],
+      "source_digest": "sha256:a4734cb06d213acd671744e2fb9cd35e4fc7ef04e9a6fafb63507adf3798ef15",
+      "checks": [
+        "Exclusive memory-slot selection",
+        "Exact nine-tool main-agent allowlist",
+        "Archive and PEP 610 wheel artifact binding",
+        "Healthy protected recall",
+        "Forced-outage zero-model gate",
+        "Hot-reload drift rejection",
+        "Built-in session-memory suppression",
+        "Owner-only profile paths and zero-warning host security audit"
+      ],
+      "remaining": [
+        "The native Codex app-server runtime is excluded because it skips the required hook pair",
+        "Requalify after any runtime, plugin, model-route, or hook-permission change",
+        "Time Machine destination restore and production cryptographic review remain external gates"
+      ]
+    },
+    {
+      "id": "hermes",
+      "display_name": "Hermes",
+      "adapter": "Shield-owned headless launcher plus native pre-LLM and provider middleware",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Local Echo-tools-only turns started through echo-veil-shielded-run hermes",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.18.2",
+      "source_artifacts": [
+        "integrations/hermes/config.yaml",
+        "integrations/hermes/plugin/__init__.py",
+        "integrations/hermes/plugin/plugin.yaml",
+        "integrations/hermes/skills/echo-veil-memory/SKILL.md",
+        "src/echo_veil/guarded_runner.py",
+        "tests/test_guarded_runner.py",
+        "tests/test_hermes_plugin.py"
+      ],
+      "source_digest": "sha256:ed307f0fc89f1007ae08929c48fce5cf1888c7f5ccac83fe116eaee4e71a342e",
+      "checks": [
+        "Healthy local-provider preflight",
+        "Exact session, task, turn, and nonce binding",
+        "Forced-outage zero-provider-call middleware",
+        "Nine-tool MCP connection",
+        "Built-in MEMORY.md and USER.md writers disabled",
+        "Digest-bound isolated Hermes home and plugin-defined command",
+        "Healthy shield-owned local turn and pre-host outage stop"
+      ],
+      "remaining": [
+        "Ordinary Hermes plugin mode remains conditional because general plugin failure does not abort startup",
+        "The shield-owned claim is local, one-turn, and Echo-tools-only",
+        "Interactive, gateway, arbitrary-toolset, and remote-provider modes remain outside the qualified boundary"
+      ]
+    },
+    {
+      "id": "codex",
+      "display_name": "Codex",
+      "adapter": "Trusted root hook plus shield-owned headless launcher and required stdio MCP",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Trusted direct root turns and shielded headless turns with parallel agents disabled",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.144.5",
+      "source_artifacts": [
+        ".agents/plugins/marketplace.json",
+        ".codex-plugin/plugin.json",
+        ".mcp.json",
+        "hooks/hooks.json",
+        "skills/echo-veil-memory/SKILL.md",
+        "pyproject.toml",
+        "src/echo_veil/guarded_runner.py",
+        "tests/test_guarded_runner.py"
+      ],
+      "source_digest": "sha256:3562991f73e06ffe889b0bf0d4854910c0a86d8ad286f518bbd882e4dd4fddb3",
+      "checks": [
+        "Plugin and MCP loaded",
+        "Exact hook hashes trusted",
+        "Native memory disabled",
+        "Forced-outage zero-token root turn",
+        "Healthy shared Qwen3 preflight",
+        "Matcher covers Agent and current collaboration spawn tool aliases",
+        "Delivered Agent events deny before opening Echo under the child-only control",
+        "Shielded launcher preflights before Codex process creation",
+        "Shielded Codex ignores ambient user config and requires one Echo MCP server",
+        "Shielded Codex exposes only validated auth through an owner-only temporary home",
+        "Shielded Codex disables native memory, Chronicle, goals, plugins, and parallel agents",
+        "Healthy Codex headless turn completed through the validated installed wheel",
+        "Forced semantic outage returned before Codex startup"
+      ],
+      "remaining": [
+        "Direct Codex collaboration bypassed PreToolUse and is not qualified",
+        "The shielded launcher deliberately disables subagents until Codex exposes an enforceable spawn boundary",
+        "Out-of-band spawn paths are not covered"
+      ]
+    },
+    {
+      "id": "claude-code",
+      "display_name": "Claude Code",
+      "adapter": "Plugin hooks, Agent Skill, and stdio MCP",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Normal plugin-mode root turns with native auto-memory disabled",
+      "tested_on": "2026-07-25",
+      "tested_version": "2.1.207",
+      "source_artifacts": [
+        ".claude-plugin/marketplace.json",
+        "integrations/claude-code/.claude-plugin/plugin.json",
+        "integrations/claude-code/.mcp.json",
+        "integrations/claude-code/hooks/hooks.json",
+        "integrations/claude-code/skills/echo-veil-memory/SKILL.md"
+      ],
+      "source_digest": "sha256:9d763bd2552bfddde8ad8e0a1bebc7832947b25b636f4d643703f5b9b3898202",
+      "checks": [
+        "Plugin MCP connected",
+        "Native auto-memory disabled",
+        "Forced-outage zero-token and zero-cost root turn",
+        "Healthy shared Qwen3 preflight",
+        "Child-only deny control preserves root preflight and blocks before opening Echo"
+      ],
+      "remaining": [
+        "Installed spawn attempt completed protected root preflight but Claude Code was not authenticated",
+        "Healthy and denied installed Agent spawns remain release gates",
+        "Safe mode and bare mode disable the required hooks",
+        "A separately configured duplicate MCP entry may still require user approval"
+      ]
+    },
+    {
+      "id": "pi",
+      "display_name": "Pi",
+      "adapter": "Native TypeScript extension and Agent Skill",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Normal turns with the Echo extension loaded",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.80.6",
+      "source_artifacts": [
+        "integrations/pi/package.json",
+        "integrations/pi/extensions/index.ts",
+        "integrations/pi/src/preflight.ts",
+        "integrations/pi/src/runner.ts",
+        "integrations/pi/skills/echo-veil-memory/SKILL.md"
+      ],
+      "source_digest": "sha256:c429ad15fa0a4e287f6b1b7c5c8b5e29ea017560eef53fbcefffc2b8e19233f4",
+      "checks": [
+        "Installed extension command discovery",
+        "Healthy protected preflight with no model call",
+        "Forced Echo failure with zero messages, tools, tokens, and cost",
+        "Repository ambiguity, conflict, and agent-start guard battery"
+      ],
+      "remaining": [
+        "Extension-disabled runs are outside the claim",
+        "Requalify after Pi lifecycle-hook changes"
+      ]
+    },
+    {
+      "id": "opencode",
+      "display_name": "OpenCode",
+      "adapter": "Global or project plugin, Agent Skill, and local MCP",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Normal plugin-pipeline root turns",
+      "tested_on": "2026-07-25",
+      "tested_version": "1.17.18",
+      "source_artifacts": [
+        "integrations/opencode/opencode.json",
+        "integrations/opencode/.opencode/plugins/echo-veil-shield.js",
+        "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
+        "integrations/opencode/tests/echo-veil-shield.test.mjs"
+      ],
+      "source_digest": "sha256:36d41673ad6180142a449203bc56f843fc0a03b0d69aed38ddde155ba1616c07",
+      "checks": [
+        "Installed root-turn protected marker",
+        "Forced-outage zero-assistant-message, zero-token, and zero-cost result",
+        "Repository chat.params backstop and Task argument-preservation battery",
+        "Task-only deny control preserves root preflight and blocks before invoking Echo"
+      ],
+      "remaining": [
+        "Authenticated provider refresh returned 401 and a free-provider Task smoke timed out",
+        "Healthy and denied installed Task spawns remain release gates",
+        "Pure mode disables external plugins"
+      ]
+    },
+    {
+      "id": "droid",
+      "display_name": "Droid",
+      "adapter": "Shield-owned headless launcher plus native plugin artifacts",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Headless turns started through echo-veil-shielded-run droid",
+      "tested_on": "2026-07-25",
+      "tested_version": "0.180.0",
+      "source_artifacts": [
+        ".factory-plugin/marketplace.json",
+        "integrations/droid/.factory-plugin/plugin.json",
+        "integrations/droid/hooks/hooks.json",
+        "integrations/droid/hooks/echo-veil-preflight.sh",
+        "integrations/droid/skills/echo-veil-memory/SKILL.md"
+      ],
+      "source_digest": "sha256:cdac1fc812e0660305038c00b774bfab1694963a06d5c3a4e57d501085964b1b",
+      "checks": [
+        "Installed plugin and MCP connection",
+        "Healthy shield-owned headless turn",
+        "Forced-outage stop before host creation",
+        "Bare exec negative control on the tested version"
+      ],
+      "remaining": [
+        "Bare droid exec 0.180.0 bypasses native prompt hooks and is not qualified",
+        "Interactive Droid and Task spawns require separate installed proof",
+        "The shielded launcher disables Task"
+      ]
+    },
+    {
+      "id": "goose",
+      "display_name": "Goose",
+      "adapter": "Shield-owned headless launcher plus portable recipe",
+      "evidence_state": "qualified",
+      "qualified_boundary": "Headless turns started through echo-veil-shielded-run goose",
+      "tested_on": "2026-07-25",
+      "tested_version": "1.41.0",
+      "source_artifacts": [
+        "integrations/goose/echo-veil.yaml",
+        "integrations/goose/README.md"
+      ],
+      "source_digest": "sha256:fe059dd644c035f8ada16619f3a62256b59dad386bbfbee730a839bf068de6f9",
+      "checks": [
+        "Installed recipe doctor and two-slot recall",
+        "Healthy shield-owned Echo-only run",
+        "Healthy reviewed developer-builtin run",
+        "Forced-outage stop before host creation"
+      ],
+      "remaining": [
+        "The normal Goose recipe remains policy-driven rather than a hard pre-model boundary",
+        "No-profile suppresses recipe extensions outside the shield-owned launcher"
+      ]
+    },
+    {
+      "id": "mercury",
+      "display_name": "Mercury",
+      "adapter": "Readiness-only guarded Agent Skill",
+      "evidence_state": "blocked",
+      "qualified_boundary": "No singular-authority boundary is currently qualified",
+      "tested_on": "2026-07-25",
+      "tested_version": null,
+      "source_artifacts": ["integrations/mercury/SKILL.md"],
+      "source_digest": "sha256:76ce2177e3d4bbd3f4d01961f541b842faeb68fafb961ec4e4b2b7afd2f8f66b",
+      "checks": [
+        "Payload-silent readiness-only skill",
+        "No unsafe shell payload transport"
+      ],
+      "remaining": [
+        "Mercury needs an upstream backend or hook that suppresses all native mutable stores",
+        "Disabling Second Brain still leaves native Short-Term, Long-Term, and Episodic memory paths"
+      ]
+    }
+  ],
+  "limitations": [
+    "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
+    "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
+    "Algo CLI and AIP implementation sources live in separate repositories and retain independent release gates.",
+    "Production CKKS, enclave, mTLS, Access, ZKP, and operational controls require external deployment evidence."
+  ]
+}

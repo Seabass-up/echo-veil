@@ -96,11 +96,17 @@ an unavailable local Ollama service or configured model. It can read an existing
 owner-only encrypted payload database and keyed term index, but it does not run
 semantic embeddings, answerability verification, CKKS, enclave operations, or
 the ZKP gate. Every response is marked degraded and read-only; writes,
-inferential recall, reindexing, erasure, and lifecycle mutation are disabled.
+promotion, inferential recall, reindexing, erasure, and lifecycle mutation are
+disabled, including Live refresh. Returned records still require a valid record-bound encrypted
+semantic-layer contract; missing or unauthenticated contracts stop the path.
 Availability confidence is capped below the Coherent Assembly threshold.
 A long-lived CLI/MCP process transitions to this mode if a later embedding
 request detects a service outage; artifact-identity and malformed-response
 failures do not activate it.
+Both healthy and degraded recall authenticate the selected encrypted record
+before its opaque topic token can support a bounded possible-conflict group.
+The signal preserves competing records but never asserts semantic
+incompatibility or chooses a winner.
 This path does not satisfy or weaken any production invariant above and is not
 used by the confidential origin.
 
@@ -109,9 +115,23 @@ adapter validates both SQLite schemas and reconciles interrupted cross-database
 operations at startup. Native host adapters pass only an explicit runtime
 environment allowlist to the child process; production crypto keys, Access
 credentials, and unrelated API tokens are not inherited.
+Bundled MCP transports hold the writable lease only for one tool call, and the
+Algo bridge holds it only for one memory operation. Sharing a local profile is
+supported only inside one local-user authorization domain; a different user or
+trust boundary requires a distinct profile.
 
 Scoped-v2 local profiles additionally encrypt payloads, topics, lifecycle
-anchors, and retrieval vectors with record/scope/schema/key-bound AES-GCM.
+anchors, retrieval vectors, and the complete four-layer semantic contract with
+record/scope/schema/key-bound AES-GCM. The contract contains layer identity,
+provenance, retention state, promotion history, and Contextual Logic links.
+The adapter also enforces per-layer content bounds and rejects transcript-shaped
+payloads outside temporary Live state without auto-summarizing or truncating
+them. Unchanged Live refreshes renew only the encrypted contract; changed Live
+content becomes a separately encrypted superseding record.
+Layer filters are evaluated only after contract authentication. Bounded context
+traces use confidence-checked logic roots and authenticate each outgoing linked
+record; they do not materialize a plaintext graph or assign query confidence to
+relationship evidence.
 Keyed lexical tokens and opaque identifiers minimize the index but still expose
 row counts, timestamps, vector dimensions, access patterns, and relationship
 shape. Plaintext is present in the authorized Python and local embedding

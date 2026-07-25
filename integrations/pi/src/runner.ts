@@ -27,6 +27,7 @@ const CHILD_ENV_ALLOWLIST = new Set([
 const CHILD_ECHO_ENV_ALLOWLIST = new Set([
   "ECHO_VEIL_AVAILABILITY_LAYER",
   "ECHO_VEIL_CAPACITY",
+  "ECHO_VEIL_CALLER",
   "ECHO_VEIL_EMBEDDER",
   "ECHO_VEIL_EMBEDDING_DIMENSION",
   "ECHO_VEIL_EMBEDDING_MODEL",
@@ -34,6 +35,7 @@ const CHILD_ECHO_ENV_ALLOWLIST = new Set([
   "ECHO_VEIL_OLLAMA_URL",
   "ECHO_VEIL_PROFILE",
   "ECHO_VEIL_PROFILE_LOCK_TIMEOUT",
+  "ECHO_VEIL_SCOPE",
   "ECHO_VEIL_STATE_DIR",
 ]);
 
@@ -57,7 +59,9 @@ export function buildChildEnvironment(
 
 export function buildInvocation(): EchoVeilInvocation {
   const env = buildChildEnvironment();
-  env.ECHO_VEIL_PROFILE = env.ECHO_VEIL_PROFILE || "pi-qwen3";
+  env.ECHO_VEIL_PROFILE = env.ECHO_VEIL_PROFILE || "echo-universal-qwen3-v1";
+  env.ECHO_VEIL_SCOPE = env.ECHO_VEIL_SCOPE || "local-user";
+  env.ECHO_VEIL_CALLER = "pi";
   env.ECHO_VEIL_EMBEDDER = env.ECHO_VEIL_EMBEDDER || "ollama";
   env.ECHO_VEIL_EMBEDDING_MODEL = env.ECHO_VEIL_EMBEDDING_MODEL || "qwen3-embedding:latest";
   env.ECHO_VEIL_EMBEDDING_DIMENSION = env.ECHO_VEIL_EMBEDDING_DIMENSION || "1024";

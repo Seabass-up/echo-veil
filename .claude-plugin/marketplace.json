@@ -1,0 +1,17 @@
+{
+  "name": "echo-veil-local",
+  "owner": {
+    "name": "Algo-cli.com"
+  },
+  "description": "Local marketplace for the shielded Echo Veil agent-memory plugin.",
+  "plugins": [
+    {
+      "name": "echo-veil",
+      "source": "./integrations/claude-code",
+      "description": "Shielded four-layer living-memory tools and fail-closed pre-model hooks.",
+      "version": "0.7.0",
+      "category": "Productivity",
+      "strict": true
+    }
+  ]
+}

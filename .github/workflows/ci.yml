@@ -75,7 +75,10 @@ jobs:
 
       - name: Build twice from the locked source tree
         run: |
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export SOURCE_DATE_EPOCH="$(
+            python3 -c \
+              'import json; print(json.load(open("integrations/openclaw/deployment-lock.json"))["source_date_epoch"])'
+          )"
           uv build --no-sources --out-dir dist-a
           uv build --no-sources --out-dir dist-b
           python scripts/normalize_sdist.py dist-a/*.tar.gz
@@ -122,21 +125,40 @@ jobs:
           cache: npm
           cache-dependency-path: |
             integrations/openclaw/package-lock.json
+            integrations/opencode/package-lock.json
             integrations/pi/package-lock.json
 
       - name: Install locked dependencies
         run: |
           uv sync --locked --extra dev
           npm --prefix integrations/openclaw ci --ignore-scripts
+          npm --prefix integrations/opencode ci --ignore-scripts
           npm --prefix integrations/pi ci --ignore-scripts
 
       - name: Validate adapter contracts
         run: |
-          uv run --locked pytest -q tests/test_agent_memory.py tests/test_agent_adapters.py
+          python scripts/verify_host_authority.py --text
+          uv run --locked pytest -q \
+            tests/test_agent_memory.py \
+            tests/test_agent_adapters.py \
+            tests/test_hermes_plugin.py \
+            tests/test_host_authority.py \
+            tests/test_openclaw_deployment.py
           npm --prefix integrations/openclaw run check
+          npm --prefix integrations/openclaw run plugin:validate
           npm --prefix integrations/openclaw test
           npm --prefix integrations/openclaw run build
           git diff --exit-code -- integrations/openclaw/dist
+          mkdir -p /tmp/echo-veil-openclaw-a /tmp/echo-veil-openclaw-b
+          npm pack ./integrations/openclaw --ignore-scripts \
+            --pack-destination /tmp/echo-veil-openclaw-a
+          npm pack ./integrations/openclaw --ignore-scripts \
+            --pack-destination /tmp/echo-veil-openclaw-b
+          cmp /tmp/echo-veil-openclaw-a/*.tgz /tmp/echo-veil-openclaw-b/*.tgz
+          python scripts/release_check.py \
+            --plugin-archive /tmp/echo-veil-openclaw-a/*.tgz
+          npm --prefix integrations/opencode run check
+          npm --prefix integrations/opencode test
           npm --prefix integrations/pi run check
           npm --prefix integrations/pi test
 

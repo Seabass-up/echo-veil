@@ -13,14 +13,17 @@ For a scoped-v2 profile, one ordinary remember operation follows this sequence:
 1. Validate and bound the topic, payload, identifiers, timestamps, and vectors.
 2. Bind the profile to one normalized authorization scope.
 3. Serialize the topic and payload into a versioned record envelope.
-4. Encrypt the envelope and each retrieval vector independently with
+4. Validate a semantic-layer contract containing provenance, retention state,
+   promotion history, and any typed Contextual Logic relationships.
+5. Encrypt the envelope, semantic contract, and each retrieval vector
+   independently with
    AES-256-GCM and a fresh 96-bit nonce.
-5. Authenticate the object type, opaque scope ID, record ID, schema version,
+6. Authenticate the object type, opaque scope ID, record ID, schema version,
    key ID, and vector ordinal/dimension as associated data.
-6. Commit the encrypted payload, protected vectors, and keyed lexical features
-   as one `pending` SQLite transaction.
-7. Persist the Echo Veil lifecycle anchor under the same stable record ID.
-8. Mark the payload record `committed`.
+7. Commit the encrypted payload, protected semantic contract, protected vectors,
+   and keyed lexical features as one `pending` SQLite transaction.
+8. Persist the Echo Veil lifecycle anchor under the same stable record ID.
+9. Mark the payload record `committed`.
 
 Startup reconciles the only two safe interrupted states. A pending payload with
 matching lifecycle state is committed; a pending payload without lifecycle
@@ -30,19 +33,59 @@ operator review. Recall considers only committed, non-quarantined records,
 decrypts after candidate selection, and checks the profile scope binding before
 opening either database.
 
+Layer-scoped recall authenticates each candidate contract before applying the
+requested semantic-layer filter; the filter never alters a score.
+`echo_veil_context` then reuses ordinary confidence-checked recall for at most
+two Contextual Logic roots. It follows only record-bound encrypted outgoing
+links and separately authenticates every linked contract and payload. Gated,
+expired, corrupt, missing, or point-in-time-invalid evidence is omitted and
+reported as an incomplete trace. Hard depth, record, and edge limits prevent a
+protected relationship graph from becoming an unbounded response.
+
+Competing-memory detection uses the deterministic keyed topic token only after
+the selected record's encrypted envelope authenticates and the token is
+recomputed with that record's key and scope. A copied or swapped token
+is rejected instead of manufacturing a conflict group; writable mode also
+persists a quarantine marker. Returned same-topic current pairs are labelled
+only as `possible_conflict`; no content compatibility or resolution is
+inferred. Groups and member-ID lists are hard-bounded, and plaintext topics are
+not repeated in group metadata.
+
+`AgentMemory` callers must use its methods rather than its embedded low-level
+Oracle. A direct `memory.oracle.sprout()` cannot join the payload/contract
+transaction. Diagnostics compare lifecycle, payload, and protected-contract ID
+sets, report the adapter unhealthy if a caller creates an unpaired vine, and
+refuse to use that vine as Contextual Logic evidence.
+
 Exact retries are deduplicated with a keyed content digest. Deletion removes
 the managed record and writes an authenticated tombstone. The payload database
 uses WAL, `synchronous=FULL`, foreign keys, strict schema-object validation,
 unique `(key_id, nonce)` indexes, and cross-table nonce-reuse detection.
-Writable processes hold one profile-wide SQLite lease.
+Each writable `AgentMemory` instance holds one profile-wide SQLite lease.
+Bundled long-lived MCP transports open and close an instance per tool call;
+Algo CLI does so per memory operation, and native fresh-process adapters close
+at process exit. A direct SDK caller must close its instance explicitly.
 
 ## What local protection covers
 
 - Memory topic and content at rest in the scoped-v2 payload database.
+- Semantic-layer identity, provenance, expiry/review timestamps, ordered
+  promotion evidence, and Contextual Logic relationships at rest.
+- The current Live payload and every changed Live version. Same-content refresh
+  rewrites only the record-bound encrypted expiry/provenance contract; changed
+  content creates a separately encrypted superseding record.
 - Lifecycle anchors and retrieval embeddings at rest.
 - Lexical features, which are stored as keyed hashes rather than words.
-- Topic metadata, which is stored as an opaque keyed token.
+- Topic metadata, which is stored as an opaque keyed token and verified against
+  the authenticated encrypted record before it can support result grouping.
 - Record and vector integrity, including scope/record/schema/key binding.
+- Fail-closed contract integrity: a missing, transplanted, corrupt, or
+  unauthenticated layer contract is never replaced by plaintext defaults.
+- Bounded Contextual Logic traversal: roots keep normal confidence gates and
+  linked evidence is explicitly marked as authenticated relationship evidence,
+  not an independently query-scored result.
+- Bounded competing-memory signals: the strongest authenticated same-topic
+  current pair is preserved without silently selecting or inventing a winner.
 - Ordinary Algo CLI writes when Algo is explicitly configured with
   `echo_veil_protection=required`.
 
@@ -52,7 +95,12 @@ The local database still exposes opaque record IDs, an opaque random scope ID,
 non-secret key IDs, schema versions, vector dimensions/counts, operation state,
 timestamps, supersession relationships, row counts, database size, and access
 patterns. An attacker may infer activity and relationship patterns even though
-the content, topic, vectors, and lexical terms are not readable.
+the content, topic, semantic layer, provenance, contextual links, vectors, and
+lexical terms are not readable. Record IDs remain visible individually, but the
+related-ID list that creates a Contextual Logic edge is inside ciphertext.
+Authorized context responses necessarily reveal the selected roots, returned
+links, and linked records to the caller; Echo Veil does not persist a separate
+plaintext relationship index.
 
 ## What local protection does not cover
 
@@ -86,12 +134,19 @@ owner-only files under `keys/`; scoped-v2 configuration never stores a raw key.
 Symlinked paths, missing keys, mismatched key IDs, and group/world-readable
 security files fail closed.
 
+After four-layer migration, the key manifest carries a non-secret
+`shielded-four-layer-v1` feature marker inside the profile scope binding. This
+prevents deleting the database contract marker and all contract rows from being
+misread as a pre-migration profile. A normal writable open can finish the safe
+crash window where database migration committed before the manifest marker;
+read-only degraded recall cannot.
+
 Rotation is explicit, bounded, resumable, and idempotent:
 
 1. A new active key is created; new writes use it immediately.
 2. The previous key remains decrypt-only.
-3. Each confirmed rotation call rewraps a bounded batch of payloads, retrieval
-   vectors, lifecycle anchors, keyed terms, and tombstones.
+3. Each confirmed rotation call rewraps a bounded batch of payloads, semantic
+   contracts, retrieval vectors, lifecycle anchors, keyed terms, and tombstones.
 4. Rotation becomes `verified` only when no managed object references the old
    key and no record is quarantined.
 5. Retirement requires a separate confirmation that old-key backups have been
@@ -122,6 +177,8 @@ these independent readiness facts:
 - `retrieval_wired`
 - `persistence_wired`
 - `restart_restored`
+- `layer_contract_wired`
+- `context_trace_wired`
 - `rotation_ready`
 - `healthy`
 
@@ -138,14 +195,101 @@ contract is:
 | Entry point | Protection-required mode | Optional mode |
 |---|---|---|
 | `/remember`, direct runtime remember, bounded automatic fact capture | Echo Veil scoped-v2 only; unavailable crypto blocks the write | Echo when healthy; otherwise the explicitly warned legacy path |
-| Associative recall and context augmentation | Echo only; no plaintext-memory fallback | Echo when healthy; legacy fallback is allowed and identified |
-| `/forget` | Echo deletion plus authenticated tombstone | Active backend's deletion behavior |
-| Curated/history promotion, demotion, archive, and reindex commands | Prohibited because those stores are outside Echo | Deliberately plaintext under their existing policy |
-| Harness, wiki, graph, lessons, transcript, and session-history writes | Deliberately outside Echo; no protection claim | Deliberately outside Echo; no protection claim |
+| Live → Short-Term and Short-Term → Long-Term promotion | Echo Veil protected contract only; reason required and ordered history retained | Same Echo contract; no external plaintext promotion |
+| Live refresh | Unchanged state renews only encrypted expiry/provenance; changed state creates an encrypted superseding record | Same Echo contract; unavailable in degraded read-only mode |
+| Associative recall and semantic-layer filtering | Echo only; no plaintext-memory fallback or score rewriting | Echo when healthy; legacy fallback is allowed and identified |
+| Contextual Logic support trace | Confidence-checked Echo roots plus bounded authenticated outgoing links; linked evidence is not query-scored | Same Echo trace when healthy; degraded keyed roots remain explicitly non-semantic |
+| `/forget` | Echo deletion plus authenticated tombstone; dependent Contextual Logic records are deleted transitively | Active backend's deletion behavior |
+| External curated/history promotion, demotion, archive, and reindex commands | Prohibited because those stores are outside Echo | Deliberately plaintext under their existing policy |
+| Full harness, wiki, graph, lessons, transcript, and session-history source writes | Deliberately outside Echo; no protection claim. Only a bounded current transcript may temporarily enter protected Live memory | Deliberately outside Echo; no protection claim |
 | Legacy imports and migrations | Explicit operator workflow only; no silent import | Explicit operator workflow only |
 
 Compatibility commands must call the same authoritative Algo bridge. A second
 Oracle wrapper or plaintext `echo_veil_state.json` is prohibited.
+
+For Pi, the native extension treats preflight as a model-execution gate, not
+optional prompt guidance. It validates the scoped-v2 doctor state, recalls at
+least two candidates, adds bounded Contextual Logic where required, rechecks
+expanded prompts, and injects authenticated results only as untrusted evidence.
+Input failure stops normal model startup; non-input agent starts without a
+successful preflight are aborted, and tools are blocked outside the authorized
+run. Mid-run steer/follow-up is rejected instead of entering an already-running
+loop without fresh evidence.
+
+Hermes uses two distinct host surfaces because its observer hooks are
+fail-open by design. `pre_llm_call` produces bounded ephemeral protected
+context and records an exact session/task/turn attestation.
+`llm_execution` is the enforcement boundary: without that attestation it
+and its random per-turn nonce in the effective provider request, it returns a
+generic zero-usage blocked response and never invokes the provider.
+For singular mutable-memory mode, both `memory.memory_enabled` and
+`memory.user_profile_enabled` must be false. Hermes general plugins are opt-in,
+and plugin import or registration failure does not abort host startup, so a
+loaded-plugin check and an installed zero-provider outage smoke are mandatory
+operational gates after every Hermes update.
+
+`echo-veil-shielded-run hermes --model MODEL` provides a separate hard
+headless boundary. It completes protected semantic preflight before process
+creation, validates the installed plugin against digests embedded in the Echo
+build, copies only those reviewed bytes into a temporary owner-only
+`HERMES_HOME`, writes a fixed native-memory-off configuration, and binds the
+prompt to a random launch nonce. The plugin registers the dedicated
+`echo-veil-run` CLI command only after all required hooks and middleware.
+Registration failure therefore makes the command unavailable before any model
+path exists. One loopback Ollama provider and the Echo MCP toolset are the only
+qualified capabilities; ambient Hermes configuration, sessions, memories,
+skills, and plugins are not exposed. This does not broaden the claim to normal
+plugin mode, gateways, interactive sessions, or arbitrary Hermes toolsets.
+
+OpenClaw qualifies a hard pre-model gate only when Echo owns the exclusive
+memory slot, both required Echo hook permissions are true, and each protected
+model is pinned to `agentRuntime.id="openclaw"`. Its built-in
+`session-memory` hook must also be explicitly disabled; the Echo plugin checks
+the slot, permissions, and native-memory setting before attempting protected
+recall. The plugin binds a successful prompt-build injection to a random,
+expiring, single-use attestation checked by `before_agent_run`. OpenClaw's
+native Codex app-server runtime does not run the complete gate and must not be
+used for a singular-authority claim.
+
+Codex and Claude Code use plugin-bundled `UserPromptSubmit` and
+`PreToolUse(Agent)` hooks. Codex installation does not trust command hooks:
+review both exact definitions in `/hooks`, and repeat review after every hash
+change. Codex native memories must be disabled separately. The installed Codex
+collaboration router bypassed `PreToolUse`, so direct subagents are outside the
+claim. `echo-veil-shielded-run codex` provides a separate headless root
+boundary: it preflights before process creation, ignores ambient user config,
+uses a temporary owner-only Codex home that exposes only the validated auth
+handle, requires one Echo MCP server, disables native memory and parallel
+agents, and defaults to a read-only ephemeral run. Claude Code must run in normal plugin
+mode with auto-memory disabled;
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is the auditable process control.
+`--safe-mode` and `--bare` disable the boundary. Droid packages equivalent root
+and `PreToolUse(Task)` hooks through an absolute executable wrapper, but Droid
+0.180.0 `exec` did not invoke them. Bare `droid exec` is therefore outside the
+claim. `echo-veil-shielded-run droid` preflights before process creation and
+disables `Task`; interactive hooks and managed-hook deployments remain separate
+qualification targets. Direct or future spawn paths that bypass a supported
+tool hook remain outside the claim.
+
+Goose's normal recipe is policy-driven. `echo-veil-shielded-run goose` is the
+hard headless boundary: it preflights before host creation and uses
+`--no-profile`, `--no-session`, one explicit Echo extension, and at most the
+reviewed `developer` builtin.
+
+OpenCode uses a global or project plugin that runs protected recall during
+`chat.message`, binds success to the current message ID, and requires that
+binding at `chat.params` before provider assembly. Its supported `Task` tool
+path is preflighted and rewritten before execution, and automatic
+post-compaction continuation is disabled. `--pure` disables external plugins
+and is outside singular-authority mode. The normal installed root path has a
+zero-assistant-message, zero-token, zero-cost forced-outage smoke; the installed
+Task path remains a separate release qualification.
+
+Mercury cannot enter required singular-authority mode under its current host
+contract. Disabling Second Brain falls back to a native Long-Term store and
+does not remove the separately constructed Short-Term or Episodic stores. The
+bundled Mercury skill is doctor-only and must not mutate host configuration or
+transport payloads through the shell.
 
 ## Promotion and release gate
 
@@ -159,6 +303,13 @@ review evidence covers:
   process restart;
 - absence of plaintext in the store, index, temporary artifacts, and captured
   diagnostics;
+- all four semantic layers using authenticated record-bound contracts, including
+  tamper/missing-contract, promotion-order, expiry, relationship, cascade-delete,
+  layer-filter, bounded context-trace, degraded-read, migration, and key-rotation
+  tests;
+- bounded seed-crystal enforcement, transcript rejection outside Live, explicit
+  changed-content supersession, same-content protected renewal, and degraded
+  refresh rejection;
 - corruption isolation, concurrent-writer rejection, interrupted-write
   reconciliation, and lost-key behavior;
 - completed and restart-safe rotation;

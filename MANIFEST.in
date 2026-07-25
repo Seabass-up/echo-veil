@@ -5,9 +5,16 @@ include SECURITY.md
 include uv.lock
 include .mcp.json
 include .codex-plugin/plugin.json
+include .agents/plugins/marketplace.json
+include .claude-plugin/marketplace.json
+include .factory-plugin/marketplace.json
+include hooks/hooks.json
 recursive-include docs *.md
 recursive-include examples *.py
+recursive-include scripts *.py
+recursive-include skills *.md *.yaml
 include integrations/openclaw/README.md
+include integrations/openclaw/deployment-lock.json
 include integrations/openclaw/openclaw.plugin.json
 include integrations/openclaw/package.json
 include integrations/openclaw/package-lock.json
@@ -15,17 +22,40 @@ include integrations/openclaw/tsconfig.json
 include integrations/openclaw/vitest.config.ts
 recursive-include integrations/openclaw/src *.ts
 recursive-include integrations/openclaw/dist *.js *.d.ts
-recursive-include integrations/openclaw/tests *.ts
+recursive-include integrations/openclaw/tests *.ts *.mjs
 recursive-include integrations/openclaw/types *.d.ts
 include integrations/README.md
+include integrations/authority-evidence.json
+include integrations/aip/README.md
+include integrations/algo-cli/README.md
 include integrations/claude-code/.claude-plugin/plugin.json
 include integrations/claude-code/.mcp.json
 include integrations/claude-code/README.md
+recursive-include integrations/claude-code/skills *.md
+recursive-include integrations/claude-code/hooks *.json
 include integrations/droid/.factory/mcp.json
+include integrations/droid/.factory/hooks.json
+include integrations/droid/.factory/hooks/echo-veil-preflight.sh
+recursive-include integrations/droid/.factory/skills *.md
+include integrations/droid/.factory-plugin/plugin.json
+include integrations/droid/mcp.json
+recursive-include integrations/droid/hooks *.json *.sh
+recursive-include integrations/droid/skills *.md
+include integrations/droid/README.md
 include integrations/goose/echo-veil.yaml
+include integrations/goose/README.md
+include integrations/hermes/README.md
 include integrations/hermes/config.yaml
+recursive-include integrations/hermes/plugin *.py *.yaml
+recursive-include integrations/hermes/skills *.md
 include integrations/mercury/SKILL.md
 include integrations/opencode/opencode.json
+include integrations/opencode/package.json
+include integrations/opencode/package-lock.json
+include integrations/opencode/README.md
+recursive-include integrations/opencode/.opencode/skills *.md
+recursive-include integrations/opencode/.opencode/plugins *.js
+recursive-include integrations/opencode/tests *.mjs
 include integrations/pi/package.json
 include integrations/pi/package-lock.json
 include integrations/pi/README.md
@@ -33,5 +63,6 @@ include integrations/pi/tsconfig.json
 include integrations/pi/vitest.config.ts
 recursive-include integrations/pi/extensions *.ts
 recursive-include integrations/pi/src *.ts
+recursive-include integrations/pi/skills *.md
 recursive-include integrations/pi/tests *.ts
 recursive-include integrations/pi/types *.d.ts

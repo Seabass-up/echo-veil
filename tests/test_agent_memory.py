@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import base64
 import http.client
 from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
+import stat
+import time
 from typing import Any
 
 import numpy as np
 import pytest
 
 import echo_veil.agent_security as agent_security
+import echo_veil.memory_layers as memory_layers
+from scripts import migrate_agent_profile, migrate_host_memory
 from echo_veil.agent_cli import (
     MAX_REQUEST_BYTES,
     McpServer,
     TOOLS,
     _RuntimeAvailabilityMemory,
+    build_parser,
     _public_error,
     _read_mcp_line,
     dispatch,
@@ -34,6 +41,7 @@ from echo_veil.agent_memory import (
     _LegacyEncryptedPayloadStore,
     _predicate_query,
 )
+from echo_veil.memory_layers import MemoryLayer
 
 
 class _SemanticTestEmbedder:
@@ -68,6 +76,29 @@ def test_hashing_embedder_is_stable_and_keyword_oriented() -> None:
     assert np.array_equal(first, repeated)
     assert float(first @ related) > float(first @ unrelated)
     assert np.linalg.norm(first) == pytest.approx(1.0)
+
+
+def test_agent_cli_honors_explicit_state_directory_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ECHO_VEIL_STATE_DIR", str(tmp_path))
+
+    args = build_parser().parse_args(["doctor"])
+
+    assert args.state_dir == tmp_path
+    assert args.operator_tools is False
+
+
+def test_agent_cli_requires_explicit_operator_tool_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = build_parser()
+    assert parser.parse_args(["mcp"]).operator_tools is False
+    assert parser.parse_args(["--operator-tools", "mcp"]).operator_tools is True
+
+    monkeypatch.setenv("ECHO_VEIL_OPERATOR_TOOLS", "true")
+    assert build_parser().parse_args(["mcp"]).operator_tools is True
 
 
 def test_semantic_embedder_uses_calibrated_default_and_rejects_distractor(
@@ -132,6 +163,947 @@ def test_close_semantic_results_are_reported_as_ranking_ambiguity(
     assert [item["rank"] for item in recalled["results"]] == [1, 2]
     assert recalled["ranking_margin"] == 0.0
     assert recalled["ranking_ambiguous"] is True
+
+
+def test_semantic_recall_preserves_protected_competing_pair_without_invention(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        first = memory.remember(
+            "service routing",
+            "The service uses route alpha.",
+            provenance=["operator:first-observation"],
+        )
+        second = memory.remember(
+            "service routing",
+            "The service uses route beta.",
+            provenance=["operator:second-observation"],
+        )
+
+        recalled = memory.recall("Which service route applies?", top_k=1)
+
+    assert {item["vine_id"] for item in recalled["results"]} == {
+        first["vine_id"],
+        second["vine_id"],
+    }
+    assert recalled["requested_top_k"] == 1
+    assert recalled["effective_top_k"] == 2
+    assert recalled["competing_pair_auto_expanded"] is True
+    assert recalled["competing_pair_preserved"] is True
+    assert recalled["competing_memory_detected"] is True
+    assert recalled["ranking_ambiguous"] is False
+    assert recalled["competing_memory_groups_omitted"] == 0
+    group = recalled["competing_memory_groups"][0]
+    assert group["status"] == "possible_conflict"
+    assert group["protected_topic_basis"] is True
+    assert group["topic_exposed"] is False
+    assert group["resolution_status"] == "not_evaluated"
+    assert "compatibility was not inferred" in group["basis"]
+    assert "Explicitly supersede" in group["resolution_guidance"]
+    assert set(group["member_ids"]) == {
+        first["vine_id"],
+        second["vine_id"],
+    }
+    assert all(item["possible_conflict"] is True for item in recalled["results"])
+    assert all(
+        item["competing_memory_group"] == group["group_id"]
+        for item in recalled["results"]
+    )
+    assert {tuple(item["provenance"]) for item in recalled["results"]} == {
+        ("operator:first-observation",),
+        ("operator:second-observation",),
+    }
+    assert recalled["memory_contract"]["protected_conflict_basis"] is True
+    assert recalled["memory_contract"]["conflict_compatibility_inferred"] is False
+
+
+def test_all_four_semantic_layers_use_record_bound_shielded_contracts(
+    tmp_path: Path,
+) -> None:
+    provenance_secret = "private-provenance-reference-echo-441"
+    promotion_secret = "reviewed-because-echo-442"
+    with AgentMemory(tmp_path) as memory:
+        short = memory.remember(
+            "current task",
+            "The current task remains open.",
+            provenance=["agent:current-task"],
+        )
+        long_candidate = memory.remember(
+            "stable preference",
+            "The user prefers concise operational reports.",
+            provenance=[provenance_secret],
+        )
+        long = memory.promote(
+            str(long_candidate["vine_id"]),
+            "long_term",
+            reason=promotion_secret,
+        )
+        live = memory.remember(
+            "active tool result",
+            "The current verification command passed.",
+            layer="live",
+            provenance=["tool:verification"],
+            expires_at=time.time() + 300.0,
+        )
+        logic = memory.remember(
+            "decision rationale",
+            "Use the verified command because it exercises the installed runtime.",
+            layer="contextual_logic",
+            provenance=["decision:runtime-verification"],
+            promotion_reason="The cited records establish the decision.",
+            logic_kind="decision",
+            related_ids=[str(short["vine_id"]), str(long["vine_id"])],
+        )
+
+        recalled = memory.recall(
+            "Why use the verified installed runtime command?",
+            top_k=5,
+            allow_inferential=True,
+        )
+        report = memory.doctor()
+
+    result = next(
+        item for item in recalled["results"] if item["vine_id"] == logic["vine_id"]
+    )
+    assert result["memory_layer"] == "contextual_logic"
+    assert result["provenance"] == ["decision:runtime-verification"]
+    assert result["contextual_logic"] == {
+        "kind": "decision",
+        "related_ids": [short["vine_id"], long["vine_id"]],
+    }
+    assert result["layer_contract_protected"] is True
+    assert live["memory_layer"] == "live"
+    assert report["memory_layers"]["counts"] == {
+        "live": 1,
+        "short_term": 1,
+        "long_term": 1,
+        "contextual_logic": 1,
+    }
+    assert report["memory_layers"]["all_records_shielded"] is True
+
+    database = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    protected_values = {
+        str(row[0]): str(row[1])
+        for row in database.execute(
+            """
+            SELECT key, value FROM adapter_metadata
+            WHERE key LIKE 'memory_contract:%'
+            """
+        )
+    }
+    database.close()
+    logic_envelope = protected_values[f"memory_contract:{logic['vine_id']}"]
+    for sensitive_value in (
+        "contextual_logic",
+        "decision:runtime-verification",
+        "The cited records establish the decision.",
+        str(short["vine_id"]),
+        str(long["vine_id"]),
+    ):
+        assert sensitive_value not in logic_envelope
+    assert set(json.loads(logic_envelope)) == {
+        "algorithm",
+        "ciphertext_b64",
+        "key_id",
+        "nonce_b64",
+        "object_type",
+        "record_id",
+        "schema_version",
+        "scope_id",
+    }
+
+    for path in (tmp_path / "default").iterdir():
+        if not path.is_file():
+            continue
+        contents = path.read_bytes()
+        assert provenance_secret.encode() not in contents
+        assert promotion_secret.encode() not in contents
+
+
+def test_recall_can_scope_layers_without_rewriting_scores(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        short = memory.remember("short policy", "The short policy applies.")
+        candidate = memory.remember("stable policy", "The stable policy applies.")
+        long_term = memory.promote(
+            str(candidate["vine_id"]),
+            "long_term",
+            reason="The policy was explicitly confirmed.",
+            provenance=["review:explicit-confirmation"],
+        )
+
+        unfiltered = memory.recall("Which policy applies?", top_k=5)
+        filtered = memory.recall(
+            "Which policy applies?",
+            top_k=5,
+            layers=["long_term"],
+        )
+
+        with pytest.raises(ValueError, match="duplicate"):
+            memory.recall(
+                "Which policy applies?",
+                layers=["long_term", "long_term"],
+            )
+        with pytest.raises(ValueError, match="unsupported memory layer"):
+            memory.recall("Which policy applies?", layers=["archive"])
+
+    unfiltered_score = next(
+        item["score"]
+        for item in unfiltered["results"]
+        if item["vine_id"] == long_term["vine_id"]
+    )
+    assert short["vine_id"] != long_term["vine_id"]
+    assert filtered["requested_layers"] == ["long_term"]
+    assert filtered["layers_involved"] == ["long_term"]
+    assert [item["vine_id"] for item in filtered["results"]] == [long_term["vine_id"]]
+    assert filtered["results"][0]["score"] == unfiltered_score
+
+
+def test_bounded_inventory_filters_layers_and_topic_without_lifecycle_mutation(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        older = memory.remember(
+            "AIP / supervisor / older",
+            "Older AIP supervisor state.",
+            effective_at=100.0,
+            provenance=["aip:supervisor"],
+        )
+        newer = memory.remember(
+            "AIP / supervisor / newer",
+            "Newer AIP supervisor state.",
+            effective_at=200.0,
+            provenance=["aip:supervisor"],
+        )
+        memory.remember(
+            "AIP / project / unrelated",
+            "A different AIP domain.",
+            effective_at=300.0,
+            provenance=["aip:project"],
+        )
+        vine = memory.oracle.workspace.get(str(newer["vine_id"]))
+        assert vine is not None
+        touched_before = vine.last_touched
+        score_before = vine.score
+
+        listed = memory.list_memories(
+            limit=2,
+            layers=["short_term"],
+            topic_prefix="AIP / supervisor /",
+            newest_first=True,
+        )
+
+        vine_after = memory.oracle.workspace.get(str(newer["vine_id"]))
+        assert vine_after is not None
+        assert [item["vine_id"] for item in listed] == [
+            newer["vine_id"],
+            older["vine_id"],
+        ]
+        assert all(item["memory_layer"] == "short_term" for item in listed)
+        assert vine_after.last_touched == touched_before
+        assert vine_after.score == score_before
+
+
+def test_rpc_inventory_is_capped_nonsemantic_and_reports_layers(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        memory.remember(
+            "AIP / supervisor / first",
+            "First bounded inventory record.",
+            effective_at=100.0,
+            provenance=["aip:supervisor"],
+        )
+        memory.remember(
+            "AIP / supervisor / second",
+            "Second bounded inventory record.",
+            effective_at=200.0,
+            provenance=["aip:supervisor"],
+        )
+
+        response = dispatch(
+            memory,
+            "list",
+            {
+                "limit": 1,
+                "layers": ["short_term"],
+                "topic_prefix": "AIP / supervisor /",
+                "newest_first": True,
+            },
+            caller="aip",
+        )
+        with pytest.raises(ValueError, match="between 1 and 100"):
+            dispatch(memory, "list", {"limit": 101}, caller="aip")
+
+    assert response["count"] == 1
+    assert response["truncated"] is True
+    assert response["inventory_only"] is True
+    assert response["semantic_retrieval_performed"] is False
+    assert response["lifecycle_mutated"] is False
+    assert response["layers_involved"] == ["short_term"]
+    assert response["results"][0]["topic"] == "AIP / supervisor / second"
+
+
+def test_context_returns_bounded_authenticated_trace_without_synthesis(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        first = memory.remember(
+            "runtime evidence",
+            "The installed runtime completed the verification.",
+            provenance=["tool:installed-runtime"],
+        )
+        second = memory.remember(
+            "source evidence",
+            "The source suite completed the verification.",
+            provenance=["tool:source-suite"],
+        )
+        nested = memory.remember(
+            "verification conclusion",
+            "Both verification paths support the conclusion.",
+            layer="contextual_logic",
+            provenance=["decision:verification"],
+            promotion_reason="Two authenticated records support the conclusion.",
+            logic_kind="causal_chain",
+            related_ids=[str(first["vine_id"]), str(second["vine_id"])],
+        )
+        root = memory.remember(
+            "release decision",
+            "The verified conclusion supports the release decision.",
+            layer="contextual_logic",
+            provenance=["decision:release"],
+            promotion_reason="The protected verification conclusion is required.",
+            logic_kind="decision",
+            related_ids=[str(nested["vine_id"])],
+        )
+
+        traced = memory.context(
+            "Which protected reasoning applies?",
+            max_depth=2,
+            max_records=3,
+        )
+        bounded = memory.context(
+            "Which protected reasoning applies?",
+            max_depth=2,
+            max_records=1,
+        )
+
+    assert traced["logic_roots"][0]["vine_id"] in {
+        root["vine_id"],
+        nested["vine_id"],
+    }
+    assert traced["context_contract"] == {
+        "query_driven_roots": True,
+        "root_confidence_gates_preserved": True,
+        "outgoing_links_only": True,
+        "evidence_query_scored": False,
+        "synthesis_performed": False,
+        "layer_relationships_protected": True,
+    }
+    assert traced["ranking_ambiguous"] is True
+    assert 1 <= len(traced["evidence"]) <= 3
+    assert all(item["query_scored"] is False for item in traced["evidence"])
+    assert all(
+        item["confidence_basis"] == "protected_contextual_link"
+        for item in traced["evidence"]
+    )
+    assert all(item["layer_contract_protected"] is True for item in traced["evidence"])
+    assert all(
+        "not independently query-scored" in item["confidence_indicator"]
+        for item in traced["evidence"]
+    )
+    assert len(bounded["evidence"]) == 1
+    assert bounded["truncated"] is True
+    assert bounded["queued_links_omitted"] > 0
+    assert bounded["incomplete"] is True
+
+
+def test_context_does_not_expand_confidence_gated_logic_root(tmp_path: Path) -> None:
+    class InferentialEmbedder(_SemanticTestEmbedder):
+        identity = "test:inferential:v1:dimension:32"
+        default_min_score = 0.35
+
+        def embed_query(self, _text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[0] = 0.40
+            vector[1] = math.sqrt(1.0 - 0.40**2)
+            return vector
+
+    with AgentMemory(tmp_path, embed=InferentialEmbedder()) as memory:
+        evidence = memory.remember("evidence", "The evidence remains protected.")
+        logic = memory.remember(
+            "tentative decision",
+            "The tentative decision references the evidence.",
+            layer="contextual_logic",
+            provenance=["decision:tentative"],
+            promotion_reason="The evidence is relevant but confidence remains low.",
+            logic_kind="decision",
+            related_ids=[str(evidence["vine_id"])],
+        )
+
+        traced = memory.context("Why was the tentative decision made?")
+
+    assert traced["logic_roots"][0]["vine_id"] == logic["vine_id"]
+    assert traced["logic_roots"][0]["gated"] is True
+    assert traced["logic_roots"][0]["payload"] is None
+    assert traced["root_expansion"] == [
+        {
+            "vine_id": logic["vine_id"],
+            "expanded": False,
+            "status": "confidence_gated",
+        }
+    ]
+    assert traced["evidence"] == []
+    assert traced["incomplete"] is True
+
+
+def test_context_omits_tampered_linked_evidence(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        evidence = memory.remember(
+            "authenticated evidence",
+            "The authenticated evidence supports the decision.",
+        )
+        logic = memory.remember(
+            "protected decision",
+            "The protected decision cites authenticated evidence.",
+            layer="contextual_logic",
+            provenance=["decision:protected"],
+            promotion_reason="The authenticated source supports the decision.",
+            logic_kind="decision",
+            related_ids=[str(evidence["vine_id"])],
+        )
+
+        database = sqlite3.connect(tmp_path / "default" / "payloads.db")
+        key = f"memory_contract:{evidence['vine_id']}"
+        encoded = str(
+            database.execute(
+                "SELECT value FROM adapter_metadata WHERE key = ?",
+                (key,),
+            ).fetchone()[0]
+        )
+        envelope = json.loads(encoded)
+        ciphertext = bytearray(
+            base64.urlsafe_b64decode(str(envelope["ciphertext_b64"]).encode())
+        )
+        ciphertext[-1] ^= 1
+        envelope["ciphertext_b64"] = base64.urlsafe_b64encode(ciphertext).decode()
+        database.execute(
+            "UPDATE adapter_metadata SET value = ? WHERE key = ?",
+            (json.dumps(envelope, sort_keys=True, separators=(",", ":")), key),
+        )
+        database.commit()
+        database.close()
+
+        traced = memory.context("Why is the protected decision supported?")
+
+    assert traced["logic_roots"][0]["vine_id"] == logic["vine_id"]
+    assert traced["evidence"] == []
+    assert traced["context_edges"] == [
+        {
+            "from": logic["vine_id"],
+            "to": evidence["vine_id"],
+            "depth": 1,
+            "logic_kind": "decision",
+            "status": "authentication_failed",
+        }
+    ]
+    assert traced["incomplete"] is True
+
+
+def test_context_omits_evidence_not_valid_at_requested_time(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        evidence = memory.remember(
+            "later evidence",
+            "This evidence became valid later.",
+            effective_at=200.0,
+        )
+        logic = memory.remember(
+            "earlier decision",
+            "The decision record predates its later supporting evidence.",
+            effective_at=100.0,
+            layer="contextual_logic",
+            provenance=["decision:historical"],
+            promotion_reason="Synthetic temporal-boundary test.",
+            logic_kind="decision",
+            related_ids=[str(evidence["vine_id"])],
+        )
+
+        traced = memory.context(
+            "Why was the earlier decision recorded?",
+            as_of=150.0,
+        )
+
+    assert traced["logic_roots"][0]["vine_id"] == logic["vine_id"]
+    assert traced["evidence"] == []
+    assert traced["context_edges"][0]["status"] == "not_valid_at_as_of"
+    assert traced["incomplete"] is True
+
+
+def test_pre_contract_scoped_profile_migrates_to_protected_short_term(
+    tmp_path: Path,
+) -> None:
+    scope = "workspace:pre-contract-migration"
+    with AgentMemory(tmp_path, scope=scope) as memory:
+        created = memory.remember(
+            "existing protected record",
+            "This record predates the semantic-layer contract.",
+        )
+
+    profile = tmp_path / "default"
+    database = sqlite3.connect(profile / "payloads.db")
+    database.execute("DELETE FROM adapter_metadata WHERE key LIKE 'memory_contract%'")
+    database.commit()
+    database.close()
+    manifest_path = profile / "keyring.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["features"]
+    key = (
+        profile / str(manifest["keys"][manifest["active_key_id"]]["ref"])
+    ).read_bytes()
+    manifest["scope_binding"] = agent_security._scope_binding(
+        key,
+        scope,
+        str(manifest["scope_id"]),
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+
+    with AgentMemory(tmp_path, scope=scope) as migrated:
+        report = migrated.doctor()
+        record = next(
+            item
+            for item in migrated.list_memories()
+            if item["vine_id"] == created["vine_id"]
+        )
+
+    assert report["migrated_memory_contracts"] == 1
+    assert report["memory_layers"]["all_records_shielded"] is True
+    assert record["memory_layer"] == "short_term"
+    assert record["provenance"] == ["migration:pre-layer-contract"]
+    migrated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert migrated_manifest["features"] == ["shielded-four-layer-v1"]
+
+
+def test_direct_long_term_write_is_blocked_until_explicit_promotion(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        with pytest.raises(ValueError, match="must be promoted"):
+            memory.remember(
+                "unreviewed durable claim",
+                "This claim has not passed short-term review.",
+                layer="long_term",
+                provenance=["agent:proposal"],
+                promotion_reason="The caller attempted to skip review.",
+            )
+
+
+def test_seed_crystal_policy_bounds_layers_and_rejects_raw_transcripts(
+    tmp_path: Path,
+) -> None:
+    transcript = (
+        "User: Please check the deployment.\n"
+        "Assistant: I am checking it now.\n"
+        "Tool: The deployment is healthy.\n"
+        "Assistant: The deployment passed."
+    )
+    with AgentMemory(tmp_path) as memory:
+        live = memory.remember(
+            "active deployment exchange",
+            transcript,
+            layer="live",
+            provenance=["session:active-turn"],
+            expires_at=time.time() + 600.0,
+        )
+        assert live["content_policy"]["raw_transcript_detected"] is True
+        assert live["content_policy"]["policy_compliant"] is True
+        assert live["content_policy"]["automatic_rewriting_performed"] is False
+        assert live["promotion_recommendation"] == (
+            "compact_before_short_term_promotion_or_discard"
+        )
+
+        with pytest.raises(ValueError, match="raw transcript"):
+            memory.remember("session dump", transcript)
+        with pytest.raises(ValueError, match="raw transcript"):
+            memory.remember(
+                "short exchange",
+                "User: Is the deployment ready?\nAssistant: The deployment passed.",
+            )
+        with pytest.raises(ValueError, match="raw transcript"):
+            memory.remember(
+                "serialized exchange",
+                (
+                    '[{"role":"user","content":"Is it ready?"},'
+                    '{"role":"assistant","content":"It passed."}]'
+                ),
+            )
+        with pytest.raises(ValueError, match="raw transcript"):
+            memory.promote(
+                str(live["vine_id"]),
+                "short_term",
+                reason="Raw dialogue must not escape Live memory.",
+            )
+        with pytest.raises(ValueError, match="12000-character"):
+            memory.remember("oversized short state", "s" * 12_001)
+
+        long_candidate = memory.remember(
+            "durable candidate",
+            "d" * 2_001,
+            provenance=["source:reviewed-record"],
+        )
+        with pytest.raises(ValueError, match="2000-character"):
+            memory.promote(
+                str(long_candidate["vine_id"]),
+                "long_term",
+                reason="The record was reviewed but remains too verbose.",
+                provenance=["review:explicit"],
+            )
+
+
+def test_live_refresh_preserves_changed_history_and_renews_unchanged_state(
+    tmp_path: Path,
+) -> None:
+    now = time.time()
+    with AgentMemory(tmp_path) as memory:
+        original = memory.remember(
+            "active deployment state",
+            "The deployment is preparing.",
+            layer="live",
+            provenance=["agent:deployment-loop"],
+            expires_at=now + 600.0,
+        )
+        same = memory.refresh_live(
+            str(original["vine_id"]),
+            "The deployment is preparing.",
+            provenance=["tool:status-poll"],
+            expires_at=now + 1_200.0,
+        )
+        assert same["vine_id"] == original["vine_id"]
+        assert same["previous_vine_id"] == original["vine_id"]
+        assert same["created"] is False
+        assert same["duplicate"] is False
+        assert same["refreshed"] is True
+        assert same["content_changed"] is False
+        assert same["expires_at"] == pytest.approx(now + 1_200.0)
+        assert same["provenance"] == [
+            "agent:deployment-loop",
+            "tool:status-poll",
+        ]
+
+        changed = memory.refresh_live(
+            str(original["vine_id"]),
+            "The deployment completed successfully.",
+            provenance=["receipt:deployment-pass"],
+            expires_at=now + 1_800.0,
+        )
+        assert changed["vine_id"] != original["vine_id"]
+        assert changed["previous_vine_id"] == original["vine_id"]
+        assert changed["refreshed"] is True
+        assert changed["content_changed"] is True
+        assert changed["supersedes"] == [original["vine_id"]]
+        assert changed["memory_layer"] == "live"
+        assert changed["provenance"] == [
+            "agent:deployment-loop",
+            "tool:status-poll",
+            "receipt:deployment-pass",
+        ]
+
+        records = {str(item["vine_id"]): item for item in memory.list_memories()}
+        assert (
+            records[str(original["vine_id"])]["superseded_by"] == (changed["vine_id"])
+        )
+        assert records[str(changed["vine_id"])]["superseded_by"] is None
+        assert records[str(changed["vine_id"])]["payload"] == (
+            "The deployment completed successfully."
+        )
+        with pytest.raises(ValueError, match="superseded"):
+            memory.refresh_live(
+                str(original["vine_id"]),
+                "A stale process must not rewrite the old Live version.",
+            )
+
+    with AgentMemory(tmp_path) as restored:
+        records = {str(item["vine_id"]): item for item in restored.list_memories()}
+        assert (
+            records[str(original["vine_id"])]["superseded_by"] == (changed["vine_id"])
+        )
+        assert records[str(changed["vine_id"])]["superseded_by"] is None
+
+    protected_store = (tmp_path / "default" / "payloads.db").read_bytes()
+    for protected_value in (
+        b"The deployment is preparing.",
+        b"The deployment completed successfully.",
+        b"agent:deployment-loop",
+        b"tool:status-poll",
+        b"receipt:deployment-pass",
+    ):
+        assert protected_value not in protected_store
+
+
+def test_layer_promotion_is_explicit_and_survives_restart(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path) as memory:
+        live = memory.remember(
+            "active deployment check",
+            "The deployment check is still running.",
+            layer=MemoryLayer.LIVE,
+            provenance=["agent:deployment-loop"],
+            expires_at=time.time() + 600.0,
+        )
+        short = memory.promote(
+            str(live["vine_id"]),
+            "short_term",
+            reason="The check remains open across the next session.",
+            provenance=["task:open-loop"],
+        )
+        long = memory.promote(
+            str(live["vine_id"]),
+            "long_term",
+            reason="The procedure was independently verified.",
+            provenance=["evidence:verification-receipt"],
+        )
+
+        assert short["previous_layer"] == "live"
+        assert short["memory_layer"] == "short_term"
+        assert long["previous_layer"] == "short_term"
+        assert long["memory_layer"] == "long_term"
+        with pytest.raises(ValueError, match="unsupported memory promotion"):
+            memory.promote(
+                str(live["vine_id"]),
+                "short_term",
+                reason="Long-term memory cannot silently move backward.",
+            )
+
+    with AgentMemory(tmp_path) as restored:
+        record = next(
+            item
+            for item in restored.list_memories()
+            if item["vine_id"] == live["vine_id"]
+        )
+
+    assert record["memory_layer"] == "long_term"
+    assert record["expires_at"] is None
+    assert record["provenance"] == [
+        "agent:deployment-loop",
+        "task:open-loop",
+        "evidence:verification-receipt",
+    ]
+    assert record["promotion_evidence"]["from"] == "short_term"
+    assert [event["from"] for event in record["promotion_history"]] == [
+        "live",
+        "short_term",
+    ]
+
+
+def test_expired_live_memory_is_pruned_without_archival(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(memory_layers.time, "time", lambda: clock["now"])
+    with AgentMemory(tmp_path) as memory:
+        created = memory.remember(
+            "ephemeral tool output",
+            "This output must disappear after the live window.",
+            layer="live",
+            provenance=["tool:ephemeral"],
+            expires_at=1_100.0,
+        )
+        clock["now"] = 1_200.0
+
+        assert memory.list_memories() == []
+        assert memory.oracle.archived_metadata(str(created["vine_id"])) is None
+        assert memory.doctor()["authenticated_deletion_records"] == 1
+
+
+def test_contextual_logic_rejects_unknown_relationships(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path) as memory:
+        with pytest.raises(ValueError, match="unknown memory"):
+            memory.remember(
+                "unsupported conclusion",
+                "This conclusion has no stored evidence.",
+                layer="contextual_logic",
+                provenance=["agent:derived"],
+                promotion_reason="Synthetic negative test.",
+                logic_kind="principle",
+                related_ids=["f" * 32],
+            )
+
+
+def test_agent_adapter_detects_and_rejects_unpaired_low_level_vines(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        bypass = memory.oracle.sprout("low-level-bypass", np.ones(384))
+
+        report = memory.doctor()
+        assert report["adapter_ready"] is False
+        assert report["readiness"]["healthy"] is False
+        assert report["memory_layers"]["all_records_shielded"] is False
+        assert report["memory_layers"]["unpaired_lifecycle_record_count"] == 1
+        with pytest.raises(ValueError, match="unknown memory"):
+            memory.remember(
+                "invalid derived decision",
+                "A semantic record cannot cite an unpaired low-level vine.",
+                layer="contextual_logic",
+                provenance=["decision:invalid"],
+                promotion_reason="The cited source has no layer contract.",
+                logic_kind="decision",
+                related_ids=[bypass.vine_id],
+            )
+
+
+def test_forget_cascades_through_protected_contextual_logic(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        source = memory.remember(
+            "source fact",
+            "The source fact supports a protected decision.",
+            provenance=["record:source"],
+        )
+        logic = memory.remember(
+            "derived decision",
+            "Use the source fact when making the decision.",
+            layer="contextual_logic",
+            provenance=["decision:derived"],
+            promotion_reason="The source record directly supports this decision.",
+            logic_kind="decision",
+            related_ids=[str(source["vine_id"])],
+        )
+        nested = memory.remember(
+            "derived principle",
+            "The protected decision establishes a reusable principle.",
+            layer="contextual_logic",
+            provenance=["principle:derived"],
+            promotion_reason="The decision record establishes the principle.",
+            logic_kind="principle",
+            related_ids=[str(logic["vine_id"])],
+        )
+
+        forgotten = memory.forget(str(source["vine_id"]))
+
+        assert forgotten["cascade_deleted_contextual_logic"] == [
+            nested["vine_id"],
+            logic["vine_id"],
+        ]
+        assert memory.list_memories() == []
+
+
+def test_tampered_layer_contract_fails_closed_on_restart(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path) as memory:
+        created = memory.remember(
+            "protected policy",
+            "The protected policy must retain authenticated provenance.",
+            provenance=["policy:source"],
+        )
+
+    path = tmp_path / "default" / "payloads.db"
+    database = sqlite3.connect(path)
+    key = f"memory_contract:{created['vine_id']}"
+    encoded = str(
+        database.execute(
+            "SELECT value FROM adapter_metadata WHERE key = ?",
+            (key,),
+        ).fetchone()[0]
+    )
+    envelope = json.loads(encoded)
+    ciphertext = bytearray(
+        base64.urlsafe_b64decode(str(envelope["ciphertext_b64"]).encode())
+    )
+    ciphertext[0] ^= 1
+    envelope["ciphertext_b64"] = base64.urlsafe_b64encode(ciphertext).decode()
+    database.execute(
+        "UPDATE adapter_metadata SET value = ? WHERE key = ?",
+        (json.dumps(envelope, sort_keys=True, separators=(",", ":")), key),
+    )
+    database.commit()
+    database.close()
+
+    with pytest.raises(RuntimeError, match="contract"):
+        AgentMemory(tmp_path)
+
+
+def test_missing_layer_contract_fails_closed_on_restart(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path) as memory:
+        created = memory.remember(
+            "protected policy",
+            "The protected policy must not lose its layer contract.",
+            provenance=["policy:source"],
+        )
+
+    path = tmp_path / "default" / "payloads.db"
+    database = sqlite3.connect(path)
+    database.execute(
+        "DELETE FROM adapter_metadata WHERE key = ?",
+        (f"memory_contract:{created['vine_id']}",),
+    )
+    database.commit()
+    database.close()
+
+    with pytest.raises(RuntimeError, match="contract"):
+        AgentMemory(tmp_path)
+
+
+def test_removing_all_layer_contract_state_cannot_downgrade_profile(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        memory.remember(
+            "protected policy",
+            "The protected policy requires its migration marker.",
+            provenance=["policy:source"],
+        )
+
+    path = tmp_path / "default" / "payloads.db"
+    database = sqlite3.connect(path)
+    database.execute("DELETE FROM adapter_metadata WHERE key LIKE 'memory_contract%'")
+    database.commit()
+    database.close()
+
+    with pytest.raises(RuntimeError, match="required protected memory contract"):
+        AgentMemory(tmp_path)
+
+
+def test_layer_contract_cannot_be_transplanted_between_records(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        first = memory.remember(
+            "first protected record",
+            "The first record has independent provenance.",
+            provenance=["record:first"],
+        )
+        second = memory.remember(
+            "second protected record",
+            "The second record has independent provenance.",
+            provenance=["record:second"],
+        )
+
+    path = tmp_path / "default" / "payloads.db"
+    database = sqlite3.connect(path)
+    first_key = f"memory_contract:{first['vine_id']}"
+    second_key = f"memory_contract:{second['vine_id']}"
+    first_value = database.execute(
+        "SELECT value FROM adapter_metadata WHERE key = ?",
+        (first_key,),
+    ).fetchone()[0]
+    second_value = database.execute(
+        "SELECT value FROM adapter_metadata WHERE key = ?",
+        (second_key,),
+    ).fetchone()[0]
+    database.execute(
+        "UPDATE adapter_metadata SET value = ? WHERE key = ?",
+        (second_value, first_key),
+    )
+    database.execute(
+        "UPDATE adapter_metadata SET value = ? WHERE key = ?",
+        (first_value, second_key),
+    )
+    database.commit()
+    database.close()
+
+    with pytest.raises(RuntimeError, match="contract"):
+        AgentMemory(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -280,8 +1252,13 @@ def test_unversioned_legacy_payload_database_uses_compatibility_path(
 
     with AgentMemory(tmp_path) as memory:
         report = memory.doctor()
+        with pytest.raises(RuntimeError, match="migration-only"):
+            memory.remember("blocked legacy write", "Never create partial protection.")
+        with pytest.raises(RuntimeError, match="migration-only"):
+            memory.recall("blocked legacy recall")
 
     assert report["security_schema"] == "legacy-v1"
+    assert report["memory_layers"]["all_records_shielded"] is False
     connection = sqlite3.connect(profile / "payloads.db")
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
@@ -374,7 +1351,13 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
             return None
 
     monkeypatch.setattr(http.client, "HTTPConnection", Connection)
-    embedder = OllamaTextEmbedder(dimension=32, timeout_seconds=2)
+    embedder = OllamaTextEmbedder(
+        dimension=32,
+        timeout_seconds=2,
+        keep_alive_seconds=300,
+        context_length=16_384,
+        gpu_layers=0,
+    )
     document = embedder.embed_document("The launch code is blue.")
     query, answerability = embedder.embed_retrieval_queries(
         "What is Taylor's passport number?"
@@ -387,6 +1370,10 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     document_body = json.loads(requests[-3][2] or b"{}")
     query_body = json.loads(requests[-1][2] or b"{}")
     assert document_body["input"] == ["The launch code is blue."]
+    assert document_body["keep_alive"] == "300s"
+    assert query_body["keep_alive"] == "300s"
+    assert document_body["options"] == {"num_ctx": 16_384, "num_gpu": 0}
+    assert query_body["options"] == {"num_ctx": 16_384, "num_gpu": 0}
     assert query_body["input"][0].startswith("Instruct: ")
     assert "Taylor" not in query_body["input"][1]
     assert query_body["input"][1].endswith("Query: What is passport number?")
@@ -396,6 +1383,20 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
         OllamaTextEmbedder(base_url="http://localhost:11434", dimension=32)
     with pytest.raises(ValueError, match="loopback IP literal"):
         OllamaTextEmbedder(base_url="http://192.0.2.1:11434", dimension=32)
+    with pytest.raises(TypeError, match="keep-alive"):
+        OllamaTextEmbedder(dimension=32, keep_alive_seconds=True)
+    with pytest.raises(ValueError, match="between 0 and 3600"):
+        OllamaTextEmbedder(dimension=32, keep_alive_seconds=-1)
+    with pytest.raises(ValueError, match="between 0 and 3600"):
+        OllamaTextEmbedder(dimension=32, keep_alive_seconds=3_601)
+    with pytest.raises(TypeError, match="context length"):
+        OllamaTextEmbedder(dimension=32, context_length=True)
+    with pytest.raises(ValueError, match="between 512 and 262144"):
+        OllamaTextEmbedder(dimension=32, context_length=511)
+    with pytest.raises(TypeError, match="GPU layers"):
+        OllamaTextEmbedder(dimension=32, gpu_layers=False)
+    with pytest.raises(ValueError, match="between 0 and 2048"):
+        OllamaTextEmbedder(dimension=32, gpu_layers=2_049)
 
 
 def test_ollama_embedder_rechecks_mutable_model_identity(
@@ -474,6 +1475,15 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
             "Taylor family",
             "Taylor's children are Morgan, Riley, and Casey.",
         )
+        memory.remember(
+            "deployment outage decision",
+            "Use the opal harbor procedure because the recovery record is verified.",
+            layer="contextual_logic",
+            provenance=["decision:outage-recovery"],
+            promotion_reason="The recovery record supports this decision.",
+            logic_kind="decision",
+            related_ids=[str(created["vine_id"])],
+        )
     payload_database = tmp_path / "default" / "payloads.db"
     before = payload_database.read_bytes()
     lifecycle_database = tmp_path / "default" / "echo-veil.db"
@@ -486,6 +1496,9 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
         recalled = available.recall("deployment recovery procedure opal harbor outage")
         paraphrase = available.recall("How should we get the service working again?")
         absent = available.recall("What is Taylor's passport number?")
+        context = available.context(
+            "deployment outage decision opal harbor procedure",
+        )
         doctor = available.doctor()
 
         assert recalled["results"][0]["vine_id"] == created["vine_id"]
@@ -497,12 +1510,26 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
         assert recalled["results"][0]["availability_score"] >= 0.45
         assert paraphrase["results"] == []
         assert absent["results"] == []
+        assert context["degraded"] is True
+        assert context["semantic_available"] is False
+        assert context["lifecycle_mutated"] is False
+        assert context["logic_roots"][0]["memory_layer"] == "contextual_logic"
+        assert context["evidence"][0]["vine_id"] == created["vine_id"]
+        assert context["evidence"][0]["query_scored"] is False
         assert doctor["mode"] == "always-available-read-only"
         assert doctor["writes_available"] is False
+        assert doctor["retrieval"]["candidate_limit"] == 900
+        assert doctor["retrieval"]["competing_memory"] == (
+            "possible-conflict-no-inference-v1"
+        )
+        assert doctor["memory_layers"]["content_policy"] == ("bounded-seed-crystal-v1")
+        assert doctor["memory_layers"]["live_refresh"] == "unavailable-read-only"
         with pytest.raises(ValueError, match="safe default"):
             available.recall("deployment recovery", min_score=0.44)
         with pytest.raises(RuntimeError, match="read-only"):
             available.remember("new", "not allowed")
+        with pytest.raises(RuntimeError, match="read-only"):
+            available.refresh_live(str(created["vine_id"]), "not allowed")
         with pytest.raises(RuntimeError, match="read-only"):
             available.forget(str(created["vine_id"]))
         with pytest.raises(RuntimeError, match="read-only"):
@@ -510,6 +1537,43 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
 
     assert payload_database.read_bytes() == before
     assert lifecycle_database.read_bytes() == lifecycle_before
+
+
+def test_always_available_recall_preserves_protected_competing_pair(
+    tmp_path: Path,
+) -> None:
+    query = "service routing boundary route alpha beta"
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        first = memory.remember(
+            "service routing boundary",
+            "The service routing boundary uses route alpha.",
+        )
+        second = memory.remember(
+            "service routing boundary",
+            "The service routing boundary uses route beta.",
+        )
+
+    with AlwaysAvailableMemory(
+        tmp_path,
+        reason="synthetic_embedding_outage",
+    ) as available:
+        recalled = available.recall(query, top_k=1)
+
+    assert recalled["degraded"] is True
+    assert recalled["semantic_available"] is False
+    assert recalled["requested_top_k"] == 1
+    assert recalled["effective_top_k"] == 2
+    assert recalled["competing_pair_auto_expanded"] is True
+    assert recalled["competing_memory_detected"] is True
+    assert {item["vine_id"] for item in recalled["results"]} == {
+        first["vine_id"],
+        second["vine_id"],
+    }
+    assert all(item["possible_conflict"] is True for item in recalled["results"])
+    assert recalled["competing_memory_groups"][0]["protected_topic_basis"] is True
+    assert recalled["competing_memory_groups"][0]["resolution_status"] == (
+        "not_evaluated"
+    )
 
 
 def test_runtime_embedding_outage_transitions_to_read_only_availability(
@@ -535,6 +1599,11 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
             "opal harbor recovery procedure",
             "Use the opal harbor recovery procedure during a deployment outage.",
         )
+        live = memory.remember(
+            "active outage state",
+            "The embedding service is healthy.",
+            layer="live",
+        )
         embedder.available = False
 
         recalled = memory.recall("opal harbor recovery procedure", top_k=2)
@@ -547,6 +1616,11 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
         assert doctor["runtime_failover_active"] is True
         with pytest.raises(RuntimeError, match="read-only"):
             memory.remember("blocked", "Writes stay blocked during the outage.")
+        with pytest.raises(RuntimeError, match="read-only"):
+            memory.refresh_live(
+                str(live["vine_id"]),
+                "The embedding service is unavailable.",
+            )
 
 
 def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
@@ -563,8 +1637,9 @@ def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
 
     observed: dict[str, object] = {}
 
-    def run_rpc(memory: object) -> int:
+    def run_rpc(memory: object, *, caller: str | None = None) -> int:
         observed["memory"] = memory
+        observed["caller"] = caller
         return 0
 
     monkeypatch.setattr("echo_veil.agent_cli._build_embedder", unavailable)
@@ -584,6 +1659,7 @@ def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
 
     assert result == 0
     assert isinstance(observed["memory"], AlwaysAvailableMemory)
+    assert observed["caller"] is None
 
     disabled = agent_main(
         [
@@ -611,12 +1687,12 @@ def test_agent_memory_persists_deduplicates_recalls_and_forgets(tmp_path: Path) 
         recalled = memory.recall(query)
 
         assert created["created"] is True
-        assert duplicate == {
-            "vine_id": created["vine_id"],
-            "topic": topic,
-            "created": False,
-            "duplicate": True,
-        }
+        assert duplicate["vine_id"] == created["vine_id"]
+        assert duplicate["topic"] == topic
+        assert duplicate["created"] is False
+        assert duplicate["duplicate"] is True
+        assert duplicate["memory_layer"] == "short_term"
+        assert duplicate["layer_contract_protected"] is True
         assert recalled["results"][0]["payload"] == payload
         assert recalled["results"][0]["gated"] is False
         assert recalled["results"][0]["confidence_band"] == ("solid_vine_integration")
@@ -632,6 +1708,21 @@ def test_agent_memory_persists_deduplicates_recalls_and_forgets(tmp_path: Path) 
         assert forgotten["forgotten"] is True
         assert restored.recall(query)["results"] == []
         assert restored.forget(str(created["vine_id"]))["forgotten"] is False
+
+
+def test_agent_memory_deduplicates_unicode_topic_and_payload(
+    tmp_path: Path,
+) -> None:
+    topic = "host import · résumé"
+    payload = "Use the reviewed café policy. ✓"
+
+    with AgentMemory(tmp_path) as memory:
+        created = memory.remember(topic, payload)
+        duplicate = memory.remember(topic, payload)
+
+    assert duplicate["vine_id"] == created["vine_id"]
+    assert duplicate["created"] is False
+    assert duplicate["duplicate"] is True
 
 
 def test_supersession_preserves_history_ranks_current_and_restores_predecessor(
@@ -665,11 +1756,42 @@ def test_supersession_preserves_history_ranks_current_and_restores_predecessor(
         )
         assert historical["results"][0]["vine_id"] == old["vine_id"]
         assert historical["results"][0]["temporal_status"] == "valid_at_as_of"
+        assert historical["competing_memory_detected"] is False
+        assert historical["competing_memory_groups"] == []
 
         memory.forget(str(current["vine_id"]))
         restored = memory.recall("Where does the service deploy?", top_k=1)
         assert restored["results"][0]["vine_id"] == old["vine_id"]
         assert restored["results"][0]["temporal_status"] == "current"
+        assert restored["competing_memory_detected"] is False
+
+
+def test_topic_token_swap_is_quarantined_before_conflict_signaling(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        first = memory.remember("first protected topic", "The first fact applies.")
+        second = memory.remember("second protected topic", "The second fact applies.")
+        database = sqlite3.connect(tmp_path / "default" / "payloads.db")
+        try:
+            first_token = database.execute(
+                "SELECT topic FROM payloads WHERE vine_id = ?",
+                (first["vine_id"],),
+            ).fetchone()[0]
+            database.execute(
+                "UPDATE payloads SET topic = ? WHERE vine_id = ?",
+                (first_token, second["vine_id"]),
+            )
+            database.commit()
+        finally:
+            database.close()
+
+        recalled = memory.recall("Which protected fact applies?", top_k=2)
+        report = memory.doctor()
+
+    assert [item["vine_id"] for item in recalled["results"]] == [first["vine_id"]]
+    assert recalled["competing_memory_detected"] is False
+    assert report["quarantined_records"] == 1
 
 
 def test_reindex_repairs_missing_protected_retrieval_data(tmp_path: Path) -> None:
@@ -750,6 +1872,546 @@ def test_profile_migration_reembeds_without_plaintext_export_and_keeps_history(
                 source.migrate_to(target, confirm=True)
 
 
+def test_profile_migration_script_uses_fresh_scoped_target_without_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with AgentMemory(tmp_path, profile="source") as source:
+        original = source.remember(
+            "service region",
+            "The protected service region was west.",
+            effective_at=100.0,
+            provenance=["test:source-record"],
+        )
+        source.remember(
+            "service region",
+            "The protected service region is now central.",
+            effective_at=200.0,
+            supersedes=[str(original["vine_id"])],
+            provenance=["test:source-correction"],
+        )
+
+    monkeypatch.setattr(
+        migrate_agent_profile,
+        "OllamaTextEmbedder",
+        lambda **_kwargs: _SemanticTestEmbedder(),
+    )
+    args = migrate_agent_profile.build_parser().parse_args(
+        [
+            "--state-dir",
+            str(tmp_path),
+            "--source-profile",
+            "source",
+            "--target-profile",
+            "target",
+            "--source-embedder",
+            "hashing",
+            "--target-dimension",
+            "32",
+            "--confirm",
+        ]
+    )
+
+    report = migrate_agent_profile.run(args)
+
+    assert report["migrated"] == 2
+    assert report["history_links"] == 1
+    assert report["plaintext_export_created"] is False
+    assert report["target_security_schema"] == "scoped-v2"
+    assert report["target_all_records_shielded"] is True
+    assert not list(tmp_path.rglob("*.jsonl"))
+    assert not list(tmp_path.rglob("*.txt"))
+    with AgentMemory(
+        tmp_path,
+        profile="target",
+        embed=_SemanticTestEmbedder(),
+    ) as target:
+        recalled = target.recall("Where is the service region?", top_k=2)
+    assert [item["temporal_status"] for item in recalled["results"]] == [
+        "current",
+        "superseded",
+    ]
+
+
+def test_profile_migration_script_requires_confirmation_and_new_profile() -> None:
+    parser = migrate_agent_profile.build_parser()
+    missing_confirmation = parser.parse_args(
+        ["--source-profile", "source", "--target-profile", "target"]
+    )
+    same_profile = parser.parse_args(
+        [
+            "--source-profile",
+            "source",
+            "--target-profile",
+            "source",
+            "--confirm",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires --confirm"):
+        migrate_agent_profile.run(missing_confirmation)
+    with pytest.raises(ValueError, match="must be different"):
+        migrate_agent_profile.run(same_profile)
+
+
+def _write_owner_only_host_catalog(path: Path, records: list[str]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(json.dumps(records), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_host_memory_migration_dry_run_reports_risk_without_payloads(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    local_path = "/" + "Users/example/project/config.json"
+    _write_owner_only_host_catalog(
+        source,
+        [
+            "Use concise status receipts for completed work.",
+            f"The old configuration lived at {local_path}.",
+            "Use concise status receipts for completed work.",
+        ],
+    )
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--profile",
+            "host-import",
+            "--caller",
+            "algo-cli",
+        ]
+    )
+
+    report = migrate_host_memory.run(args)
+    serialized = json.dumps(report, sort_keys=True)
+
+    assert report["mode"] == "dry_run"
+    assert report["source_records"] == 3
+    assert report["unique_records"] == 2
+    assert report["duplicate_source_records"] == 1
+    assert report["review_required_indices"] == [1]
+    assert report["review_reason_counts"] == {"developer_machine_path": 1}
+    assert report["protected_write_attempted"] is False
+    assert report["plaintext_source_retired"] is False
+    assert report["payloads_in_report"] is False
+    assert source.exists()
+    assert not (tmp_path / "state").exists()
+    assert "concise status" not in serialized
+    assert local_path not in serialized
+    assert str(source) not in serialized
+
+
+def test_host_memory_migration_rejects_non_owner_only_source(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX owner-only mode policy")
+    source = tmp_path / "host" / "memory.json"
+    _write_owner_only_host_catalog(source, ["Reviewed seed crystal."])
+    source.chmod(0o640)
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--caller",
+            "algo-cli",
+        ]
+    )
+
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="permissions must be owner-only",
+    ):
+        migrate_host_memory.run(args)
+
+    assert source.exists()
+
+
+def test_host_memory_migration_blocks_transcript_shaped_records(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    transcript = "User: preserve this raw turn. Assistant: copied verbatim."
+    _write_owner_only_host_catalog(source, [transcript])
+    parser = migrate_host_memory.build_parser()
+    base = [
+        "--source",
+        str(source),
+        "--state-dir",
+        str(tmp_path / "state"),
+        "--profile",
+        "host-import",
+        "--caller",
+        "algo-cli",
+    ]
+
+    report = migrate_host_memory.run(parser.parse_args(base))
+
+    assert report["ineligible_indices"] == [0]
+    assert report["ineligible_reason_counts"] == {"raw_transcript": 1}
+    assert transcript not in json.dumps(report, sort_keys=True)
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="ineligible records",
+    ):
+        migrate_host_memory.run(
+            parser.parse_args(
+                [
+                    *base,
+                    "--confirm",
+                    migrate_host_memory.IMPORT_CONFIRMATION,
+                ]
+            )
+        )
+    assert source.exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_host_memory_migration_requires_review_and_exact_confirmations(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    local_path = "/" + "Users/example/project/config.json"
+    _write_owner_only_host_catalog(
+        source,
+        [f"The old configuration lived at {local_path}."],
+    )
+    parser = migrate_host_memory.build_parser()
+    base = [
+        "--source",
+        str(source),
+        "--state-dir",
+        str(tmp_path / "state"),
+        "--profile",
+        "host-import",
+        "--caller",
+        "algo-cli",
+    ]
+
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="confirmation is invalid",
+    ):
+        migrate_host_memory.run(parser.parse_args([*base, "--confirm", "yes"]))
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="review-required",
+    ):
+        migrate_host_memory.run(
+            parser.parse_args(
+                [
+                    *base,
+                    "--confirm",
+                    migrate_host_memory.IMPORT_CONFIRMATION,
+                ]
+            )
+        )
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="retirement confirmation is invalid",
+    ):
+        migrate_host_memory.run(
+            parser.parse_args(
+                [
+                    *base,
+                    "--confirm",
+                    migrate_host_memory.IMPORT_CONFIRMATION,
+                    "--allow-review-required",
+                    "--retire-source",
+                    "--retire-confirm",
+                    "delete it",
+                ]
+            )
+        )
+
+    assert source.exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_host_memory_migration_imports_short_term_and_verifies_fresh_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    state_dir = tmp_path / "state"
+    payloads = [
+        "Use concise status receipts for completed work.",
+        "Protected recall must fail closed instead of using plaintext fallback.",
+    ]
+    _write_owner_only_host_catalog(source, payloads)
+    monkeypatch.setattr(
+        migrate_host_memory,
+        "OllamaTextEmbedder",
+        lambda **_kwargs: _SemanticTestEmbedder(),
+    )
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--state-dir",
+            str(state_dir),
+            "--profile",
+            "host-import",
+            "--caller",
+            "algo-cli",
+            "--confirm",
+            migrate_host_memory.IMPORT_CONFIRMATION,
+        ]
+    )
+
+    first = migrate_host_memory.run(args)
+    second = migrate_host_memory.run(args)
+    receipt_path = source.with_name(f"{source.name}.echo-veil-receipt.json")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    with AgentMemory(
+        state_dir,
+        profile="host-import",
+        embed=_SemanticTestEmbedder(),
+    ) as memory:
+        records = memory.list_memories(
+            limit=10,
+            layers=["short_term"],
+            topic_prefix="host import · algo-cli · ",
+        )
+
+    assert first["mode"] == "confirmed_import"
+    assert first["created_records"] == 2
+    assert first["duplicate_records"] == 0
+    assert first["fresh_process_verified"] is True
+    assert first["all_records_shielded"] is True
+    assert first["plaintext_export_created"] is False
+    assert first["plaintext_source_retired"] is False
+    assert second["created_records"] == 0
+    assert second["duplicate_records"] == 2
+    assert source.exists()
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+    assert receipt["state"] == "verified_source_retained"
+    assert receipt["fresh_process_verified"] is True
+    assert receipt["plaintext_source_retired"] is False
+    assert receipt["retirement_is_secure_erase"] is False
+    assert {record["payload"] for record in records} == set(payloads)
+    assert all(record["memory_layer"] == "short_term" for record in records)
+    assert all(record["layer_contract_protected"] is True for record in records)
+    receipt_text = json.dumps(receipt, sort_keys=True)
+    assert all(payload not in receipt_text for payload in payloads)
+    assert str(source) not in receipt_text
+
+
+def test_host_memory_migration_retires_only_after_verified_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    state_dir = tmp_path / "state"
+    payload = "The reviewed host memory belongs in protected Short-Term."
+    _write_owner_only_host_catalog(source, [payload])
+    monkeypatch.setattr(
+        migrate_host_memory,
+        "OllamaTextEmbedder",
+        lambda **_kwargs: _SemanticTestEmbedder(),
+    )
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--state-dir",
+            str(state_dir),
+            "--profile",
+            "retired-import",
+            "--caller",
+            "algo-cli",
+            "--confirm",
+            migrate_host_memory.IMPORT_CONFIRMATION,
+            "--retire-source",
+            "--retire-confirm",
+            migrate_host_memory.RETIRE_CONFIRMATION,
+        ]
+    )
+
+    report = migrate_host_memory.run(args)
+    receipt_path = source.with_name(f"{source.name}.echo-veil-receipt.json")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    with AgentMemory(
+        state_dir,
+        profile="retired-import",
+        embed=_SemanticTestEmbedder(),
+    ) as memory:
+        protected = memory.list_memories(
+            limit=10,
+            layers=["short_term"],
+            topic_prefix="host import · algo-cli · ",
+        )
+
+    assert report["fresh_process_verified"] is True
+    assert report["plaintext_source_retired"] is True
+    assert report["retirement_is_secure_erase"] is False
+    assert not source.exists()
+    assert receipt["state"] == "retired"
+    assert receipt["plaintext_source_retired"] is True
+    assert [record["payload"] for record in protected] == [payload]
+
+
+def test_host_memory_migration_failure_retains_plaintext_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    _write_owner_only_host_catalog(
+        source,
+        ["Keep the source when the semantic embedding service is unavailable."],
+    )
+
+    class BrokenEmbedder:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("synthetic private detail")
+
+    monkeypatch.setattr(
+        migrate_host_memory,
+        "OllamaTextEmbedder",
+        BrokenEmbedder,
+    )
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--profile",
+            "failed-import",
+            "--caller",
+            "algo-cli",
+            "--confirm",
+            migrate_host_memory.IMPORT_CONFIRMATION,
+        ]
+    )
+
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="embedding service is unavailable",
+    ) as failure:
+        migrate_host_memory.run(args)
+
+    assert "synthetic private detail" not in str(failure.value)
+    assert source.exists()
+    assert not source.with_name(f"{source.name}.echo-veil-receipt.json").exists()
+
+
+def test_host_memory_migration_rolls_back_partial_write_before_releasing_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "host" / "memory.json"
+    _write_owner_only_host_catalog(
+        source,
+        [
+            "First reviewed seed crystal.",
+            "Second reviewed seed crystal.",
+        ],
+    )
+    lifecycle: list[str] = []
+
+    class FakeMemory:
+        active = False
+        writes = 0
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "FakeMemory":
+            self.active = True
+            lifecycle.append("entered")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.active = False
+            lifecycle.append("exited")
+
+        def remember(
+            self,
+            _topic: str,
+            _payload: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            assert self.active
+            self.writes += 1
+            if self.writes == 2:
+                raise RuntimeError("synthetic second-write failure")
+            lifecycle.append("created")
+            return {"created": True, "vine_id": "first-created"}
+
+        def forget(self, vine_id: str) -> dict[str, object]:
+            assert self.active
+            lifecycle.append(f"forgot:{vine_id}")
+            return {"forgotten": True}
+
+    monkeypatch.setattr(
+        migrate_host_memory,
+        "OllamaTextEmbedder",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(migrate_host_memory, "AgentMemory", FakeMemory)
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(source),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--profile",
+            "partial-import",
+            "--caller",
+            "algo-cli",
+            "--confirm",
+            migrate_host_memory.IMPORT_CONFIRMATION,
+        ]
+    )
+
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="protected host-memory import failed",
+    ):
+        migrate_host_memory.run(args)
+
+    assert lifecycle == [
+        "entered",
+        "created",
+        "forgot:first-created",
+        "exited",
+    ]
+    assert source.exists()
+
+
+def test_host_memory_migration_rejects_symlink_path_components(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("symlink creation is not reliably available on Windows")
+    real = tmp_path / "real"
+    source = real / "memory.json"
+    _write_owner_only_host_catalog(source, ["Reviewed seed crystal."])
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    args = migrate_host_memory.build_parser().parse_args(
+        [
+            "--source",
+            str(linked / "memory.json"),
+            "--caller",
+            "algo-cli",
+        ]
+    )
+
+    with pytest.raises(
+        migrate_host_memory.HostMemoryMigrationError,
+        match="symlink components",
+    ):
+        migrate_host_memory.run(args)
+
+    assert source.exists()
+
+
 def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
     with AgentMemory(tmp_path) as memory:
         report = memory.doctor()
@@ -770,6 +2432,11 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
         "retrieval_wired": True,
         "persistence_wired": True,
         "restart_restored": True,
+        "layer_contract_wired": True,
+        "context_trace_wired": True,
+        "competing_memory_wired": True,
+        "content_policy_wired": True,
+        "live_refresh_wired": True,
         "rotation_ready": True,
         "healthy": True,
     }
@@ -782,6 +2449,31 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
     assert report["retrieval"]["answerability_gate"] == "unavailable"
     assert report["retrieval"]["answerability_min_score"] is None
     assert report["retrieval"]["metadata"] == "opaque-authenticated"
+    assert report["retrieval"]["competing_memory"] == (
+        "possible-conflict-no-inference-v1"
+    )
+    assert report["memory_layers"]["all_records_shielded"] is True
+    assert report["memory_layers"]["competing_memory"] == (
+        "bounded-authenticated-topic-v1"
+    )
+    assert report["memory_layers"]["content_policy"] == "bounded-seed-crystal-v1"
+    assert report["memory_layers"]["payload_limits_chars"] == {
+        "live": 20_000,
+        "short_term": 12_000,
+        "long_term": 2_000,
+        "contextual_logic": 4_000,
+    }
+    assert report["memory_layers"]["automatic_content_rewriting"] is False
+    assert report["memory_layers"]["live_refresh"] == (
+        "protected-supersession-or-renewal-v1"
+    )
+    assert report["memory_layers"]["unprotected_record_count"] == 0
+    assert report["memory_layers"]["semantic_layers"] == [
+        "live",
+        "short_term",
+        "long_term",
+        "contextual_logic",
+    ]
     assert report["capability_report"]["overall_status"] == "blocked"
     assert any("not the production enclave" in item for item in report["limitations"])
 
@@ -807,6 +2499,27 @@ def test_scoped_profile_encrypts_content_topics_vectors_and_scope_binding(
 
     with pytest.raises(PermissionError, match="scope"):
         AgentMemory(tmp_path, scope="workspace:synthetic-beta")
+
+
+def test_layer_feature_marker_is_authenticated_by_profile_scope(
+    tmp_path: Path,
+) -> None:
+    scope = "workspace:feature-binding"
+    with AgentMemory(tmp_path, scope=scope):
+        pass
+
+    manifest_path = tmp_path / "default" / "keyring.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["features"] == ["shielded-four-layer-v1"]
+    del manifest["features"]
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+
+    with pytest.raises(PermissionError, match="scope"):
+        AgentMemory(tmp_path, scope=scope)
 
 
 def test_corrupt_record_is_quarantined_without_hiding_healthy_records(
@@ -949,7 +2662,11 @@ def test_key_rotation_is_resumable_restart_safe_and_explicitly_retired(
 ) -> None:
     with AgentMemory(tmp_path, scope="workspace:rotation") as memory:
         created = [
-            memory.remember(f"rotation topic {index}", f"rotation payload {index}")
+            memory.remember(
+                f"rotation topic {index}",
+                f"rotation payload {index}",
+                provenance=[f"rotation:record-{index}"],
+            )
             for index in range(3)
         ]
         first = memory.rotate_key(confirm=True, batch_size=1)
@@ -964,6 +2681,7 @@ def test_key_rotation_is_resumable_restart_safe_and_explicitly_retired(
         for index, record in enumerate(created):
             recalled = memory.recall(f"rotation topic {index} payload {index}")
             assert recalled["results"][0]["vine_id"] == record["vine_id"]
+            assert recalled["results"][0]["provenance"] == [f"rotation:record-{index}"]
         retired = memory.retire_previous_key(confirm_backups_accounted_for=True)
         assert retired["physical_erasure_guaranteed"] is False
 
@@ -1024,8 +2742,12 @@ def test_agent_memory_rejects_profile_path_traversal(tmp_path: Path) -> None:
 def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None:
     assert [tool["name"] for tool in TOOLS] == [
         "echo_veil_remember",
+        "echo_veil_refresh_live",
+        "echo_veil_promote",
         "echo_veil_recall",
+        "echo_veil_context",
         "echo_veil_forget",
+        "echo_veil_list",
         "echo_veil_doctor",
         "echo_veil_reindex",
         "echo_veil_rotate_key",
@@ -1033,7 +2755,7 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
     ]
 
     with AgentMemory(tmp_path) as memory:
-        server = McpServer(memory)
+        server = McpServer(memory, caller="codex")
         initialized = server.handle(
             {
                 "jsonrpc": "2.0",
@@ -1043,6 +2765,22 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
             }
         )
         listed = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        hidden_rotation = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "echo_veil_rotate_key",
+                    "arguments": {"confirm": True},
+                },
+            }
+        )
+        operator_listed = McpServer(
+            memory,
+            caller="operator",
+            operator_tools=True,
+        ).handle({"jsonrpc": "2.0", "id": 22, "method": "tools/list"})
         remembered = server.handle(
             {
                 "jsonrpc": "2.0",
@@ -1053,6 +2791,23 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
                     "arguments": {
                         "topic": "school pickup schedule",
                         "payload": "School pickup is at 3 PM.",
+                    },
+                },
+            }
+        )
+        assert remembered is not None
+        promoted = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "echo_veil_promote",
+                    "arguments": {
+                        "vine_id": remembered["result"]["structuredContent"]["vine_id"],
+                        "target_layer": "long_term",
+                        "reason": "The schedule was explicitly confirmed.",
+                        "provenance": ["user:explicit"],
                     },
                 },
             }
@@ -1084,20 +2839,237 @@ def test_mcp_server_exposes_and_executes_echo_veil_tools(tmp_path: Path) -> None
     assert initialized["result"]["protocolVersion"] == "2025-11-25"
     assert initialized["result"]["serverInfo"]["name"] == "echo-veil"
     assert listed is not None
-    assert len(listed["result"]["tools"]) == 7
+    assert len(listed["result"]["tools"]) == 9
+    assert {tool["name"] for tool in listed["result"]["tools"]}.isdisjoint(
+        {"echo_veil_rotate_key", "echo_veil_retire_key"}
+    )
+    assert hidden_rotation is not None
+    assert hidden_rotation["result"]["isError"] is True
+    assert operator_listed is not None
+    assert len(operator_listed["result"]["tools"]) == 11
     recall_tool = next(
         tool for tool in listed["result"]["tools"] if tool["name"] == "echo_veil_recall"
     )
+    context_tool = next(
+        tool
+        for tool in listed["result"]["tools"]
+        if tool["name"] == "echo_veil_context"
+    )
+    remember_tool = next(
+        tool
+        for tool in listed["result"]["tools"]
+        if tool["name"] == "echo_veil_remember"
+    )
+    refresh_tool = next(
+        tool
+        for tool in listed["result"]["tools"]
+        if tool["name"] == "echo_veil_refresh_live"
+    )
     assert recall_tool["inputSchema"]["properties"]["top_k"]["minimum"] == 2
+    assert recall_tool["inputSchema"]["properties"]["layers"]["maxItems"] == 4
+    assert context_tool["inputSchema"]["properties"]["max_depth"]["maximum"] == 2
+    assert context_tool["inputSchema"]["properties"]["max_records"]["maximum"] == 20
+    assert remember_tool["inputSchema"]["properties"]["payload"]["maxLength"] == 20_000
+    assert remember_tool["inputSchema"]["properties"]["provenance"]["maxItems"] == 3
+    assert refresh_tool["inputSchema"]["properties"]["payload"]["maxLength"] == 20_000
+    assert (
+        "long_term" not in (remember_tool["inputSchema"]["properties"]["layer"]["enum"])
+    )
     assert "not semantic or authoritative" in initialized["result"]["instructions"]
+    assert (
+        "seed crystals rather than transcripts"
+        in (initialized["result"]["instructions"])
+    )
     assert remembered is not None
     assert remembered["result"]["isError"] is False
     assert remembered["result"]["structuredContent"]["created"] is True
+    assert remembered["result"]["structuredContent"]["provenance"] == ["caller:codex"]
+    assert promoted is not None
+    assert promoted["result"]["isError"] is False
+    assert promoted["result"]["structuredContent"]["memory_layer"] == "long_term"
     assert refused_reindex is not None
     assert refused_reindex["result"]["isError"] is True
     assert reindexed is not None
     assert reindexed["result"]["isError"] is False
     assert reindexed["result"]["structuredContent"]["reindexed"] == 1
+
+
+def test_mcp_factories_share_one_profile_without_lifetime_writer_lease(
+    tmp_path: Path,
+) -> None:
+    opened = 0
+
+    def factory() -> AgentMemory:
+        nonlocal opened
+        opened += 1
+        return AgentMemory(
+            tmp_path,
+            profile="universal-qwen3-test",
+            scope="local-user",
+            profile_lock_timeout_seconds=0.1,
+        )
+
+    codex = McpServer(memory_factory=factory, caller="codex")
+    claude = McpServer(memory_factory=factory, caller="claude-code")
+
+    initialized = codex.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+    listed = claude.handle(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    )
+    assert initialized is not None
+    assert listed is not None
+    assert opened == 0
+
+    remembered = codex.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "echo_veil_remember",
+                "arguments": {
+                    "topic": "shared local authority",
+                    "payload": "Cobalt meadow is the shared continuity marker.",
+                    "provenance": ["user:explicit"],
+                },
+            },
+        }
+    )
+    assert remembered is not None
+    assert remembered["result"]["isError"] is False
+    assert opened == 1
+
+    recalled = claude.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "echo_veil_recall",
+                "arguments": {"query": "cobalt meadow continuity marker"},
+            },
+        }
+    )
+    assert recalled is not None
+    assert recalled["result"]["isError"] is False
+    result = recalled["result"]["structuredContent"]["results"][0]
+    assert result["payload"] == "Cobalt meadow is the shared continuity marker."
+    assert result["provenance"] == ["caller:codex", "user:explicit"]
+    assert opened == 2
+
+    doctor = claude.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "echo_veil_doctor", "arguments": {}},
+        }
+    )
+    assert doctor is not None
+    readiness = doctor["result"]["structuredContent"]
+    assert readiness["mcp_profile_lease"] == "per-tool-call"
+    assert readiness["shared_profile_safe"] is True
+    assert readiness["mcp_tool_profile"] == "agent"
+    assert opened == 3
+
+    # A third writer can open immediately after both long-lived transport
+    # objects have completed their calls. Neither server retains the lease.
+    with AgentMemory(
+        tmp_path,
+        profile="universal-qwen3-test",
+        scope="local-user",
+        profile_lock_timeout_seconds=0.01,
+    ) as direct:
+        assert direct.doctor()["writer_serialization"] == "profile-sqlite-lease"
+
+
+def test_mcp_server_requires_exactly_one_memory_source(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        McpServer()
+    with AgentMemory(tmp_path) as memory:
+        with pytest.raises(ValueError, match="exactly one"):
+            McpServer(memory, memory_factory=lambda: memory)
+
+
+def test_caller_identity_is_provenance_but_not_promotion_evidence(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        server = McpServer(memory, caller="claude-code")
+        remembered = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "echo_veil_remember",
+                    "arguments": {
+                        "topic": "deployment decision",
+                        "payload": "The deployment decision remains provisional.",
+                    },
+                },
+            }
+        )
+        assert remembered is not None
+        vine_id = remembered["result"]["structuredContent"]["vine_id"]
+        refused = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "echo_veil_promote",
+                    "arguments": {
+                        "vine_id": vine_id,
+                        "target_layer": "long_term",
+                        "reason": "A caller identity alone must not harden memory.",
+                    },
+                },
+            }
+        )
+
+    assert remembered["result"]["structuredContent"]["provenance"] == [
+        "caller:claude-code"
+    ]
+    assert refused is not None
+    assert refused["result"]["isError"] is True
+    assert "durable provenance" in refused["result"]["structuredContent"]["message"]
+
+
+def test_caller_attribution_is_bounded_and_cannot_be_path_shaped(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        with pytest.raises(ValueError, match="caller"):
+            McpServer(memory, caller="../another-host")
+
+        server = McpServer(memory, caller="codex")
+        refused = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "echo_veil_remember",
+                    "arguments": {
+                        "topic": "bounded provenance",
+                        "payload": "The transport reserves one provenance slot.",
+                        "provenance": [
+                            "source:one",
+                            "source:two",
+                            "source:three",
+                            "source:four",
+                        ],
+                    },
+                },
+            }
+        )
+
+    assert refused is not None
+    assert refused["result"]["isError"] is True
+    assert "at most 3 supplied" in refused["result"]["structuredContent"]["message"]
 
 
 def test_rpc_recall_preserves_ambiguous_pair_when_one_result_requested(
@@ -1118,6 +3090,96 @@ def test_rpc_recall_preserves_ambiguous_pair_when_one_result_requested(
     assert recalled["requested_top_k"] == 1
     assert recalled["effective_top_k"] == 2
     assert recalled["ambiguity_candidates_preserved"] is True
+
+
+def test_rpc_recall_preserves_competing_pair_when_one_result_requested(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        first = memory.remember("routing fact", "Use route alpha.")
+        second = memory.remember("routing fact", "Use route beta.")
+
+        recalled = dispatch(
+            memory,
+            "recall",
+            {"query": "Which routing fact applies?", "top_k": 1},
+        )
+
+    assert {item["vine_id"] for item in recalled["results"]} == {
+        first["vine_id"],
+        second["vine_id"],
+    }
+    assert recalled["requested_top_k"] == 1
+    assert recalled["effective_top_k"] == 2
+    assert recalled["competing_memory_detected"] is True
+    assert recalled["competing_candidates_preserved"] is True
+    assert recalled["ranking_ambiguous"] is False
+
+
+def test_rpc_refreshes_live_memory_with_protected_supersession(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        original = memory.remember(
+            "active build",
+            "The build is running.",
+            layer="live",
+            provenance=["agent:build-loop"],
+        )
+        refreshed = dispatch(
+            memory,
+            "echo_veil_refresh_live",
+            {
+                "vine_id": original["vine_id"],
+                "payload": "The build passed.",
+                "provenance": ["receipt:build-pass"],
+            },
+        )
+
+    assert refreshed["previous_vine_id"] == original["vine_id"]
+    assert refreshed["vine_id"] != original["vine_id"]
+    assert refreshed["supersedes"] == [original["vine_id"]]
+    assert refreshed["memory_layer"] == "live"
+    assert refreshed["content_policy"]["policy"] == "bounded-seed-crystal-v1"
+
+
+def test_rpc_exposes_layer_scoped_recall_and_protected_context(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        evidence = memory.remember("decision evidence", "The evidence is verified.")
+        logic = memory.remember(
+            "verified decision",
+            "The decision follows the verified evidence.",
+            layer="contextual_logic",
+            provenance=["decision:verified"],
+            promotion_reason="The linked evidence was verified.",
+            logic_kind="decision",
+            related_ids=[str(evidence["vine_id"])],
+        )
+
+        recalled = dispatch(
+            memory,
+            "recall",
+            {
+                "query": "Which decision follows?",
+                "layers": ["contextual_logic"],
+            },
+        )
+        traced = dispatch(
+            memory,
+            "context",
+            {
+                "query": "Why does the verified decision follow?",
+                "max_depth": 1,
+                "max_records": 8,
+            },
+        )
+
+    assert recalled["requested_layers"] == ["contextual_logic"]
+    assert recalled["results"][0]["vine_id"] == logic["vine_id"]
+    assert traced["logic_roots"][0]["vine_id"] == logic["vine_id"]
+    assert traced["evidence"][0]["vine_id"] == evidence["vine_id"]
 
 
 def test_mcp_line_reader_bounds_and_drains_oversized_requests() -> None:

@@ -36,10 +36,19 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    updates have been reviewed.
 2. Update the version in `pyproject.toml`, `src/echo_veil/__init__.py`,
    `.codex-plugin/plugin.json`,
+   `.claude-plugin/marketplace.json`,
    `integrations/claude-code/.claude-plugin/plugin.json`,
+   `integrations/droid/.factory-plugin/plugin.json`,
+   `integrations/hermes/plugin/plugin.yaml`,
+   `integrations/mercury/SKILL.md`,
    `integrations/openclaw/package.json`,
    `integrations/openclaw/openclaw.plugin.json`, and
-   `integrations/pi/package.json`.
+   `integrations/opencode/package.json`, and `integrations/pi/package.json`.
+   Update their package lockfiles and
+   `integrations/openclaw/deployment-lock.json` in the same reviewed change.
+   Set the deployment lock's `source_date_epoch` once for the release date;
+   both local and hosted builds must reproduce the wheel and OpenClaw archive
+   hashes recorded by that lock.
 3. Move the changelog entries from `Unreleased` into the new version section.
 4. Run:
 
@@ -71,13 +80,60 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    npm --prefix integrations/pi audit --audit-level=high
    npm --prefix integrations/pi run check
    npm --prefix integrations/pi test
+   npm --prefix integrations/opencode ci --ignore-scripts
+   npm --prefix integrations/opencode audit --audit-level=high
+   npm --prefix integrations/opencode run check
+   npm --prefix integrations/opencode test
+   uv run --locked pytest -q tests/test_hermes_plugin.py
    ```
 
-   Also run `tests/test_agent_adapters.py`, validate the repository-root Codex
-   plugin and Claude Code plugin with their current validators, and validate the
-   Goose recipe with `goose recipe validate` before tagging. Hermes, OpenCode,
-   Droid, and Pi should be smoke-tested in isolated temporary host profiles so
-   release checks never mutate an operator's personal agent configuration.
+   Also run `tests/test_agent_adapters.py`, validate and install the
+   repository-root Codex and Claude Code plugins through their local marketplace
+   descriptors, and validate the Goose recipe with `goose recipe validate`
+   before tagging. For AIP, require both `aip --version` and the payload-silent
+   `aip authority-receipt`; its PEP 610 wheel hash and installed `RECORD`
+   integrity must match the exact manifest binding. Review Codex's exact hook
+   hashes through `/hooks`, disable
+   Codex native memories, disable Claude Code auto-memory without disabling
+   plugin hooks, and explicitly disable OpenClaw's built-in `session-memory`
+   hook. Run `python scripts/verify_host_authority.py --installed` and review
+   every boundary as current, conditional, externally unbound,
+   repository-only, blocked, or stale.
+   Use repeated `--require-current HOST` arguments for the installed boundaries
+   the release claims. This digest and version check does not replace the live
+   smokes. Run zero-model outage smokes for OpenClaw, Codex, Claude Code, Pi,
+   OpenCode, and Algo CLI in isolated host profiles. Run both healthy and
+   forced-outage probes through `echo-veil-shielded-run` for Codex, Droid,
+   Goose, and Hermes; the outage must return before the host process starts. The Codex
+   probe must retain its Echo-only MCP, native-memory shutdown, and
+   parallel-agent shutdown flags. It must use an isolated temporary Codex home
+   and must not load the operator's ambient skills, cache, goals, plugins, or
+   session state. Separately exercise the supported Claude
+   Agent and OpenCode Task spawn paths. Direct Codex collaboration remains
+   excluded until its host exposes a blockable event.
+   OpenClaw must also block a hot-reload attempt to re-enable native
+   session-memory. Hermes and normal Goose recipe mode should be smoke-tested in isolated
+   temporary host profiles so release checks never mutate an operator's
+   personal agent configuration. Hermes must show `echo-veil-shield` as loaded,
+   disable both built-in memory flags, pass a healthy preflight, and prove its
+   deny-only outage control returns zero provider calls and zero usage.
+   Its shield-owned run must additionally validate the exact plugin digest,
+   use an isolated temporary `HERMES_HOME`, request the plugin-defined
+   `echo-veil-run` command, expose only the Echo toolset, complete a real local
+   provider turn, and stop before Hermes creation on outer preflight failure.
+   OpenCode must run through its normal plugin pipeline; `--pure` is a negative
+   control that intentionally disables the Echo gate. Bare `droid exec` is a
+   negative control in Droid 0.180.0 because it bypasses native prompt hooks;
+   interactive Droid root/Task hooks require their own authenticated installed
+   smoke before any interactive hard-gate claim.
+
+   For the OpenClaw deployment selected as a singular memory authority, run
+   `python scripts/verify_openclaw_deployment.py --text` after the healthy and
+   outage smokes. It must bind both installed artifacts to
+   `integrations/openclaw/deployment-lock.json`, report 9/9 tools and 3/3 hooks,
+   reject mutable checkout paths and native `session-memory`, and pass with no
+   OpenClaw security warnings. Use `--require-production-ready` only for a
+   deployment whose external enclave and cryptographic review are complete.
 
    For a release that promotes an application integration to a protected
    default, also satisfy the hard gate in
@@ -92,13 +148,14 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
 6. Create and push an annotated tag from the protected release commit:
 
    ```bash
-   git tag -a v0.6.0 -m "Echo Veil v0.6.0"
-   git push origin v0.6.0
+   git tag -a v0.7.0 -m "Echo Veil v0.7.0"
+   git push origin v0.7.0
    ```
 
 7. Manually run the `Release` workflow with that exact tag.
-8. Verify the draft's changelog, wheel, sdist, SBOM, `SHA256SUMS`, and GitHub
-   provenance attestation. Install the wheel in a clean environment.
+8. Verify the draft's changelog, wheel, sdist, OpenClaw plugin archive, SBOM,
+   `SHA256SUMS`, and GitHub provenance attestation. Install the wheel and plugin
+   archive in clean, isolated environments.
 9. Publish the draft only after review. With immutable releases enabled, the
    tag and assets become unchangeable after publication.
 
@@ -113,6 +170,6 @@ sha256sum --check SHA256SUMS
 For a public repository, verify GitHub provenance with the GitHub CLI:
 
 ```bash
-gh attestation verify echo_veil-0.6.0-py3-none-any.whl \
+gh attestation verify echo_veil-0.7.0-py3-none-any.whl \
   --repo Seabass-up/echo-veil
 ```
