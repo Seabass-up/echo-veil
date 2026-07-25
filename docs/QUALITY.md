@@ -458,7 +458,7 @@ permissions.
 
 Local release qualification passed:
 
-- 477 Python tests plus Ruff formatting/lint and mypy;
+- 479 Python tests plus Ruff formatting/lint and mypy;
 - 5 Rust tests plus rustfmt and Clippy;
 - 14 OpenClaw, 10 Pi, 9 OpenCode, 16 Hermes, 8 Worker, and 3 product-site
   tests;
@@ -472,7 +472,7 @@ Local release qualification passed:
 The release lock binds the reproducible wheel SHA-256
 `93e63fa45343927bf426aeaa0da0f63bc8c4e25b52ece365c4090ac964b6733d`,
 OpenClaw archive SHA-256
-`2412830c686a3069d16973eb08ac6fa21e6ef1987e0a91c127b7747132b80666`,
+`0f765e5f3199e34f5cdc52a1e37de4749341b1c16cb8cf31d9896f614de614f0`,
 and generated entrypoint SHA-256
 `b8268ffcc423d3fce70616571e827d3d2b0fd64c647276a0e5b911a4595af578`.
 The installed OpenClaw 2026.7.1-2 boundary then passed with 9/9 tools, 3/3

@@ -3,6 +3,7 @@
 /.github/ @Seabass-up
 /scripts/security_scan.py @Seabass-up
 /scripts/release_check.py @Seabass-up
+/scripts/build_openclaw_archive.py @Seabass-up
 /scripts/normalize_sdist.py @Seabass-up
 /SECURITY.md @Seabass-up
 /pyproject.toml @Seabass-up

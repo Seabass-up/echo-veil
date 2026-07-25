@@ -53,8 +53,8 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    Update their package lockfiles and
    `integrations/openclaw/deployment-lock.json` in the same reviewed change.
    Set the deployment lock's `source_date_epoch` once for the release date;
-   both local and hosted builds must reproduce the wheel and OpenClaw archive
-   hashes recorded by that lock.
+   both local and hosted builds must reproduce the wheel and the allowlisted
+   OpenClaw archive built by `scripts/build_openclaw_archive.py`.
 3. Move the changelog entries from `Unreleased` into the new version section.
 4. Run:
 

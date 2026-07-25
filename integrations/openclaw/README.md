@@ -17,9 +17,11 @@ openclaw plugins doctor
 ```
 
 Do not use that linked-checkout path for a singular-memory deployment. Build the
-Python wheel and OpenClaw package twice, compare their hashes, install the
-reviewed plugin archive with `openclaw plugins install`, and install the exact
-wheel by a `file:` URL carrying its `#sha256=` fragment. Configure
+Python wheel and OpenClaw package twice, build both OpenClaw archives with
+`scripts/build_openclaw_archive.py` and the deployment lock's
+`source_date_epoch`, compare their hashes, install the reviewed plugin archive
+with `openclaw plugins install`, and install the exact wheel by a `file:` URL
+carrying its `#sha256=` fragment. Configure
 `plugins.entries.echo-veil.config.executable` to that wheel's console script,
 leave `plugins.load.paths` empty, and do not configure `projectPath`. The
 current reviewed artifact identities and profile contract are recorded in

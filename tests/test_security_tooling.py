@@ -178,6 +178,17 @@ def test_enclave_image_context_is_allowlisted_and_nonroot_readable() -> None:
     assert "platform: linux/amd64" in compose
 
 
+def test_release_workflows_build_reproducible_openclaw_archives() -> None:
+    root = Path(__file__).resolve().parents[1]
+    ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert 'scripts/build_openclaw_archive.py --epoch "$ARCHIVE_EPOCH"' in ci
+    assert "--output-dir /tmp/echo-veil-openclaw-a" in ci
+    assert "--output-dir /tmp/echo-veil-openclaw-b" in ci
+    assert "scripts/build_openclaw_archive.py --output-dir release" in release
+
+
 def test_release_archive_policy_rejects_secrets_and_traversal() -> None:
     assert _unsafe_member("echo-veil/.env") is not None
     assert _unsafe_member("../secret.txt") is not None

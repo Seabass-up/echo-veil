@@ -69,8 +69,7 @@ jobs:
           )"
           uv build --no-sources --out-dir release
           python scripts/normalize_sdist.py release/*.tar.gz
-          npm pack ./integrations/openclaw --ignore-scripts \
-            --pack-destination release
+          python scripts/build_openclaw_archive.py --output-dir release
           uvx --from twine==6.2.0 twine check release/echo_veil-*
           python scripts/release_check.py \
             --tag "$RELEASE_TAG" \
