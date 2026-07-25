@@ -122,7 +122,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:ed307f0fc89f1007ae08929c48fce5cf1888c7f5ccac83fe116eaee4e71a342e",
+      "source_digest": "sha256:e93def29d2da6dbda7e153fc2305bdb34e01ce67aabd33127980c36bf46f6b34",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -156,7 +156,7 @@
         "src/echo_veil/guarded_runner.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:3562991f73e06ffe889b0bf0d4854910c0a86d8ad286f518bbd882e4dd4fddb3",
+      "source_digest": "sha256:44812fcf19aa70f5a23cfeb26b1c0a8a63c35781411fc6d5b6dd257cb9ee5ff1",
       "checks": [
         "Plugin and MCP loaded",
         "Exact hook hashes trusted",
