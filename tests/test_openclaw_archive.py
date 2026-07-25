@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import tarfile
 from pathlib import Path
 
@@ -32,6 +33,7 @@ def test_openclaw_archive_is_reproducible_and_bound_to_release_lock(
     )
 
     assert first.read_bytes() == second.read_bytes()
+    assert stat.S_IMODE(first.stat().st_mode) == 0o600
     assert (
         hashlib.sha256(first.read_bytes()).hexdigest()
         == lock["plugin"]["archive_sha256"]
