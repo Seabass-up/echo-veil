@@ -27,6 +27,12 @@ at no charge when the repository is public. A private repository requires the
 applicable paid GitHub security and Enterprise features; the corresponding
 workflows intentionally fail closed when those services are unavailable.
 
+The hosted adapter gate downloads the exact qualified OpenClaw validation
+runtime, verifies its pinned SHA-512 before installation, installs it without
+lifecycle scripts into a disposable directory, and exposes only that executable
+to the isolated loader test. Review and update the version, published artifact
+digest, and expected version output together when requalifying OpenClaw.
+
 If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
 `release` environment. Do not add a long-lived PyPI API token.
 

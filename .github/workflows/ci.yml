@@ -135,7 +135,28 @@ jobs:
           npm --prefix integrations/opencode ci --ignore-scripts
           npm --prefix integrations/pi ci --ignore-scripts
 
+      - name: Install verified OpenClaw validation runtime
+        env:
+          OPENCLAW_VERSION: "2026.7.1-2"
+          OPENCLAW_SHA512: "c9c177c8f71b8cde9b50f79a531e8c87abf37b58505a80f7093ff059c983edaf316871c745468095aabe945c4c1dfd6cb0480e0d50308e5cd8aa9dadc24619ee"
+        run: |
+          mkdir -p /tmp/echo-veil-openclaw-runtime/package
+          mkdir -p /tmp/echo-veil-openclaw-runtime/install
+          npm pack "openclaw@$OPENCLAW_VERSION" --ignore-scripts --silent \
+            --pack-destination /tmp/echo-veil-openclaw-runtime/package
+          ARCHIVE="/tmp/echo-veil-openclaw-runtime/package/openclaw-$OPENCLAW_VERSION.tgz"
+          ACTUAL_SHA512="$(sha512sum "$ARCHIVE" | cut -d " " -f 1)"
+          test "$ACTUAL_SHA512" = "$OPENCLAW_SHA512"
+          npm install --prefix /tmp/echo-veil-openclaw-runtime/install \
+            --ignore-scripts --no-audit --no-fund "$ARCHIVE"
+          test "$(
+            /tmp/echo-veil-openclaw-runtime/install/node_modules/.bin/openclaw \
+              --version
+          )" = "OpenClaw 2026.7.1-2 (0790d9f)"
+
       - name: Validate adapter contracts
+        env:
+          OPENCLAW_COMMAND: /tmp/echo-veil-openclaw-runtime/install/node_modules/.bin/openclaw
         run: |
           python scripts/verify_host_authority.py --text
           uv run --locked pytest -q \
