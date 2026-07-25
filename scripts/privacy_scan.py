@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -82,14 +83,26 @@ def scan_text(text: str, display: str) -> list[Finding]:
 def scan_repository(root: Path) -> list[Finding]:
     root = root.resolve()
     findings: list[Finding] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in SKIP_PARTS for part in path.parts):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        findings.extend(scan_text(text, path.relative_to(root).as_posix()))
+    for directory, child_directories, filenames in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+    ):
+        child_directories[:] = sorted(
+            name for name in child_directories if name not in SKIP_PARTS
+        )
+        current = Path(directory)
+        for filename in sorted(filenames):
+            path = current / filename
+            if not path.is_file() or any(
+                part in SKIP_PARTS for part in path.relative_to(root).parts
+            ):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            findings.extend(scan_text(text, path.relative_to(root).as_posix()))
     return sorted(set(findings))
 
 

@@ -4,8 +4,11 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   resolve: {
     alias: {
-      "openclaw/plugin-sdk/tool-plugin": fileURLToPath(
-        new URL("./tests/openclaw-tool-plugin.ts", import.meta.url),
+      "openclaw/plugin-sdk/plugin-entry": fileURLToPath(
+        new URL("./tests/openclaw-plugin-entry.ts", import.meta.url),
+      ),
+      "openclaw/plugin-sdk/tool-results": fileURLToPath(
+        new URL("./tests/openclaw-tool-results.ts", import.meta.url),
       ),
     },
   },

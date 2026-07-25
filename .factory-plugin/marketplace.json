@@ -1,0 +1,15 @@
+{
+  "name": "echo-veil",
+  "description": "Reviewed local Echo Veil plugins for supported agent hosts.",
+  "owner": {
+    "name": "Algo CLI"
+  },
+  "plugins": [
+    {
+      "name": "echo-veil",
+      "description": "Shielded four-layer memory tools, skill, and Droid hook definitions.",
+      "source": "./integrations/droid",
+      "category": "security"
+    }
+  ]
+}

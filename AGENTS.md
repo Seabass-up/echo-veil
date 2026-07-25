@@ -24,6 +24,7 @@ uv run --locked mypy src/echo_veil src/echo_veil_origin scripts examples \
   --ignore-missing-imports --no-error-summary
 uv run --locked pytest -q
 python scripts/security_scan.py .
+python scripts/verify_host_authority.py --installed
 
 cargo fmt --manifest-path crates/echo-veil-zkp/Cargo.toml -- --check
 cargo clippy --locked --all-targets \
@@ -43,10 +44,20 @@ npm --prefix integrations/openclaw ci --ignore-scripts
 npm --prefix integrations/openclaw run check
 npm --prefix integrations/openclaw test
 
+npm --prefix integrations/opencode run check
+npm --prefix integrations/opencode test
+
+uv run --locked pytest -q tests/test_hermes_plugin.py
+
 npm --prefix integrations/pi ci --ignore-scripts
 npm --prefix integrations/pi audit --audit-level=high
 npm --prefix integrations/pi run check
 npm --prefix integrations/pi test
+
+npm --prefix integrations/opencode ci --ignore-scripts
+npm --prefix integrations/opencode audit --audit-level=high
+npm --prefix integrations/opencode run check
+npm --prefix integrations/opencode test
 ```
 
 For release, dependency, infrastructure, and image checks, follow
@@ -56,6 +67,8 @@ without reviewing the resulting dependency diff.
 ## Architecture and ownership
 
 - `src/echo_veil/oracle.py`: public facade and lifecycle coordinator.
+- `src/echo_veil/memory_layers.py`: protected Live, Short-Term, Long-Term, and
+  Contextual Logic policy contract.
 - `src/echo_veil/workspace.py`: mutable L1 vines, decay, locks, and crests.
 - `src/echo_veil/persistence.py`: transactional SQLite L1/L2/L3 persistence and
   persisted random-projection LSH candidate lookup.
@@ -69,6 +82,8 @@ without reviewing the resulting dependency diff.
 - `cloudflare/enclave-gateway/`: Access-authenticated, mTLS Worker gateway.
 - `integrations/`: host-specific MCP configs, native OpenClaw/Pi packages, and
   the guarded Mercury readiness skill.
+- `src/echo_veil/guarded_runner.py`: fail-closed headless Droid/Goose launcher
+  that completes semantic preflight before the host process exists.
 - `deploy/`: Azure, Cloudflare, Caddy, container, and secret templates.
 - `website/`: public Echo Veil product site deployed to `echo.algo-cli.com`.
 - `scripts/security_scan.py`: deterministic repository security policy.
@@ -86,16 +101,52 @@ state. Do not introduce an implicit network embedding dependency into the core.
 - `NullCryptoShield` remains development/test only. AES-GCM remains a
   staging/confidential-storage baseline, not homomorphic encryption.
 - Protected vectors must never fall back to plaintext persistence.
+- Every scoped-v2 agent record must carry a record-bound encrypted semantic
+  contract under the same profile shield as its payload and vectors. Never
+  store layer, provenance, promotion history, or Contextual Logic links as
+  plaintext fallback metadata.
+- Long-Term is promotion-only. Preserve the ordered Live/Short-Term promotion
+  evidence, and delete dependent Contextual Logic records when their source is
+  explicitly forgotten.
+- Enforce the bounded seed-crystal content policy at every write and promotion:
+  Live may temporarily hold bounded transcript-shaped current state, while
+  Short-Term, Long-Term, and Contextual Logic reject raw transcript-shaped
+  payloads. Never auto-summarize or silently rewrite caller content.
+- Refresh Live state only through the protected refresh operation. An unchanged
+  payload may renew its encrypted expiry/provenance contract in place; changed
+  content must create a new shielded version that explicitly supersedes the old
+  record. The read-only availability layer must reject every refresh.
+- Layer filtering must not alter recall scores. Context traversal must begin
+  with confidence-checked Contextual Logic roots, follow only authenticated
+  outgoing links under hard bounds, never expand a gated root, and never label
+  linked evidence as independently query-scored.
 - All vector inputs must remain finite, non-empty, one-dimensional, and stable
   in dimension for an Oracle/store lifetime.
 - Archive before pruning. Failed L2/L3 transactions must leave a retryable vine,
   not lose it or split index/archive state.
 - Preserve contradiction history and competing growth paths; do not silently
-  replace conflict data.
+  replace conflict data. Ordinary and degraded recall must preserve the
+  strongest returned same-topic current pair, label it only as a possible
+  conflict from an authenticated protected-topic basis, and never infer
+  compatibility or a resolution. Callers must review both records, explicitly
+  supersede obsolete data, or link evidence through protected Contextual Logic.
 - Inferential confidence requires explicit user override. Data Obscurity is a
   hard stop even when override is requested.
 - Mutate lifecycle state through `Oracle`/`Workspace` methods. Returned `Vine`
   objects are mutable and must not be edited concurrently.
+- For headless Codex, Droid, Goose, and Hermes, use
+  `echo-veil-shielded-run`. Direct Codex collaboration and Droid 0.180.0
+  `exec` bypass their native pre-tool or prompt hooks, normal Goose recipe mode
+  remains policy-driven, and ordinary Hermes plugin mode remains conditional
+  on visible plugin load. The shielded Codex path disables parallel agents;
+  the shielded Hermes path is local, one-turn, and Echo-tools-only. Do not
+  extend the hard-gate claim beyond those exact installed-host boundaries
+  without new evidence.
+- Mercury remains readiness-only until its host can suppress every native
+  mutable-memory path and expose a structured fail-closed backend or hook.
+- When using `AgentMemory`, do not call its low-level `oracle` to create or
+  remove vines. That bypasses the atomic payload/semantic-contract path;
+  adapter diagnostics must report any such unpaired lifecycle record unhealthy.
 
 ## Security and supply-chain rules
 

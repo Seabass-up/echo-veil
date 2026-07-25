@@ -53,17 +53,53 @@ Implemented and tested:
 - Automatic return-to-topic scoring and reinforcement for twilight vines.
 - A concrete local `AgentMemory` host adapter with caller-selected embeddings,
   record/scope/schema/key-bound AES-GCM protected anchors, payloads, topics, and
-  retrieval vectors; keyed minimal lexical metadata; exact-write
+  retrieval vectors; record-bound encrypted four-layer semantic contracts;
+  keyed minimal lexical metadata; exact-write
   deduplication; authenticated tombstones; startup reconciliation; resumable
   key rotation; record quarantine; confidence-gated active/cold recall;
   ambiguity telemetry; and a read-only keyed availability floor for local
   embedding outages.
 - A bounded stdio MCP server for Codex, Claude Code, Hermes, OpenCode, Droid,
-  and Goose, plus native OpenClaw and Pi packages. Every full adapter shares the
-  same `AgentMemory` policy instead of reimplementing lifecycle rules per host.
+  and Goose, native OpenClaw and Pi packages, and an in-process Algo CLI bridge.
+  Every full adapter shares the same `AgentMemory` policy instead of
+  reimplementing lifecycle rules per host. Bundled transports bind their host
+  identity into protected provenance without treating caller identity as
+  Long-Term or Contextual Logic evidence.
+- One byte-identical fail-closed Agent Skill for Codex, Claude Code, Hermes,
+  Pi, OpenCode, and Droid, with equivalent recipe policy for Goose. OpenClaw
+  injects the same ritual through its selected memory capability and Algo
+  injects it in runtime code.
+- Host-owned hard-gate adapters where the current lifecycle permits one:
+  Algo CLI and Pi stop their complete pre-model paths; OpenClaw uses an early
+  reply claim plus single-use pre-model attestation on its OpenClaw runtime;
+  Codex and Claude Code gate root paths; Claude Code and OpenCode respectively
+  gate supported Agent and Task paths;
+  and Hermes pairs ephemeral pre-LLM context with an exact
+  session/task/turn plus per-request-nonce provider-execution gate. Native or
+  future spawn/runtime
+  paths that skip those hooks remain explicitly unqualified. Ordinary Hermes
+  plugin mode must visibly load the plugin because its host does not fail
+  startup when a general plugin fails to register.
+- A shield-owned headless launcher for Codex, Droid, Goose, and Hermes. It completes
+  protected semantic preflight before starting the host and passes context only
+  over child stdin. Codex ignores ambient user config, receives only the
+  required Echo MCP server, receives an isolated owner-only auth view instead
+  of ambient skills/cache/state, and disables native memory and parallel agents;
+  Goose suppresses its default profile/session; Droid disables its
+  unpreflighted `Task` path. Hermes receives a temporary owner-only home with
+  one digest-bound plugin, disabled native memory, a fixed loopback provider,
+  and Echo-only tools. Its requested subcommand is registered last so plugin
+  failure cannot fall through to model execution. Direct Codex collaboration,
+  bare Droid `exec`, interactive Droid, ordinary Goose recipe runs, and
+  ordinary Hermes plugin mode are outside this headless boundary.
 - A Mercury readiness skill that reports the local boundary only. Mercury's
   documented skill interface does not expose a safe structured custom-tool
   transport, so remember, recall, and forget are deliberately unavailable.
+- An AIP provider wrapper that owns semantic preflight for every provider
+  created by the runtime builder. Agent, SDK, workflow, chat, stream, and vision
+  generation cannot reach the underlying provider without fresh protected
+  context. The installed boundary is additionally bound to an exact PEP 610
+  wheel hash and verified wheel `RECORD`.
 
 Implemented as a practical confidentiality baseline:
 - `AesGcmCryptoShield` encrypts/authenticates protected vectors with AES-256-GCM and loads keys from explicit bytes or `ECHO_VEIL_CRYPTO_KEY`.
@@ -118,6 +154,29 @@ Deployment-provided:
    must benchmark the real corpus. Caller-supplied embedders are separate trust
    boundaries and may receive plaintext.
 
+5. **Semantic layers are not physical tiers.** Live, Short-Term, Long-Term, and
+   Contextual Logic describe why a memory exists and how it may evolve.
+   L1/L2/L3 describe where lifecycle data is currently placed. `AgentMemory`
+   persists semantic role in a separate record-bound encrypted contract, so an
+   eviction to L2/L3 cannot silently promote a record to Long-Term. Direct
+   Long-Term writes are rejected; only explicit Short-Term promotion can create
+   one. Layer-scoped recall filters only after each candidate contract
+   authenticates and never changes relevance or confidence. The Contextual
+   Logic trace is query-driven: confidence-checked roots expose only bounded
+   outgoing links from their encrypted contracts, and each supporting record
+   authenticates independently. Ordinary and degraded recall compare only
+   authenticated opaque topic tokens to keep the strongest current same-topic
+   pair together. The response labels that pair `possible_conflict` without
+   inferring semantic incompatibility or a winner; explicit supersession or a
+   protected contradiction-resolution record remains the only resolution path.
+   The adapter also enforces a bounded seed-crystal policy: only Live may
+   temporarily contain bounded transcript-shaped state; the other layers reject
+   raw transcripts and have progressively smaller character limits. Echo Veil
+   never auto-summarizes or truncates caller content. Live refresh renews an
+   unchanged encrypted contract in place, while changed content creates a new
+   protected version with explicit supersession history. The degraded reader
+   cannot refresh or otherwise mutate Live state.
+
 ## 3. Deviations from the spec
 
 | Spec statement | What we did | Why |
@@ -158,21 +217,38 @@ Deployment-provided:
   deletion of one vine across Echo Veil's managed tiers, and SQLite enables
   `secure_delete`. Host payloads, conflict/fossil records, WAL remnants,
   backups, and storage-media retention remain deployment responsibilities.
+- **Contextual relationships follow source erasure.** `AgentMemory.forget()`
+  decrypts protected contracts, finds transitive Contextual Logic dependents,
+  and deletes those derived records before the requested source. This prevents
+  derived content from surviving through a still-recallable logic record.
+  Quarantined ciphertext remains an operator incident and physical-erasure
+  limitations still apply.
+- **Context tracing is evidence traversal, not reasoning generation.**
+  `AgentMemory.context()` retrieves no more than two roots through ordinary
+  confidence policy, blocks expansion from gated roots, and traverses only
+  authenticated outgoing links. Depth, returned records, and edges are bounded.
+  Linked records retain temporal and provenance data but receive no query score;
+  the host remains responsible for presenting uncertainty without inventing an
+  explanation.
 - **Custom crypto shields are not automatically trusted.** The Oracle rejects
   objects that do not implement `protect()` and `similarity()`, rejects
   non-serializable protected payloads, and requires an explicit readiness marker
   for custom shields in staging. A marker cannot prove cryptographic strength;
   capability reporting keeps custom shields degraded until their design,
   serialization behavior, and threat model are reviewed outside Echo Veil.
-- **Host-plugin overlap is intentional but bounded.** Every host gets a distinct
-  profile by default, and the adapters expose opt-in tools rather than automatic
-  prompt injection. The OpenClaw integration does not take its configured
-  memory slot or context engine. This prevents duplicate automatic recall with
-  `memory-core`, Active Memory, or Lossless Claw. A future automatic hook must
-  define precedence, tenant boundaries, latency budgets, and deduplication
-  before activation. Writable adapter processes hold a profile-wide SQLite
-  lease for their lifetime; concurrent callers wait only for the configured
-  bounded timeout and then fail closed.
+- **One same-user memory authority is explicit and bounded.** Bundled harnesses
+  in the same local-user authorization domain share the versioned
+  `echo-universal-qwen3-v1` profile. Skill-capable hosts ship one memory ritual,
+  OpenClaw selects Echo Veil for its exclusive memory slot, Goose embeds the
+  same recipe policy or uses the shield-owned headless launcher, Algo injects
+  the contract in runtime code, and AIP wraps every runtime provider behind
+  semantic preflight. Prior host
+  memory files remain read-only migration evidence rather than a second mutable
+  authority. A
+  different user or trust boundary still requires a separate profile.
+  Writable adapter processes hold a profile-wide SQLite lease only for each
+  bounded operation; concurrent callers wait for the configured timeout and
+  then fail closed.
 - **The local availability layer is degraded recall, not a crypto or semantic
   fallback.** It opens only an existing owner-protected payload database in
   SQLite read-only mode, uses subject-masked keyed term overlap, and returns a
@@ -183,8 +259,10 @@ Deployment-provided:
   Ollama service/model unavailability activates it; integrity, identity, key,
   schema, and malformed-response failures remain hard stops.
 - **Local scoped-v2 metadata is minimized, not invisible.** Payloads, topics,
-  lifecycle anchors, and retrieval vectors are encrypted; lexical terms and
-  topics are keyed opaque values. Record IDs, random scope IDs, key IDs,
+  lifecycle anchors, retrieval vectors, and semantic-layer contracts are
+  encrypted; lexical terms and topics are keyed opaque values. Contract
+  ciphertext includes layer identity, provenance, promotion history, retention
+  state, and Contextual Logic links. Record IDs, random scope IDs, key IDs,
   schema/dimension data, timestamps, supersession shape, counts, sizes, and
   access patterns remain visible. Plaintext exists in the authorized process
   and loopback embedding service. Logs, model context, host stores, swap,
@@ -201,6 +279,12 @@ parameters, key-management story, or threat model.**
 A practical baseline and the Level-5 integration boundary are implemented:
 
 - `AesGcmCryptoShield` — practical AES-256-GCM protected vectors. It encrypts and authenticates anchor-vector payloads, supports random 256-bit keys, base64 environment-variable loading, and tamper detection. When an Oracle is constructed with this shield, newly sprouted active vines store a protected anchor and release the plaintext anchor array; decay scoring uses shield-backed transient decrypt inside `similarity()`. Encrypted evictions are archived as ciphertext payloads and are not inserted into the plaintext reference L2 index. This does not provide homomorphic computation or enclave isolation.
+- `ScopedAesGcmShield` — the local adapter's record/scope/schema/key-bound
+  shield. It protects lifecycle anchors and bounded semantic contracts under
+  one owner-only rotating keyring. Moving a contract to another record or
+  profile fails authentication. This remains a local staging control.
+  A scope-bound key-manifest feature marker also makes wholesale removal of the
+  database contract rows a hard failure instead of an apparent first migration.
 - `NullCryptoShield` — dev/test only, pass-through, **no confidentiality**,
   warns on construction.
 - `EnclaveCryptoShield` — obtains fresh provider evidence, delegates verification
@@ -252,6 +336,12 @@ small multi-process deployment:
   reconciles lifecycle/payload ID sets at startup. Interrupted lifecycle-first
   remembers are removed safely; unexplained encrypted payload orphans are
   preserved and block startup for operator review.
+- Bundled long-lived MCP transports use that same lease per tool call rather
+  than for the transport lifetime. Algo CLI uses it per memory operation, and
+  the native fresh-process adapters release it at process exit. This lets
+  same-user harnesses serialize on one profile without carrying stale
+  process-local L1 across unrelated calls. Direct SDK callers retain the lease
+  for their `AgentMemory` instance lifetime and must close it explicitly.
 - `Oracle.forget()` uses one `BEGIN IMMEDIATE` transaction to remove matching
   active, index, archive, ANN, and eviction-metadata records. Failures roll back
   before a live Vine is released, allowing the caller to retry.

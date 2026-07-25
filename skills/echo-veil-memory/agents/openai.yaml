@@ -1,0 +1,6 @@
+interface:
+  display_name: "Echo Veil Memory"
+  short_description: "Use protected four-layer memory with discipline"
+  default_prompt: "Use $echo-veil-memory to recall relevant context and preserve this task's durable outcome."
+policy:
+  allow_implicit_invocation: true

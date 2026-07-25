@@ -1,0 +1,10 @@
+{
+  "name": "@echo-veil/opencode-shield",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check .opencode/plugins/echo-veil-shield.js",
+    "test": "node --test tests/echo-veil-shield.test.mjs"
+  }
+}

@@ -1,10 +1,15 @@
 mcp_servers:
   echo-veil:
     command: "echo-veil-agent"
-    args: ["--profile", "hermes-qwen3", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
+    args: ["--profile", "echo-universal-qwen3-v1", "--scope", "local-user", "--caller", "hermes", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
     tools:
       include:
         - echo_veil_remember
+        - echo_veil_refresh_live
+        - echo_veil_promote
         - echo_veil_recall
+        - echo_veil_context
+        - echo_veil_list
         - echo_veil_forget
         - echo_veil_doctor
+        - echo_veil_reindex

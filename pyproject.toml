@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echo-veil"
-version = "0.6.0"
-description = "A tiered, decay-driven memory architecture for conversational agents (Echo Veil v1.0 core)."
+version = "0.7.0"
+description = "A shielded four-layer living-memory substrate for AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -43,6 +43,8 @@ Security = "https://github.com/Seabass-up/echo-veil/security/policy"
 
 [project.scripts]
 echo-veil-agent = "echo_veil.agent_cli:main"
+echo-veil-preflight-hook = "echo_veil.agent_preflight:main"
+echo-veil-shielded-run = "echo_veil.guarded_runner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

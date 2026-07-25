@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"$FACTORY_PROJECT_DIR\"/.factory/hooks/echo-veil-preflight.sh prompt"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"$FACTORY_PROJECT_DIR\"/.factory/hooks/echo-veil-preflight.sh agent"
+          }
+        ]
+      }
+    ]
+  }
+}

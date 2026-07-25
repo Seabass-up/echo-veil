@@ -1,7 +1,7 @@
 {
   "name": "echo-veil",
-  "version": "0.6.0",
-  "description": "Local encrypted, decay-driven memory tools for Codex.",
+  "version": "0.7.0",
+  "description": "Shielded four-layer living-memory tools for Codex.",
   "author": {
     "name": "Algo-cli.com",
     "url": "https://github.com/Seabass-up"
@@ -16,10 +16,12 @@
     "privacy"
   ],
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/",
   "interface": {
     "displayName": "Echo Veil",
-    "shortDescription": "Encrypted, confidence-gated local memory",
-    "longDescription": "Remember, recall, inspect, and forget user-authorized local memories through Echo Veil's decay-driven lifecycle.",
+    "shortDescription": "Shielded four-layer agent memory",
+    "longDescription": "Remember compact seed crystals, refresh Live state, promote reviewed memory, recall, trace protected context, inspect, and forget user-authorized Live, Short-Term, Long-Term, and Contextual Logic memories.",
     "developerName": "Algo-cli.com",
     "category": "Productivity",
     "capabilities": [
@@ -28,9 +30,9 @@
     ],
     "websiteURL": "https://echo.algo-cli.com",
     "defaultPrompt": [
-      "Remember this with Echo Veil.",
       "Recall what Echo Veil knows about this topic.",
-      "Check Echo Veil's local readiness."
+      "Remember this compact outcome with Echo Veil.",
+      "Trace Echo Veil's protected reasoning for this decision."
     ],
     "brandColor": "#6B5B95"
   }

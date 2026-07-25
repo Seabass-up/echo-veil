@@ -15,15 +15,15 @@ const dmMono = DM_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://echo.algo-cli.com"),
-  title: "Echo Veil v0.6.0 — Protected Semantic Memory for AI Agents",
+  title: "Echo Veil v0.7.0 — Protected Semantic Memory for AI Agents",
   description:
-    "Encrypted semantic recall for AI agents with answerability checks, visible ambiguity, lifecycle policy, and a conservative read-only outage layer.",
+    "Four-layer protected semantic memory for AI agents with answerability checks, visible ambiguity, fail-closed host gates, and a read-only outage layer.",
   alternates: { canonical: "/" },
   robots: { index: true, follow: true },
   openGraph: {
-    title: "Echo Veil v0.6.0 — Memory that knows what to keep",
+    title: "Echo Veil v0.7.0 — Memory that knows what to keep",
     description:
-      "Protected semantic recall with answerability checks, visible ambiguity, and an always-available read-only layer.",
+      "Four-layer protected semantic memory with answerability checks, fail-closed host gates, and an always-available read-only layer.",
     type: "website",
     url: "https://echo.algo-cli.com",
     siteName: "Echo Veil",
@@ -38,9 +38,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Echo Veil v0.6.0 — Memory that knows what to keep",
+    title: "Echo Veil v0.7.0 — Memory that knows what to keep",
     description:
-      "Protected semantic recall with answerability checks, visible ambiguity, and an always-available read-only layer.",
+      "Four-layer protected semantic memory with answerability checks, fail-closed host gates, and an always-available read-only layer.",
     images: ["/og.png"],
   },
 };

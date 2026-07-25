@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -84,6 +85,19 @@ JS_BLOCKED = (
         re.compile(r"\.startsWith\(\s*[\"']ECHO_VEIL_[\"']\s*\)"),
         "blanket Echo Veil environment inheritance",
     ),
+)
+
+# The public-site lint policy names React's raw-HTML attribute inside an exact
+# AST selector so ESLint can prohibit it. This is policy data, not a JSX sink.
+# Keep the exception path- and line-exact so the same token remains blocked
+# everywhere else, including elsewhere in this configuration file.
+JS_DEFENSIVE_EXACT_LINES = frozenset(
+    {
+        (
+            "website/eslint.config.mjs",
+            """selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",""",
+        ),
+    }
 )
 
 SHELL_PIPE = re.compile(
@@ -198,6 +212,13 @@ def scan_javascript(path: Path, display: str) -> list[Finding]:
     findings: list[Finding] = []
     for pattern, message in JS_BLOCKED:
         for match in pattern.finditer(text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end == -1:
+                line_end = len(text)
+            exact_line = text[line_start:line_end].strip()
+            if (display, exact_line) in JS_DEFENSIVE_EXACT_LINES:
+                continue
             findings.append(
                 Finding(display, text.count("\n", 0, match.start()) + 1, message)
             )
@@ -275,33 +296,62 @@ def scan_dockerfile(path: Path, display: str) -> list[Finding]:
 
 
 def _candidate_files(root: Path) -> list[Path]:
+    allowed_roots = {
+        ".github",
+        "cloudflare",
+        "crates",
+        "deploy",
+        "examples",
+        "integrations",
+        "scripts",
+        "skills",
+        "src",
+        "tests",
+        "website",
+    }
     candidates: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root)
-        tracked_openclaw_dist = relative.parts[:3] == (
-            "integrations",
-            "openclaw",
-            "dist",
-        )
-        skipped_parts = SKIP_PARTS - {"dist"} if tracked_openclaw_dist else SKIP_PARTS
-        if any(part in skipped_parts for part in relative.parts):
-            continue
-        if relative.parts[0] not in {
-            ".github",
-            "cloudflare",
-            "crates",
-            "deploy",
-            "examples",
-            "integrations",
-            "scripts",
-            "src",
-            "tests",
-            "website",
-        }:
-            continue
-        candidates.append(path)
+    for directory, child_directories, filenames in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+    ):
+        current = Path(directory)
+        relative_directory = current.relative_to(root)
+        if relative_directory == Path("."):
+            child_directories[:] = sorted(
+                name for name in child_directories if name in allowed_roots
+            )
+        else:
+            retained: list[str] = []
+            for name in child_directories:
+                relative = relative_directory / name
+                tracked_openclaw_dist = relative.parts[:3] == (
+                    "integrations",
+                    "openclaw",
+                    "dist",
+                )
+                skipped_parts = (
+                    SKIP_PARTS - {"dist"} if tracked_openclaw_dist else SKIP_PARTS
+                )
+                if name not in skipped_parts:
+                    retained.append(name)
+            child_directories[:] = sorted(retained)
+        for filename in sorted(filenames):
+            path = current / filename
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            tracked_openclaw_dist = relative.parts[:3] == (
+                "integrations",
+                "openclaw",
+                "dist",
+            )
+            skipped_parts = (
+                SKIP_PARTS - {"dist"} if tracked_openclaw_dist else SKIP_PARTS
+            )
+            if any(part in skipped_parts for part in relative.parts):
+                continue
+            candidates.append(path)
     return sorted(candidates)
 
 

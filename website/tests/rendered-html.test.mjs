@@ -42,7 +42,7 @@ test("server-renders the complete Echo Veil product page", async () => {
   const html = await response.text();
   assert.match(
     html,
-    /<title>Echo Veil v0\.6\.0 — Protected Semantic Memory for AI Agents<\/title>/i,
+    /<title>Echo Veil v0\.7\.0 — Protected Semantic Memory for AI Agents<\/title>/i,
   );
   assert.match(html, /Memory that knows/);
   assert.match(html, /what to keep\./);
@@ -52,13 +52,16 @@ test("server-renders the complete Echo Veil product page", async () => {
   assert.match(html, /42 \/ 42 retrieval gate/);
   assert.match(html, /Answerable, not just similar/);
   assert.match(html, /not a universal product comparison/);
+  assert.match(html, /ALGO CLI/);
   assert.match(html, /OPENCLAW/);
+  assert.match(html, /one versioned local authority/);
   assert.match(html, /CLAUDE CODE/);
   assert.match(html, /MERCURY\*/);
+  assert.match(html, /caller identity alone cannot promote memory/i);
   assert.match(html, /Attested enclave \+ ZKP gate/);
   assert.match(html, /View source on GitHub/);
   assert.match(html, /href="https:\/\/github\.com\/Seabass-up\/echo-veil">GitHub ↗<\/a>/);
-  assert.match(html, /Release v0\.6\.0/);
+  assert.match(html, /Release v0\.7\.0/);
   assert.match(html, /docs\/AGENT_INTEGRATION\.md/);
   assert.match(html, /Skip to main content/);
   assert.match(html, /rel="canonical" href="https:\/\/echo\.algo-cli\.com\/"/);

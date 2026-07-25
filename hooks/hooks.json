@@ -1,0 +1,30 @@
+{
+  "description": "Fail-closed Echo Veil memory preflight for Codex.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host codex --hook-mode prompt",
+            "timeout": 30,
+            "statusMessage": "Loading shielded Echo Veil context"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Agent|SpawnAgent|spawn_agent|collaboration\\.spawn_agent)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host codex --hook-mode agent",
+            "timeout": 30,
+            "statusMessage": "Shielding Codex subagent context"
+          }
+        ]
+      }
+    ]
+  }
+}

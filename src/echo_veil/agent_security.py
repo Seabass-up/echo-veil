@@ -44,7 +44,11 @@ AES_GCM_TAG_BYTES = 16
 AES_256_KEY_BYTES = 32
 MAX_VECTOR_ELEMENTS = 4_000_000
 MAX_SCOPED_VECTOR_JSON_BYTES = 64 * 1024 * 1024
+MAX_SCOPED_BLOB_PLAINTEXT_BYTES = 1024
+MAX_SCOPED_BLOB_JSON_BYTES = 2048
 MAX_SCOPE_CHARS = 256
+MAX_PROFILE_FEATURES = 16
+SUPPORTED_PROFILE_FEATURES = frozenset({"shielded-four-layer-v1"})
 KEY_ID_PREFIX = "ev-"
 _KEY_ID_RE = re.compile(r"ev-[0-9a-f]{16}\Z")
 _RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -77,12 +81,21 @@ def key_id_for(key: bytes) -> str:
     return f"{KEY_ID_PREFIX}{digest[:16]}"
 
 
-def _scope_binding(key: bytes, scope: str, scope_id: str) -> str:
+def _scope_binding(
+    key: bytes,
+    scope: str,
+    scope_id: str,
+    *,
+    features: tuple[str, ...] = (),
+) -> str:
     digest = hmac.new(key, digestmod=hashlib.sha256)
     digest.update(b"echo-veil-scope-binding-v1\0")
     digest.update(scope_id.encode("ascii"))
     digest.update(b"\0")
     digest.update(scope.encode("utf-8"))
+    for feature in features:
+        digest.update(b"\0feature\0")
+        digest.update(feature.encode("ascii"))
     return digest.hexdigest()
 
 
@@ -265,6 +278,35 @@ class ProfileKeyring:
     def key_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._keys))
 
+    @property
+    def features(self) -> tuple[str, ...]:
+        raw = self._manifest.get("features", [])
+        if not isinstance(raw, list):
+            raise KeyUnavailable("profile key manifest features are invalid")
+        return tuple(str(feature) for feature in raw)
+
+    def has_feature(self, feature: str) -> bool:
+        if feature not in SUPPORTED_PROFILE_FEATURES:
+            raise ValueError("profile feature is unsupported")
+        return feature in self.features
+
+    def enable_feature(self, feature: str) -> None:
+        if feature not in SUPPORTED_PROFILE_FEATURES:
+            raise ValueError("profile feature is unsupported")
+        if feature in self.features:
+            return
+        features = tuple(sorted((*self.features, feature)))
+        manifest = copy.deepcopy(self._manifest)
+        manifest["features"] = list(features)
+        manifest["scope_binding"] = _scope_binding(
+            self.active_key(),
+            self.scope,
+            self.scope_id,
+            features=features,
+        )
+        _atomic_write_json(self.manifest_path, manifest)
+        self._manifest = manifest
+
     def key(self, key_id: str) -> bytes:
         clean_id = _validate_key_id(key_id)
         try:
@@ -309,6 +351,7 @@ class ProfileKeyring:
             key,
             self.scope,
             self.scope_id,
+            features=self.features,
         )
         try:
             _atomic_write_json(self.manifest_path, manifest)
@@ -397,8 +440,12 @@ class ProfileKeyring:
             "scope_binding",
             "keys",
             "rotation",
+            "features",
         }
-        if set(decoded) - allowed or set(decoded) < allowed - {"rotation"}:
+        if set(decoded) - allowed or set(decoded) < allowed - {
+            "features",
+            "rotation",
+        }:
             raise KeyUnavailable("profile key manifest fields are invalid")
         if decoded["version"] != KEYRING_SCHEMA_VERSION:
             raise KeyUnavailable("profile key manifest version is unsupported")
@@ -431,6 +478,18 @@ class ProfileKeyring:
                 active_count += 1
         if active_count != 1 or keys[decoded["active_key_id"]]["status"] != "active":
             raise KeyUnavailable("profile active key state is invalid")
+        features = decoded.get("features", [])
+        if (
+            not isinstance(features, list)
+            or len(features) > MAX_PROFILE_FEATURES
+            or any(
+                not isinstance(feature, str)
+                or feature not in SUPPORTED_PROFILE_FEATURES
+                for feature in features
+            )
+            or features != sorted(set(features))
+        ):
+            raise KeyUnavailable("profile key manifest features are invalid")
         return decoded
 
     def _load_referenced_keys(self) -> None:
@@ -454,6 +513,7 @@ class ProfileKeyring:
             self.active_key(),
             self.scope,
             self.scope_id,
+            features=self.features,
         )
         if not hmac.compare_digest(expected, str(self._manifest["scope_binding"])):
             raise PermissionError("authorization scope does not match this profile")
@@ -469,7 +529,12 @@ def scoped_aad(
     ordinal: int | None = None,
     dimension: int | None = None,
 ) -> bytes:
-    if object_type not in {"payload", "retrieval-vector", "lifecycle-anchor"}:
+    if object_type not in {
+        "lifecycle-anchor",
+        "memory-contract",
+        "payload",
+        "retrieval-vector",
+    }:
         raise ValueError("encrypted object type is invalid")
     _validate_scope_id(scope_id)
     _validate_record_id(record_id)
@@ -626,6 +691,118 @@ class ScopedProtectedVector:
         )
 
 
+@dataclass(frozen=True)
+class ScopedProtectedBlob:
+    """Small record-bound metadata object protected by the profile shield."""
+
+    key_id: str
+    scope_id: str
+    record_id: str
+    object_type: str
+    nonce: bytes
+    ciphertext: bytes
+    schema_version: int = SCOPED_VECTOR_SCHEMA_VERSION
+    algorithm: str = "AES-256-GCM-SCOPED"
+
+    def __post_init__(self) -> None:
+        _validate_key_id(self.key_id)
+        _validate_scope_id(self.scope_id)
+        _validate_record_id(self.record_id)
+        if self.object_type != "memory-contract":
+            raise ValueError("scoped protected blob object type is invalid")
+        if self.schema_version != SCOPED_VECTOR_SCHEMA_VERSION:
+            raise ValueError("scoped protected blob schema version is unsupported")
+        if self.algorithm != "AES-256-GCM-SCOPED":
+            raise ValueError("scoped protected blob algorithm is invalid")
+        if not isinstance(self.nonce, bytes) or len(self.nonce) != AES_GCM_NONCE_BYTES:
+            raise ValueError("scoped protected blob nonce is invalid")
+        if (
+            not isinstance(self.ciphertext, bytes)
+            or not AES_GCM_TAG_BYTES
+            < len(self.ciphertext)
+            <= MAX_SCOPED_BLOB_PLAINTEXT_BYTES + AES_GCM_TAG_BYTES
+        ):
+            raise ValueError("scoped protected blob ciphertext size is invalid")
+
+    def associated_data(self) -> bytes:
+        return scoped_aad(
+            object_type=self.object_type,
+            scope_id=self.scope_id,
+            record_id=self.record_id,
+            schema_version=self.schema_version,
+            key_id=self.key_id,
+        )
+
+    def to_json_bytes(self) -> bytes:
+        encoded = json.dumps(
+            {
+                "algorithm": self.algorithm,
+                "ciphertext_b64": base64.urlsafe_b64encode(self.ciphertext).decode(
+                    "ascii"
+                ),
+                "key_id": self.key_id,
+                "nonce_b64": base64.urlsafe_b64encode(self.nonce).decode("ascii"),
+                "object_type": self.object_type,
+                "record_id": self.record_id,
+                "schema_version": self.schema_version,
+                "scope_id": self.scope_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > MAX_SCOPED_BLOB_JSON_BYTES:
+            raise ValueError("scoped protected blob JSON exceeds the size limit")
+        return encoded
+
+    @classmethod
+    def from_json_bytes(cls, payload: bytes) -> "ScopedProtectedBlob":
+        if (
+            not isinstance(payload, bytes)
+            or not payload
+            or len(payload) > MAX_SCOPED_BLOB_JSON_BYTES
+        ):
+            raise ValueError("scoped protected blob JSON has an invalid size")
+        try:
+            decoded = strict_json_loads(payload)
+        except Exception as exc:
+            raise ValueError("scoped protected blob JSON is invalid") from exc
+        expected = {
+            "algorithm",
+            "ciphertext_b64",
+            "key_id",
+            "nonce_b64",
+            "object_type",
+            "record_id",
+            "schema_version",
+            "scope_id",
+        }
+        if not isinstance(decoded, dict) or set(decoded) != expected:
+            raise ValueError("scoped protected blob fields are invalid")
+        try:
+            nonce = base64.b64decode(
+                str(decoded["nonce_b64"]).encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+            ciphertext = base64.b64decode(
+                str(decoded["ciphertext_b64"]).encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+        except Exception as exc:
+            raise ValueError("scoped protected blob encoding is invalid") from exc
+        return cls(
+            algorithm=str(decoded["algorithm"]),
+            ciphertext=ciphertext,
+            key_id=str(decoded["key_id"]),
+            nonce=nonce,
+            object_type=str(decoded["object_type"]),
+            record_id=str(decoded["record_id"]),
+            schema_version=int(decoded["schema_version"]),
+            scope_id=str(decoded["scope_id"]),
+        )
+
+
 class ScopedAesGcmShield:
     """Record-bound AES-GCM shield backed by a multi-key profile keyring."""
 
@@ -676,6 +853,102 @@ class ScopedAesGcmShield:
             ciphertext=ciphertext,
             shape=(int(vector.size),),
         )
+
+    def protect_blob_for_record(
+        self,
+        payload: bytes,
+        record_id: str,
+        *,
+        object_type: str,
+    ) -> ScopedProtectedBlob:
+        """Protect bounded semantic metadata under the same profile shield."""
+
+        clean_id = _validate_record_id(record_id)
+        if not isinstance(payload, bytes):
+            raise TypeError("protected blob payload must be bytes")
+        if not 0 < len(payload) <= MAX_SCOPED_BLOB_PLAINTEXT_BYTES:
+            raise ValueError("protected blob payload has an invalid size")
+        if object_type != "memory-contract":
+            raise ValueError("protected blob object type is invalid")
+        key_id = self.keyring.active_key_id
+        nonce = os.urandom(AES_GCM_NONCE_BYTES)
+        placeholder = ScopedProtectedBlob(
+            key_id=key_id,
+            scope_id=self.keyring.scope_id,
+            record_id=clean_id,
+            object_type=object_type,
+            nonce=nonce,
+            ciphertext=b"\0" * (len(payload) + AES_GCM_TAG_BYTES),
+        )
+        ciphertext = AESGCM(self.keyring.key(key_id)).encrypt(
+            nonce,
+            payload,
+            placeholder.associated_data(),
+        )
+        return ScopedProtectedBlob(
+            key_id=key_id,
+            scope_id=self.keyring.scope_id,
+            record_id=clean_id,
+            object_type=object_type,
+            nonce=nonce,
+            ciphertext=ciphertext,
+        )
+
+    def reveal_blob(self, protected_blob: object) -> bytes:
+        """Authenticate and reveal one bounded metadata object."""
+
+        if not isinstance(protected_blob, ScopedProtectedBlob):
+            raise TypeError("ScopedAesGcmShield expects a ScopedProtectedBlob")
+        if protected_blob.scope_id != self.keyring.scope_id:
+            raise ValueError("protected blob belongs to another authorization scope")
+        try:
+            plaintext = AESGCM(self.keyring.key(protected_blob.key_id)).decrypt(
+                protected_blob.nonce,
+                protected_blob.ciphertext,
+                protected_blob.associated_data(),
+            )
+        except InvalidTag as exc:
+            raise ValueError("protected blob authentication failed") from exc
+        if not 0 < len(plaintext) <= MAX_SCOPED_BLOB_PLAINTEXT_BYTES:
+            raise ValueError("protected blob plaintext size is invalid")
+        return plaintext
+
+    def reencrypt_blob(
+        self,
+        protected_blob: ScopedProtectedBlob,
+        *,
+        target_key_id: str,
+    ) -> ScopedProtectedBlob:
+        """Rewrap metadata during the same resumable profile-key rotation."""
+
+        target = _validate_key_id(target_key_id)
+        plaintext = bytearray(self.reveal_blob(protected_blob))
+        try:
+            nonce = os.urandom(AES_GCM_NONCE_BYTES)
+            placeholder = ScopedProtectedBlob(
+                key_id=target,
+                scope_id=protected_blob.scope_id,
+                record_id=protected_blob.record_id,
+                object_type=protected_blob.object_type,
+                nonce=nonce,
+                ciphertext=b"\0" * (len(plaintext) + AES_GCM_TAG_BYTES),
+            )
+            ciphertext = AESGCM(self.keyring.key(target)).encrypt(
+                nonce,
+                bytes(plaintext),
+                placeholder.associated_data(),
+            )
+            return ScopedProtectedBlob(
+                key_id=target,
+                scope_id=protected_blob.scope_id,
+                record_id=protected_blob.record_id,
+                object_type=protected_blob.object_type,
+                nonce=nonce,
+                ciphertext=ciphertext,
+            )
+        finally:
+            for index in range(len(plaintext)):
+                plaintext[index] = 0
 
     def reveal(self, protected_anchor: object) -> NDArray[np.float64]:
         protected = self._validate(protected_anchor)

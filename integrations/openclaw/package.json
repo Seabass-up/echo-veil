@@ -1,14 +1,14 @@
 {
   "name": "openclaw-plugin-echo-veil",
-  "version": "0.6.0",
-  "description": "Native OpenClaw tools for the Echo Veil agent memory adapter.",
+  "version": "0.7.0",
+  "description": "Exclusive OpenClaw memory capability and nine Echo Veil tools.",
   "type": "module",
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
-    "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
+    "plugin:build": "npm run build",
+    "plugin:validate": "npm run build && node ./tests/validate-openclaw-loader.mjs",
     "test": "vitest run --config ./vitest.config.ts"
   },
   "files": [

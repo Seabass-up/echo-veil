@@ -103,7 +103,7 @@ export default function Home() {
       <section className="hero shell" id="top">
         <div className="hero-copy">
           <div className="eyebrow">
-            <span className="status-dot" /> v0.6.0 · Scoped protected memory
+            <span className="status-dot" /> v0.7.0 · Four-layer protected memory
           </div>
           <h1>
             Memory that knows
@@ -111,10 +111,11 @@ export default function Home() {
             <em>what to keep.</em>
           </h1>
           <p className="hero-lede">
-            Echo Veil gives AI agents encrypted semantic recall with an
-            answerability check, visible ranking ambiguity, and a conservative
-            read-only layer that stays available when the embedding service does
-            not—without turning guesses into facts.
+            Echo Veil gives AI agents a protected four-layer memory lifecycle,
+            semantic recall with an answerability check, visible ranking
+            ambiguity, and a conservative read-only layer that stays available
+            when the embedding service does not—without turning guesses into
+            facts.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href="#system">
@@ -125,7 +126,7 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-proof" aria-label="Product attributes">
-            <span>Release v0.6.0</span>
+            <span>Release v0.7.0</span>
             <span>Open source</span>
             <span>Commercial use free</span>
             <span>Fail-closed production mode</span>
@@ -320,10 +321,12 @@ export default function Home() {
             <div className="host-support">
               <strong>Adapters for the agents you already use.</strong>
               <div aria-label="Supported agent runtime adapters">
-                <span>OPENCLAW</span><span>HERMES</span><span>CODEX</span>
+                <span>ALGO CLI</span><span>OPENCLAW</span><span>HERMES</span><span>CODEX</span>
                 <span>CLAUDE CODE</span><span>PI</span><span>OPENCODE</span>
                 <span>DROID</span><span>GOOSE</span><span>MERCURY*</span>
               </div>
+              <p>Full adapters bind their host identity into protected provenance; caller identity alone cannot promote memory.</p>
+              <p>Same-user harnesses default to one versioned local authority and release its writer lease after each call, so memory can travel without stale process state.</p>
               <p>* Mercury readiness skill today; full structured tools await a documented host boundary.</p>
               <p>* Neutral synthetic regression suite, not a universal product comparison.</p>
             </div>
@@ -358,7 +361,7 @@ export default function Home() {
         <div className="cta-orbit" aria-hidden="true"><i /><i /><i /></div>
         <span className="section-index">MEMORY, WITH BETTER JUDGMENT</span>
         <h2>Give your agent<br /><em>a wiser memory.</em></h2>
-        <p>Echo Veil v0.6.0 · Open source under MIT · Free for personal and commercial use.</p>
+        <p>Echo Veil v0.7.0 · Open source under MIT · Free for personal and commercial use.</p>
         <div className="cta-actions">
           <a className="button button-primary" href="https://github.com/Seabass-up/echo-veil">View source on GitHub <span aria-hidden="true">↗</span></a>
           <a className="text-link" href="https://github.com/Seabass-up/echo-veil/blob/master/docs/AGENT_INTEGRATION.md">Read the integration guide <span aria-hidden="true">→</span></a>

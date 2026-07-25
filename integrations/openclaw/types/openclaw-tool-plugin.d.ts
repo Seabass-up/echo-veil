@@ -1,40 +1,137 @@
-declare module "openclaw/plugin-sdk/tool-plugin" {
-  import type { Static, TSchema } from "typebox";
+declare module "openclaw/plugin-sdk/plugin-entry" {
+  import type { TSchema } from "typebox";
 
-  type ToolContext = { signal?: AbortSignal };
-  type ToolDefinition<TParams extends TSchema, TConfig> = {
+  export type AgentToolResult<TDetails = unknown> = {
+    content: Array<{ type: "text"; text: string }>;
+    details: TDetails;
+  };
+
+  export type AnyAgentTool = {
     name: string;
     label: string;
     description: string;
-    optional?: boolean;
-    parameters: TParams;
+    parameters: TSchema;
     execute: (
-      argumentsValue: Static<TParams>,
-      config: TConfig,
-      context: ToolContext,
-    ) => Promise<unknown>;
+      toolCallId: string,
+      params: unknown,
+      signal?: AbortSignal,
+      onUpdate?: unknown,
+    ) => Promise<AgentToolResult>;
   };
 
-  type ToolFactory<TConfig> = <TParams extends TSchema>(
-    definition: ToolDefinition<TParams, TConfig>,
-  ) => ToolDefinition<TParams, TConfig>;
+  export type MemoryPromptSectionBuilder = (params: {
+    availableTools: Set<string>;
+    citationsMode?: string;
+  }) => string[];
 
-  export type DefinedToolPluginEntry = {
+  export type OpenClawPluginApi = {
+    config?: Record<string, unknown>;
+    pluginConfig?: Record<string, unknown>;
+    runtime: {
+      config: {
+        current: () => Record<string, unknown>;
+      };
+    };
+    on: {
+      (
+        hookName: "before_agent_reply",
+        handler: (
+          event: { cleanedBody: string },
+          context: {
+            runId?: string;
+            sessionId?: string;
+            sessionKey?: string;
+          },
+        ) =>
+          | {
+              handled: boolean;
+              reply?: { text: string };
+              reason?: string;
+            }
+          | Promise<{
+              handled: boolean;
+              reply?: { text: string };
+              reason?: string;
+            }>,
+        options?: { priority?: number; timeoutMs?: number },
+      ): void;
+      (
+        hookName: "before_prompt_build",
+        handler: (
+          event: { prompt: string; messages: unknown[] },
+          context: {
+            runId?: string;
+            sessionId?: string;
+            sessionKey?: string;
+          },
+        ) =>
+          | {
+              prependContext?: string;
+              prependSystemContext?: string;
+            }
+          | Promise<{
+              prependContext?: string;
+              prependSystemContext?: string;
+            }>,
+        options?: { priority?: number; timeoutMs?: number },
+      ): void;
+      (
+        hookName: "before_agent_run",
+        handler: (
+          event: {
+            prompt: string;
+            messages: unknown[];
+            systemPrompt?: string;
+          },
+          context: {
+            runId?: string;
+            sessionId?: string;
+            sessionKey?: string;
+          },
+        ) =>
+          | { outcome: "pass" }
+          | {
+              outcome: "block";
+              reason: string;
+              message?: string;
+              category?: string;
+            }
+          | Promise<
+              | { outcome: "pass" }
+              | {
+                  outcome: "block";
+                  reason: string;
+                  message?: string;
+                  category?: string;
+                }
+            >,
+        options?: { priority?: number; timeoutMs?: number },
+      ): void;
+    };
+    registerTool: (
+      tool: AnyAgentTool,
+      options?: { name?: string; names?: string[]; optional?: boolean },
+    ) => void;
+    registerMemoryCapability: (capability: {
+      promptBuilder?: MemoryPromptSectionBuilder;
+    }) => void;
+  };
+
+  export type DefinedPluginEntry = {
     readonly id: string;
     readonly name: string;
+    readonly description: string;
+    readonly configSchema: TSchema;
+    readonly register: (api: OpenClawPluginApi) => void;
   };
 
-  export function defineToolPlugin<TConfigSchema extends TSchema>(definition: {
-    id: string;
-    name: string;
-    description: string;
-    configSchema: TConfigSchema;
-    tools: (
-      tool: ToolFactory<Static<TConfigSchema>>,
-    ) => Array<ToolDefinition<TSchema, Static<TConfigSchema>>>;
-  }): DefinedToolPluginEntry;
+  export function definePluginEntry(definition: DefinedPluginEntry): DefinedPluginEntry;
+}
 
-  export function getToolPluginMetadata(entry: unknown):
-    | { tools: Array<{ name: string }> }
-    | undefined;
+declare module "openclaw/plugin-sdk/tool-results" {
+  import type { AgentToolResult } from "openclaw/plugin-sdk/plugin-entry";
+
+  export function jsonResult<TDetails>(
+    payload: TDetails,
+  ): AgentToolResult<TDetails>;
 }

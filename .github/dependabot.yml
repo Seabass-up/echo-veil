@@ -40,6 +40,36 @@ updates:
       website-minor-and-patch:
         update-types: [minor, patch]
 
+  - package-ecosystem: npm
+    directory: /integrations/openclaw
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      openclaw-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /integrations/opencode
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      opencode-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /integrations/pi
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      pi-minor-and-patch:
+        update-types: [minor, patch]
+
   - package-ecosystem: terraform
     directory: /deploy/cloudflare
     schedule:
