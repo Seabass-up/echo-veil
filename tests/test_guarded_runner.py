@@ -402,6 +402,7 @@ def test_hermes_environment_contains_only_digest_bound_plugin_and_config(
         state_dir=tmp_path / "echo-state",
     )
     nonce = "b" * 32
+    resolved_echo = Path(args.echo_command).resolve(strict=True)
 
     with guarded_runner._isolated_hermes_environment(
         args,
@@ -425,9 +426,9 @@ def test_hermes_environment_contains_only_digest_bound_plugin_and_config(
         assert "memory_enabled: false" in config
         assert "user_profile_enabled: false" in config
         assert "echo-veil-shield" in config
-        assert json.dumps("/bin/echo") in config
+        assert json.dumps(str(resolved_echo)) in config
         assert '"--caller","hermes"' in config
-        assert (home / "bin" / "echo-veil-agent").resolve() == Path("/bin/echo")
+        assert (home / "bin" / "echo-veil-agent").resolve() == resolved_echo
 
     assert not home.exists()
 
