@@ -88,7 +88,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:a4734cb06d213acd671744e2fb9cd35e4fc7ef04e9a6fafb63507adf3798ef15",
+      "source_digest": "sha256:b02545e49f50257549375341637f6316d9edf93ebd60d70082a84ebd1471e6bc",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",

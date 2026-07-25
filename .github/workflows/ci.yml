@@ -171,10 +171,12 @@ jobs:
           npm --prefix integrations/openclaw run build
           git diff --exit-code -- integrations/openclaw/dist
           mkdir -p /tmp/echo-veil-openclaw-a /tmp/echo-veil-openclaw-b
-          npm pack ./integrations/openclaw --ignore-scripts \
-            --pack-destination /tmp/echo-veil-openclaw-a
-          npm pack ./integrations/openclaw --ignore-scripts \
-            --pack-destination /tmp/echo-veil-openclaw-b
+          ARCHIVE_EPOCH="$(python -c \
+            'import json; print(json.load(open("integrations/openclaw/deployment-lock.json"))["source_date_epoch"])')"
+          python scripts/build_openclaw_archive.py --epoch "$ARCHIVE_EPOCH" \
+            --output-dir /tmp/echo-veil-openclaw-a
+          python scripts/build_openclaw_archive.py --epoch "$ARCHIVE_EPOCH" \
+            --output-dir /tmp/echo-veil-openclaw-b
           cmp /tmp/echo-veil-openclaw-a/*.tgz /tmp/echo-veil-openclaw-b/*.tgz
           python scripts/release_check.py \
             --plugin-archive /tmp/echo-veil-openclaw-a/*.tgz
