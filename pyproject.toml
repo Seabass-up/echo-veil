@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Security :: Cryptography",
 ]
-dependencies = ["numpy>=1.24", "cryptography>=42.0"]
+dependencies = ["numpy>=1.24", "cryptography>=50.0.0"]
 
 [project.optional-dependencies]
 dev = [
