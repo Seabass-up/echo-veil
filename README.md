@@ -375,6 +375,8 @@ selection, and an executable adapter, see
 [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md).
 
 ```python
+from pathlib import Path
+
 import numpy as np
 from echo_veil import AesGcmCryptoShield, Oracle, SQLiteStore, WorkspaceConfig
 
@@ -384,7 +386,7 @@ _ = Oracle(WorkspaceConfig(capacity=400))
 # AES-GCM is an encrypted-storage baseline for development/staging. Store its
 # key in a secret manager or ECHO_VEIL_CRYPTO_KEY, not source code.
 shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
-store = SQLiteStore("echo-veil.db")
+store = SQLiteStore(Path.home() / ".echo-veil-store" / "echo-veil.db")
 oracle = Oracle(
     WorkspaceConfig(capacity=400),
     shield=shield,
@@ -423,6 +425,8 @@ through an mTLS binding. Configure the Python provider with the Access service
 token issued for that application:
 
 ```python
+from pathlib import Path
+
 from echo_veil import (
     Oracle,
     SQLiteStore,
@@ -432,7 +436,7 @@ from echo_veil import (
 # Performs live Access authentication, fresh attestation verification,
 # measurement allowlisting, Ristretto proof creation, and session opening.
 shield = build_production_enclave_shield_from_env()
-store = SQLiteStore("echo-veil.db")
+store = SQLiteStore(Path.home() / ".echo-veil-store" / "echo-veil.db")
 oracle = Oracle(environment="production", shield=shield, storage=store)
 ```
 

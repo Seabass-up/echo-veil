@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import echo_veil.agent_security as agent_security
+import echo_veil.persistence as persistence_module
 from echo_veil import (
     AesGcmCryptoShield,
     Oracle,
@@ -19,6 +21,79 @@ from echo_veil import (
 from echo_veil.archive import EvictionRecord
 from echo_veil.capability import CapabilityStatus
 from echo_veil.vectors import cosine_similarity
+
+
+def _database_path(tmp_path: Path, filename: str) -> Path:
+    state_dir = tmp_path / "echo-veil-private-state"
+    if os.name == "nt":
+        agent_security._windows_ensure_private_directory(
+            state_dir,
+            harden_existing=False,
+        )
+    else:
+        state_dir.mkdir(mode=0o700, exist_ok=True)
+    return state_dir / filename
+
+
+def _windows_directory_security_snapshot(path: Path) -> tuple[bytes, bytes, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    advapi32.GetSecurityInfo.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorControl.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    handle = agent_security._windows_open_directory_handle(path)
+    security_descriptor = ctypes.c_void_p()
+    try:
+        result = advapi32.GetSecurityInfo(
+            wintypes.HANDLE(handle),
+            1,  # SE_FILE_OBJECT
+            0x00000001 | 0x00000004,  # OWNER | DACL
+            None,
+            None,
+            None,
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0:
+            raise ctypes.WinError(result)
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(
+            security_descriptor,
+            ctypes.byref(control),
+            ctypes.byref(revision),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        owner, dacl = agent_security._windows_security_descriptor_fingerprint(
+            security_descriptor,
+            require_protected=False,
+        )
+        return owner, dacl, int(control.value)
+    finally:
+        if security_descriptor.value:
+            kernel32.LocalFree(security_descriptor)
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
 class _FailingMetadataStore(SQLiteStore):
@@ -39,7 +114,7 @@ class _FailingMetadataStore(SQLiteStore):
 def test_sqlite_store_persists_plain_index_and_archive_across_restart(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "echo-veil.db"
+    path = _database_path(tmp_path, "echo-veil.db")
     with SQLiteStore(path) as store:
         store.index.upsert("memory", np.array([1.0, 0.0]))
         store.archive.put("memory", b"cold payload")
@@ -54,7 +129,7 @@ def test_sqlite_store_persists_plain_index_and_archive_across_restart(
 
 
 def test_commits_are_visible_to_another_open_store(tmp_path: Path) -> None:
-    path = tmp_path / "shared.db"
+    path = _database_path(tmp_path, "shared.db")
     first = SQLiteStore(path)
     second = SQLiteStore(path)
     try:
@@ -71,7 +146,7 @@ def test_commits_are_visible_to_another_open_store(tmp_path: Path) -> None:
 def test_sqlite_eviction_transaction_rolls_back_both_tiers_on_failure(
     tmp_path: Path,
 ) -> None:
-    store = _FailingMetadataStore(tmp_path / "rollback.db")
+    store = _FailingMetadataStore(_database_path(tmp_path, "rollback.db"))
     record = EvictionRecord(
         key="rollback",
         anchor=np.array([1.0, 0.0]),
@@ -96,7 +171,7 @@ def test_sqlite_eviction_transaction_rolls_back_both_tiers_on_failure(
 def test_oracle_retries_failed_transaction_without_pruning(
     tmp_path: Path,
 ) -> None:
-    store = _FailingMetadataStore(tmp_path / "oracle-retry.db")
+    store = _FailingMetadataStore(_database_path(tmp_path, "oracle-retry.db"))
     oracle = Oracle(
         WorkspaceConfig(capacity=2, pressure_evict_at=0.0),
         storage=store,
@@ -128,7 +203,7 @@ def test_oracle_retries_failed_transaction_without_pruning(
 def test_aes_protected_eviction_is_searchable_after_restart(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "protected.db"
+    path = _database_path(tmp_path, "protected.db")
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
     store = SQLiteStore(path)
     oracle = Oracle(
@@ -174,7 +249,7 @@ def test_durable_staging_configuration_reports_only_crypto_blocker(
     tmp_path: Path,
 ) -> None:
     shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
-    with SQLiteStore(tmp_path / "ready.db") as store:
+    with SQLiteStore(_database_path(tmp_path, "ready.db")) as store:
         oracle = Oracle(
             shield=shield,
             environment="staging",
@@ -206,22 +281,199 @@ def test_in_memory_sqlite_is_not_reported_as_durable() -> None:
         assert report.production_blockers
 
 
+def test_windows_store_requests_validation_without_parent_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, bool]] = []
+
+    class _WindowsOS:
+        name = "nt"
+        fspath = staticmethod(os.fspath)
+
+    def ensure_private(path: Path, *, harden_existing: bool) -> Path:
+        calls.append((path, harden_existing))
+        return path
+
+    monkeypatch.setattr(persistence_module, "os", _WindowsOS())
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_ensure_private_directory",
+        ensure_private,
+    )
+
+    database_path, durable = SQLiteStore._prepare_path(tmp_path / "store.db")
+
+    assert database_path == str((tmp_path / "store.db").absolute())
+    assert durable is True
+    assert calls == [(tmp_path.absolute(), False)]
+
+
+def test_windows_database_create_rechecks_pinned_parent_without_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "store.db"
+    events: list[str] = []
+    state = {"pinned": False}
+
+    class _WindowsOS:
+        name = "nt"
+
+        @staticmethod
+        def close(descriptor: int) -> None:
+            assert descriptor == 41
+            events.append("descriptor-close")
+
+    class _PinnedChain:
+        def __enter__(self) -> tuple[()]:
+            state["pinned"] = True
+            events.append("chain-enter")
+            return ()
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("chain-exit")
+            state["pinned"] = False
+
+    def ensure_private(path: Path, *, harden_existing: bool) -> Path:
+        assert path == tmp_path
+        assert harden_existing is False
+        events.append("parent-validate-only")
+        return path
+
+    def verify_parent(path: Path) -> None:
+        assert path == tmp_path
+        assert state["pinned"] is True
+        events.append("parent-reverify")
+
+    def create_private(path: Path) -> tuple[int, tuple[object, ...]]:
+        assert path == database_path
+        assert state["pinned"] is True
+        events.append("file-create")
+        return 41, (object(),)
+
+    monkeypatch.setattr(persistence_module, "os", _WindowsOS())
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_ensure_private_directory",
+        ensure_private,
+    )
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_pinned_directory_chain",
+        lambda path: _PinnedChain() if path == tmp_path else pytest.fail(),
+    )
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_verify_private_directory",
+        verify_parent,
+    )
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_create_private_staging",
+        create_private,
+    )
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_verify_descriptor",
+        lambda *_args, **_kwargs: events.append("file-verify"),
+    )
+    monkeypatch.setattr(
+        persistence_module,
+        "_windows_verify_private_sqlite_sidecars",
+        lambda path: (
+            events.append("sidecar-verify") if path == database_path else pytest.fail()
+        ),
+    )
+
+    SQLiteStore._secure_database_file(str(database_path))
+
+    assert events == [
+        "parent-validate-only",
+        "chain-enter",
+        "parent-reverify",
+        "file-create",
+        "file-verify",
+        "descriptor-close",
+        "chain-exit",
+        "sidecar-verify",
+    ]
+
+
+def test_windows_private_directory_validation_mode_never_calls_hardener(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _WindowsOS:
+        name = "nt"
+        path = os.path
+        fspath = staticmethod(os.fspath)
+
+    def reject_broad_directory(_path: Path) -> None:
+        events.append("verify")
+        raise OSError("broad inherited DACL")
+
+    monkeypatch.setattr(agent_security, "os", _WindowsOS())
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_verify_private_directory",
+        reject_broad_directory,
+    )
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_harden_private_directory",
+        lambda _path: pytest.fail("caller-owned parent must not be hardened"),
+    )
+
+    with pytest.raises(OSError, match="broad inherited DACL"):
+        agent_security._windows_ensure_private_directory(
+            tmp_path,
+            harden_existing=False,
+        )
+
+    assert events == ["verify"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native parent-DACL contract")
+def test_windows_store_never_rewrites_existing_parent_dacl(tmp_path: Path) -> None:
+    shared_parent = tmp_path / "shared-parent"
+    shared_parent.mkdir()
+    shared_before = _windows_directory_security_snapshot(shared_parent)
+
+    with pytest.raises(OSError, match="Windows|private|DACL"):
+        SQLiteStore(shared_parent / "rejected.db")
+
+    assert not (shared_parent / "rejected.db").exists()
+    assert _windows_directory_security_snapshot(shared_parent) == shared_before
+
+    private_parent = agent_security._windows_ensure_private_directory(
+        tmp_path / "dedicated-private-parent"
+    )
+    private_before = _windows_directory_security_snapshot(private_parent)
+    with SQLiteStore(private_parent / "accepted.db"):
+        pass
+    assert _windows_directory_security_snapshot(private_parent) == private_before
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
 def test_database_file_permissions_are_owner_only(tmp_path: Path) -> None:
-    path = tmp_path / "private.db"
+    path = _database_path(tmp_path, "private.db")
     with SQLiteStore(path):
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert mode == 0o600
 
 
 def test_sqlite_secure_delete_is_enabled(tmp_path: Path) -> None:
-    with SQLiteStore(tmp_path / "secure-delete.db") as store:
+    with SQLiteStore(_database_path(tmp_path, "secure-delete.db")) as store:
         row = store._connection.execute("PRAGMA secure_delete").fetchone()
         assert row == (1,)
 
 
 def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
-    path = tmp_path / "future.db"
+    path = _database_path(tmp_path, "future.db")
+    SQLiteStore._secure_database_file(str(path))
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA user_version = 99")
     connection.close()
@@ -231,7 +483,8 @@ def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
 
 
 def test_malformed_existing_schema_fails_closed(tmp_path: Path) -> None:
-    path = tmp_path / "malformed.db"
+    path = _database_path(tmp_path, "malformed.db")
+    SQLiteStore._secure_database_file(str(path))
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE metadata_index (wrong_column TEXT)")
     connection.close()
@@ -254,7 +507,7 @@ def test_sqlite_store_rejects_symbolic_link_path_components(tmp_path: Path) -> N
 
 
 def test_sqlite_store_rejects_unexpected_schema_objects(tmp_path: Path) -> None:
-    path = tmp_path / "injected.db"
+    path = _database_path(tmp_path, "injected.db")
     with SQLiteStore(path):
         pass
     connection = sqlite3.connect(path)
@@ -269,7 +522,7 @@ def test_sqlite_store_rejects_unexpected_schema_objects(tmp_path: Path) -> None:
 
 
 def test_closed_store_rejects_access(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "closed.db")
+    store = SQLiteStore(_database_path(tmp_path, "closed.db"))
     store.close()
     store.close()
 
@@ -285,7 +538,7 @@ def test_oracle_rejects_incomplete_storage_backend() -> None:
 def test_forget_deletes_active_protected_memory_and_clears_live_material(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "forget-active.db"
+    path = _database_path(tmp_path, "forget-active.db")
     key = AesGcmCryptoShield.generate_key()
     with SQLiteStore(path) as store:
         oracle = Oracle(
@@ -314,7 +567,7 @@ def test_forget_deletes_active_protected_memory_and_clears_live_material(
 def test_forget_atomically_deletes_archived_memory_across_restart(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "forget-archived.db"
+    path = _database_path(tmp_path, "forget-archived.db")
     with SQLiteStore(path) as store:
         oracle = Oracle(
             WorkspaceConfig(capacity=2, pressure_evict_at=0.0),
@@ -345,7 +598,7 @@ def test_forget_atomically_deletes_archived_memory_across_restart(
 def test_forget_rolls_back_durable_deletion_before_releasing_live_vine(
     tmp_path: Path,
 ) -> None:
-    with SQLiteStore(tmp_path / "forget-rollback.db") as store:
+    with SQLiteStore(_database_path(tmp_path, "forget-rollback.db")) as store:
         oracle = Oracle(storage=store)
         vine = oracle.sprout("retry deletion", np.array([1.0, 0.0]))
         store._connection.execute(
@@ -363,7 +616,7 @@ def test_forget_rolls_back_durable_deletion_before_releasing_live_vine(
 
 
 def test_active_workspace_is_checkpointed_and_restored(tmp_path: Path) -> None:
-    path = tmp_path / "active.db"
+    path = _database_path(tmp_path, "active.db")
     key = AesGcmCryptoShield.generate_key()
     shield = AesGcmCryptoShield(key)
     with SQLiteStore(path) as store:
@@ -398,7 +651,7 @@ def test_active_workspace_is_checkpointed_and_restored(tmp_path: Path) -> None:
 def test_sqlite_lsh_restricts_exact_reranking_to_candidates(tmp_path: Path) -> None:
     rng = np.random.default_rng(20260715)
     vectors = [rng.normal(size=32) for _ in range(256)]
-    with SQLiteStore(tmp_path / "ann.db") as store:
+    with SQLiteStore(_database_path(tmp_path, "ann.db")) as store:
         for index, vector in enumerate(vectors):
             store.index.upsert(str(index), vector)
         scored = 0
@@ -415,7 +668,8 @@ def test_sqlite_lsh_restricts_exact_reranking_to_candidates(tmp_path: Path) -> N
 
 
 def test_schema_v1_is_migrated_and_backfilled_for_ann(tmp_path: Path) -> None:
-    path = tmp_path / "v1.db"
+    path = _database_path(tmp_path, "v1.db")
+    SQLiteStore._secure_database_file(str(path))
     connection = sqlite3.connect(path)
     connection.executescript(
         """

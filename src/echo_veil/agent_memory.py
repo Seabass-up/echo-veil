@@ -52,6 +52,14 @@ from .agent_security import (
     ScopedProtectedVector,
     opaque_topic,
     scoped_aad,
+    _windows_create_private_staging,
+    _windows_ensure_private_directory,
+    _windows_expected_private_security,
+    _windows_open_private_file,
+    _windows_pinned_directory_chain,
+    _windows_verify_descriptor,
+    _windows_verify_private_directory,
+    _windows_verify_private_sqlite_sidecars,
 )
 from .archive import TransactionalEvictionStore
 from .confidence import classify
@@ -4843,7 +4851,14 @@ class AlwaysAvailableMemory:
             raise RuntimeError(
                 "always-available recall requires an existing local profile"
             )
-        if os.name != "nt" and stat.S_IMODE(profile_dir.stat().st_mode) & 0o077:
+        if os.name == "nt":
+            try:
+                _windows_verify_private_directory(profile_dir)
+            except OSError as exc:
+                raise RuntimeError(
+                    "availability profile directory Windows DACL is unsafe"
+                ) from exc
+        elif stat.S_IMODE(profile_dir.stat().st_mode) & 0o077:
             raise RuntimeError("availability profile directory must be owner-only")
         self.profile_dir = profile_dir.absolute()
         payload_path = self.profile_dir / "payloads.db"
@@ -6030,6 +6045,8 @@ def _validate_profile(value: str) -> str:
 def _secure_directory(path: Path) -> Path:
     candidate = path.absolute()
     _reject_symlink_components(candidate)
+    if os.name == "nt":
+        return _windows_ensure_private_directory(candidate)
     candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not candidate.is_dir():
         raise ValueError("state directory must be a directory")
@@ -6040,12 +6057,52 @@ def _secure_directory(path: Path) -> Path:
 
 def _reject_symlink_components(path: Path) -> None:
     for candidate in reversed((path, *path.parents)):
-        if candidate.is_symlink():
+        try:
+            information = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        reparse_attribute = int(
+            getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+        )
+        if stat.S_ISLNK(information.st_mode) or (
+            os.name == "nt"
+            and bool(
+                int(getattr(information, "st_file_attributes", 0)) & reparse_attribute
+            )
+        ):
             raise ValueError("state paths must not contain symbolic links")
 
 
 def _secure_regular_file(path: Path) -> None:
     _reject_symlink_components(path.absolute())
+    if os.name == "nt":
+        _windows_ensure_private_directory(path.parent)
+        with _windows_pinned_directory_chain(path.parent):
+            try:
+                descriptor, state = _windows_create_private_staging(path.absolute())
+            except FileExistsError:
+                descriptor = _windows_open_private_file(
+                    path.absolute(),
+                    writable=False,
+                    share_write=True,
+                )
+                state = None
+            try:
+                _windows_verify_descriptor(
+                    descriptor,
+                    path.absolute(),
+                    expected_payload=None,
+                    expected_state=state,
+                    expected_security=(
+                        None
+                        if state is not None
+                        else _windows_expected_private_security()
+                    ),
+                )
+            finally:
+                os.close(descriptor)
+        _windows_verify_private_sqlite_sidecars(path.absolute())
+        return
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
@@ -6068,7 +6125,26 @@ def _require_secure_regular_file(path: Path, label: str) -> None:
         raise RuntimeError(f"{label} path must not contain symbolic links") from exc
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"{label} must be an existing regular file")
-    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+    if os.name == "nt":
+        try:
+            with _windows_pinned_directory_chain(path.parent):
+                descriptor = _windows_open_private_file(
+                    path.absolute(),
+                    writable=False,
+                    share_write=True,
+                )
+                try:
+                    _windows_verify_descriptor(
+                        descriptor,
+                        path.absolute(),
+                        expected_payload=None,
+                        expected_security=_windows_expected_private_security(),
+                    )
+                finally:
+                    os.close(descriptor)
+        except OSError as exc:
+            raise RuntimeError(f"{label} Windows DACL or identity is unsafe") from exc
+    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
         raise RuntimeError(f"{label} must be owner-only")
 
 
@@ -6078,6 +6154,7 @@ def _payload_database_version(path: Path) -> int:
     if not path.exists():
         return 0
     _require_secure_regular_file(path, "payload database")
+    _windows_verify_private_sqlite_sidecars(path)
     connection = sqlite3.connect(
         f"{path.resolve().as_uri()}?mode=ro",
         uri=True,
@@ -6125,6 +6202,31 @@ def _payload_database_version(path: Path) -> int:
 
 def _load_or_create_key(path: Path) -> bytes:
     _reject_symlink_components(path.absolute())
+    if os.name == "nt":
+        _windows_ensure_private_directory(path.parent)
+        key = AesGcmCryptoShield.generate_key()
+        with _windows_pinned_directory_chain(path.parent):
+            try:
+                descriptor, state = _windows_create_private_staging(path.absolute())
+            except FileExistsError:
+                return _load_existing_key(path)
+            try:
+                view = memoryview(key)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("agent key write was incomplete")
+                    view = view[written:]
+                os.fsync(descriptor)
+                _windows_verify_descriptor(
+                    descriptor,
+                    path.absolute(),
+                    expected_payload=key,
+                    expected_state=state,
+                )
+            finally:
+                os.close(descriptor)
+        return key
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):

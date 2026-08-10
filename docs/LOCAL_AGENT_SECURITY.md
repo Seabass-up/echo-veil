@@ -121,7 +121,29 @@ plaintext relationship index.
   require the separately provisioned enclave profile.
 
 Temporary files are not used for payload content. Key-manifest replacement uses
-an owner-only temporary file containing references and non-secret metadata.
+an owner-only temporary file containing references and non-secret metadata. On
+Windows, the temporary file is created with a protected current-user/System
+DACL before bytes are written, flushed in binary mode, and published with a
+same-volume `MoveFileExW` replace plus write-through. Echo Veil keeps the entire
+drive-root-to-profile ancestry open without delete sharing during publication
+and verifies the published handle's exact bytes, final path, regular-file type,
+single-link identity, owner, and DACL. UNC profile roots are rejected because
+this local boundary cannot pin their namespace authority.
+
+Windows profile directories are created or canonicalized to a protected,
+inheritable current-user/System DACL before key or database bytes are created.
+Raw key files and the main SQLite files also receive a protected DACL at native
+creation time; WAL, shared-memory, and rollback-journal files inherit the same
+private directory boundary. A pre-existing profile leaf is canonicalized only
+through a no-delete-share handle when its owner is the current user; trusted
+Windows service owners are accepted only for immutable ancestry. Unsafe leaf
+owners, reparse points, replaceable ancestry, and pre-existing broad files fail
+closed. A standalone `SQLiteStore` creates a missing dedicated parent privately,
+but never canonicalizes an existing caller-supplied parent: that directory must
+already satisfy the exact private DACL or the open fails. On POSIX, the existing
+owner-only mode, atomic replace, file fsync, and directory fsync contract is
+unchanged.
+
 SQLite may create WAL and shared-memory files; payload-bearing database pages
 remain encrypted at the record level. Backups must include the database,
 lifecycle store, key manifest, and referenced keys as one protected recovery
@@ -132,7 +154,9 @@ set. Echo Veil does not yet provide a qualified backup/restore command.
 `keyring.json` contains only non-secret key references. Raw 32-byte keys live in
 owner-only files under `keys/`; scoped-v2 configuration never stores a raw key.
 Symlinked paths, missing keys, mismatched key IDs, and group/world-readable
-security files fail closed.
+security files fail closed. Windows applies and revalidates the equivalent
+owner/trusted-only DACL rather than relying on mode bits that older CPython
+versions ignore.
 
 After four-layer migration, the key manifest carries a non-secret
 `shielded-four-layer-v1` feature marker inside the profile scope binding. This

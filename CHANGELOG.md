@@ -5,6 +5,17 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Security
+
+- Made Windows local-memory publication fail closed: key manifests now use
+  private-at-creation native staging, binary fsync, same-volume write-through
+  replacement, pinned namespace ancestry, and exact post-publication
+  byte/path/type/link/DACL verification. Raw keys, SQLite databases, profile
+  directories, and inherited SQLite sidecars now use the same protected
+  current-user/System at-rest boundary instead of relying on ignored POSIX mode
+  bits. Standalone SQLite stores create missing dedicated parents privately and
+  reject broad existing parents without rewriting caller-owned directory DACLs.
+
 ## [0.7.0] - 2026-07-25
 
 ### Added

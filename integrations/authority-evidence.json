@@ -9,7 +9,7 @@
     "src/echo_veil/guarded_runner.py",
     "src/echo_veil/memory_layers.py"
   ],
-  "shared_source_digest": "sha256:9f4d715afd00c0590dde50f622ced92a7f40d32a8b882c592644dd3053246aa2",
+  "shared_source_digest": "sha256:dfe757083b841dc4c49d398735f7f7d932ab20daa26694623e175204bfcaf54f",
   "hosts": [
     {
       "id": "algo-cli",
