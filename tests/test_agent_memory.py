@@ -2623,6 +2623,93 @@ def test_security_files_with_broad_permissions_fail_closed(tmp_path: Path) -> No
         key_path.chmod(0o600)
 
 
+def test_key_readers_use_binary_noninheritable_windows_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_key = tmp_path / "profile.key"
+    legacy_key = tmp_path / "agent.key"
+    binary_flag = 1 << 26
+    noninheritable_flag = 1 << 27
+    adversarial_key = b"\x1a\r\n" + bytes(range(29))
+    opened: list[tuple[Path, int]] = []
+    closed: list[int] = []
+
+    class _RegularFile:
+        st_mode = stat.S_IFREG
+
+    def open_key(path: Path, flags: int) -> int:
+        opened.append((path, flags))
+        return 73 + len(opened)
+
+    def read_key(_descriptor: int, maximum: int) -> bytes:
+        assert maximum == 33
+        assert opened[-1][1] & binary_flag
+        assert opened[-1][1] & noninheritable_flag
+        return adversarial_key
+
+    monkeypatch.setattr(agent_security.os, "name", "nt")
+    monkeypatch.setattr(agent_security.os, "O_BINARY", binary_flag, raising=False)
+    monkeypatch.setattr(
+        agent_security.os,
+        "O_NOINHERIT",
+        noninheritable_flag,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_security, "_require_owner_file", lambda *_args: None)
+    monkeypatch.setattr(
+        agent_memory_module,
+        "_require_secure_regular_file",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(agent_security.os, "open", open_key)
+    monkeypatch.setattr(agent_security.os, "fstat", lambda _descriptor: _RegularFile())
+    monkeypatch.setattr(agent_security.os, "read", read_key)
+    monkeypatch.setattr(
+        agent_security.os,
+        "fchmod",
+        lambda _descriptor, _mode: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_security.os,
+        "close",
+        lambda descriptor: closed.append(descriptor),
+    )
+
+    assert agent_security._read_key(profile_key) == adversarial_key
+    assert agent_memory_module._load_existing_key(legacy_key) == adversarial_key
+    assert [path for path, _flags in opened] == [profile_key, legacy_key]
+    assert len(closed) == 2
+
+
+@pytest.mark.parametrize("missing_flag", ("O_BINARY", "O_NOINHERIT"))
+def test_windows_key_read_flags_fail_closed_without_binary_crt_support(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_flag: str,
+) -> None:
+    monkeypatch.setattr(agent_security.os, "name", "nt")
+    monkeypatch.setattr(agent_security.os, "O_BINARY", 1 << 26, raising=False)
+    monkeypatch.setattr(agent_security.os, "O_NOINHERIT", 1 << 27, raising=False)
+    monkeypatch.delattr(agent_security.os, missing_flag)
+
+    with pytest.raises(OSError, match="binary non-inheritable"):
+        agent_security._binary_noninheritable_read_flags()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native binary CRT contract")
+def test_windows_native_key_reads_preserve_ctrl_z_and_crlf_bytes(
+    tmp_path: Path,
+) -> None:
+    key_directory = agent_security._secure_directory(tmp_path / "binary-key-profile")
+    key_path = key_directory / "agent.key"
+    adversarial_key = b"\x1a\r\n" + bytes(range(29))
+    agent_security._write_new_key(key_path, adversarial_key)
+
+    assert agent_security._read_key(key_path) == adversarial_key
+    assert agent_memory_module._load_existing_key(key_path) == adversarial_key
+
+
 def test_windows_manifest_write_uses_private_stage_and_write_through_move(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,8 @@ All notable changes to Echo Veil are documented here. The project follows
   current-user/System at-rest boundary instead of relying on ignored POSIX mode
   bits. Standalone SQLite stores create missing dedicated parents privately and
   reject broad existing parents without rewriting caller-owned directory DACLs.
+  Persisted raw keys are reopened with binary, non-inheritable Windows CRT
+  descriptors so key bytes cannot be changed or truncated by text translation.
 
 ## [0.7.0] - 2026-07-25
 
