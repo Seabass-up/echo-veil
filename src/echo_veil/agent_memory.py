@@ -50,6 +50,7 @@ from .agent_security import (
     ScopedAesGcmShield,
     ScopedProtectedBlob,
     ScopedProtectedVector,
+    _binary_noninheritable_read_flags,
     opaque_topic,
     scoped_aad,
     _windows_create_private_staging,
@@ -6252,10 +6253,7 @@ def _load_or_create_key(path: Path) -> bytes:
 def _load_existing_key(path: Path) -> bytes:
     _require_secure_regular_file(path, "agent key")
 
-    read_flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        read_flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, read_flags)
+    descriptor = os.open(path, _binary_noninheritable_read_flags())
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):

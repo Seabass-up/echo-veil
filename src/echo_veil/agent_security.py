@@ -189,12 +189,29 @@ def _require_owner_file(path: Path, label: str) -> None:
         raise KeyUnavailable(f"{label} permissions are too broad")
 
 
-def _read_key(path: Path) -> bytes:
-    _require_owner_file(path, "profile key")
+def _binary_noninheritable_read_flags() -> int:
+    """Return raw-file read flags without Windows CRT byte translation."""
+
     flags = os.O_RDONLY
+    if os.name == "nt":
+        binary = getattr(os, "O_BINARY", None)
+        noninheritable = getattr(os, "O_NOINHERIT", None)
+        if (
+            not isinstance(binary, int)
+            or binary == 0
+            or not isinstance(noninheritable, int)
+            or noninheritable == 0
+        ):
+            raise OSError("Windows binary non-inheritable open flags are unavailable")
+        flags |= binary | noninheritable
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+    return flags
+
+
+def _read_key(path: Path) -> bytes:
+    _require_owner_file(path, "profile key")
+    descriptor = os.open(path, _binary_noninheritable_read_flags())
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
