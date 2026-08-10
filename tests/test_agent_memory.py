@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+import echo_veil.agent_memory as agent_memory_module
 import echo_veil.agent_security as agent_security
 import echo_veil.memory_layers as memory_layers
 from scripts import migrate_agent_profile, migrate_host_memory
@@ -1233,12 +1234,9 @@ def test_payload_database_rejects_unexpected_schema_objects(tmp_path: Path) -> N
 def test_unversioned_legacy_payload_database_uses_compatibility_path(
     tmp_path: Path,
 ) -> None:
-    profile = tmp_path / "default"
-    profile.mkdir(mode=0o700)
-    key = b"k" * 32
+    profile = agent_memory_module._secure_directory(tmp_path / "default")
     key_path = profile / "agent.key"
-    key_path.write_bytes(key)
-    key_path.chmod(0o600)
+    key = agent_memory_module._load_or_create_key(key_path)
     store = _LegacyEncryptedPayloadStore(
         profile / "payloads.db",
         key,
@@ -2623,6 +2621,466 @@ def test_security_files_with_broad_permissions_fail_closed(tmp_path: Path) -> No
             AgentMemory(tmp_path, scope="workspace:permissions")
     finally:
         key_path.chmod(0o600)
+
+
+def test_windows_manifest_write_uses_private_stage_and_write_through_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "keyring.json"
+    encoded = b'{"active_key_id":"ev-0000000000000000"}'
+    created_state = agent_security._WindowsFileState(
+        identity=(1, 2, stat.S_IFREG, 1, 0),
+        owner=b"owner",
+        dacl=b"private-dacl",
+    )
+    staged_state = agent_security._WindowsFileState(
+        identity=created_state.identity,
+        owner=created_state.owner,
+        dacl=created_state.dacl,
+    )
+    events: list[str] = []
+    real_open = os.open
+
+    class _ParentGuard:
+        def __enter__(self) -> tuple[()]:
+            events.append("parent-chain-enter")
+            return ()
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("parent-chain-exit")
+
+    def create_private(path: Path) -> tuple[int, agent_security._WindowsFileState]:
+        events.append("private-create")
+        return real_open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600), created_state
+
+    def write_all(descriptor: int, value: bytes) -> None:
+        events.append("binary-write")
+        assert os.write(descriptor, value) == len(value)
+
+    def fsync(_descriptor: int) -> None:
+        events.append("file-fsync")
+
+    def verify_stage(
+        descriptor: int,
+        path: Path,
+        *,
+        expected_payload: bytes,
+        expected_state: agent_security._WindowsFileState,
+    ) -> agent_security._WindowsFileState:
+        events.append("stage-verify")
+        assert expected_payload == encoded
+        assert expected_state == created_state
+        assert path.name.startswith(".keyring.json.")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        assert os.read(descriptor, len(encoded) + 1) == encoded
+        return staged_state
+
+    def move(source: Path, destination: Path) -> None:
+        events.append("move-write-through")
+        os.replace(source, destination)
+
+    def verify_publication(
+        path: Path,
+        *,
+        expected_payload: bytes,
+        expected_state: agent_security._WindowsFileState,
+    ) -> None:
+        events.append("publication-verify")
+        assert path == target
+        assert expected_payload == encoded
+        assert expected_state == staged_state
+        assert path.read_bytes() == encoded
+
+    monkeypatch.setattr(
+        agent_security, "_windows_create_private_staging", create_private
+    )
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_pinned_directory_chain",
+        lambda path: (
+            _ParentGuard()
+            if path == target.parent
+            else pytest.fail("unexpected pinned path")
+        ),
+    )
+    monkeypatch.setattr(agent_security, "_write_all", write_all)
+    monkeypatch.setattr(agent_security.os, "fsync", fsync)
+    monkeypatch.setattr(agent_security, "_windows_verify_descriptor", verify_stage)
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_move_file_replace_write_through",
+        move,
+    )
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_verify_publication",
+        verify_publication,
+    )
+    monkeypatch.setattr(
+        agent_security.tempfile,
+        "mkstemp",
+        lambda **_kwargs: pytest.fail("Windows must not use mkstemp"),
+    )
+
+    agent_security._atomic_write_json_windows(target, encoded)
+
+    assert events == [
+        "parent-chain-enter",
+        "private-create",
+        "binary-write",
+        "file-fsync",
+        "stage-verify",
+        "move-write-through",
+        "publication-verify",
+        "parent-chain-exit",
+    ]
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_windows_manifest_write_cleans_private_stage_when_move_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "keyring.json"
+    encoded = b"{}"
+    state = agent_security._WindowsFileState(
+        identity=(1, 2, stat.S_IFREG, 1, 0),
+        owner=b"owner",
+        dacl=b"private-dacl",
+    )
+    real_open = os.open
+
+    def create_private(path: Path) -> tuple[int, agent_security._WindowsFileState]:
+        return real_open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600), state
+
+    def verify_stage(
+        _descriptor: int,
+        _path: Path,
+        *,
+        expected_payload: bytes,
+        expected_state: agent_security._WindowsFileState,
+    ) -> agent_security._WindowsFileState:
+        assert expected_payload == encoded
+        assert expected_state == state
+        return state
+
+    monkeypatch.setattr(
+        agent_security, "_windows_create_private_staging", create_private
+    )
+    monkeypatch.setattr(agent_security, "_windows_verify_descriptor", verify_stage)
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_move_file_replace_write_through",
+        lambda _source, _destination: (_ for _ in ()).throw(
+            OSError("synthetic write-through move failure")
+        ),
+    )
+
+    with pytest.raises(OSError, match="write-through move"):
+        agent_security._atomic_write_json_windows(target, encoded)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_json_dispatch_never_enters_posix_tail_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "keyring.json"
+    calls: list[tuple[Path, bytes]] = []
+    monkeypatch.setattr(agent_security.os, "name", "nt")
+    monkeypatch.setattr(
+        agent_security,
+        "_atomic_write_json_windows",
+        lambda path, encoded: calls.append((path, encoded)),
+    )
+    monkeypatch.setattr(
+        agent_security.tempfile,
+        "mkstemp",
+        lambda **_kwargs: pytest.fail("Windows must not use mkstemp"),
+    )
+
+    agent_security._atomic_write_json(target, {"version": 1})
+
+    assert calls == [(target, b'{"version":1}')]
+
+
+def test_windows_private_directory_rechecks_leaf_inside_final_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _ChainGuard:
+        def __enter__(self) -> tuple[()]:
+            events.append("chain-enter")
+            return ()
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("chain-exit")
+
+    monkeypatch.setattr(agent_security.os, "name", "nt")
+    monkeypatch.setattr(agent_security, "Path", type(tmp_path))
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_verify_private_directory",
+        lambda _path: events.append("leaf-verify"),
+    )
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_pinned_directory_chain",
+        lambda _path: _ChainGuard(),
+    )
+
+    assert agent_security._windows_ensure_private_directory(tmp_path) == tmp_path
+    assert events == ["leaf-verify", "chain-enter", "leaf-verify", "chain-exit"]
+
+
+def test_payload_version_rejects_unsafe_windows_sidecar_before_sqlite_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload_database = tmp_path / "payloads.db"
+    payload_database.touch()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_memory_module,
+        "_require_secure_regular_file",
+        lambda _path, _label: calls.append("main-file-verified"),
+    )
+
+    def reject_sidecar(_path: Path) -> None:
+        calls.append("sidecar-rejected")
+        raise OSError("unsafe stale Windows SQLite sidecar")
+
+    monkeypatch.setattr(
+        agent_memory_module,
+        "_windows_verify_private_sqlite_sidecars",
+        reject_sidecar,
+    )
+    monkeypatch.setattr(
+        agent_memory_module.sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: pytest.fail(
+            "SQLite must not open before stale sidecar validation"
+        ),
+    )
+
+    with pytest.raises(OSError, match="unsafe stale"):
+        agent_memory_module._payload_database_version(payload_database)
+
+    assert calls == ["main-file-verified", "sidecar-rejected"]
+
+
+def test_windows_move_uses_replace_and_write_through_without_copy_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    class _NativeCall:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, source: str, destination: str, flags: int) -> bool:
+            calls.append((source, destination, flags))
+            return True
+
+    class _Kernel32:
+        MoveFileExW = _NativeCall()
+
+    import ctypes
+
+    monkeypatch.setattr(agent_security.os, "name", "nt")
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: _Kernel32(), raising=False
+    )
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", OSError, raising=False)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+
+    agent_security._windows_move_file_replace_write_through(source, destination)
+
+    assert calls == [
+        (os.fspath(source), os.fspath(destination), 0x00000001 | 0x00000008)
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native collision contract")
+def test_windows_private_create_collision_preserves_existing_bytes(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "existing.db"
+    sentinel = b"pre-existing sentinel bytes"
+    existing.write_bytes(sentinel)
+
+    with pytest.raises(FileExistsError):
+        agent_security._windows_create_private_staging(existing)
+
+    assert existing.read_bytes() == sentinel
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native DACL migration contract")
+def test_windows_current_user_directory_is_canonicalized_to_private_dacl(
+    tmp_path: Path,
+) -> None:
+    inherited = tmp_path / "inherited-directory"
+    inherited.mkdir()
+
+    assert agent_security._windows_ensure_private_directory(inherited) == inherited
+    agent_security._windows_verify_private_directory(inherited)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native ACL/rename contract")
+def test_windows_native_manifest_publication_preserves_exact_private_state(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "keyring.json"
+    first = {"version": 1, "active_key_id": "ev-0000000000000000"}
+    second = {"version": 1, "active_key_id": "ev-1111111111111111"}
+
+    agent_security._atomic_write_json(target, first)
+    descriptor = os.open(
+        target,
+        os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+    )
+    try:
+        first_state = agent_security._windows_verify_descriptor(
+            descriptor,
+            target,
+            expected_payload=json.dumps(
+                first,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        )
+    finally:
+        os.close(descriptor)
+
+    agent_security._atomic_write_json(target, second)
+    descriptor = os.open(
+        target,
+        os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+    )
+    try:
+        second_state = agent_security._windows_verify_descriptor(
+            descriptor,
+            target,
+            expected_payload=json.dumps(
+                second,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert (first_state.owner, first_state.dacl) == (
+        second_state.owner,
+        second_state.dacl,
+    )
+    assert target.stat().st_nlink == 1
+    assert not any(path.suffix == ".tmp" for path in tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native reparse-point contract")
+def test_windows_native_manifest_write_rejects_reparse_target(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.json"
+    victim.write_text("unchanged", encoding="utf-8")
+    target = tmp_path / "keyring.json"
+    try:
+        target.symlink_to(victim)
+    except OSError:
+        pytest.skip("symlink creation is unavailable for this Windows account")
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        agent_security._atomic_write_json(target, {"version": 1})
+
+    assert victim.read_text(encoding="utf-8") == "unchanged"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native ancestry contract")
+def test_windows_private_directory_rejects_existing_leaf_below_reparse_ancestor(
+    tmp_path: Path,
+) -> None:
+    real_parent = agent_security._windows_ensure_private_directory(
+        tmp_path / "real-parent"
+    )
+    agent_security._windows_ensure_private_directory(real_parent / "private-leaf")
+    redirected_parent = tmp_path / "redirected-parent"
+    try:
+        redirected_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip(
+            "directory symlink creation is unavailable for this Windows account"
+        )
+
+    with pytest.raises(OSError, match="directory|ancestry|path"):
+        agent_security._windows_ensure_private_directory(
+            redirected_parent / "private-leaf"
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native at-rest DACL contract")
+def test_windows_native_agent_memory_files_and_sqlite_sidecars_are_private(
+    tmp_path: Path,
+) -> None:
+    sidecars: set[str] = set()
+    with AgentMemory(tmp_path, scope="workspace:windows-at-rest") as memory:
+        memory.remember("private Windows state", "Keep this payload protected.")
+        profile = tmp_path / "default"
+        for path in profile.glob("*.db-*"):
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+            try:
+                agent_security._windows_verify_descriptor(
+                    descriptor,
+                    path,
+                    expected_payload=None,
+                    require_protected_security=False,
+                )
+                assert agent_security._windows_descriptor_private_dacl_is_safe(
+                    descriptor
+                )
+            finally:
+                os.close(descriptor)
+            sidecars.add(path.name)
+
+    profile = tmp_path / "default"
+    agent_security._windows_verify_private_directory(profile)
+    agent_security._windows_verify_private_directory(profile / "keys")
+    assert {"echo-veil.db-shm", "echo-veil.db-wal"} <= sidecars
+    assert {"payloads.db-shm", "payloads.db-wal"} <= sidecars
+    explicit_private_files = {
+        profile / "echo-veil.db",
+        profile / "keyring.json",
+        profile / "payloads.db",
+        profile / "profile-lock.db",
+        *tuple((profile / "keys").glob("*.key")),
+    }
+    expected_security = agent_security._windows_expected_private_security()
+    for path in explicit_private_files:
+        descriptor = agent_security._windows_open_private_file(
+            path,
+            writable=False,
+        )
+        try:
+            agent_security._windows_verify_descriptor(
+                descriptor,
+                path,
+                expected_payload=None,
+                expected_security=expected_security,
+            )
+        finally:
+            os.close(descriptor)
 
 
 def test_failed_rotation_manifest_commit_keeps_old_key_and_is_retryable(

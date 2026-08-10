@@ -716,15 +716,20 @@ For staging, keep the AES key in a secret manager and reuse the same key when
 reopening persisted protected vectors:
 
 ```python
+from pathlib import Path
+
 from echo_veil import AesGcmCryptoShield, Oracle, SQLiteStore
 
 shield = AesGcmCryptoShield.from_env()
-store = SQLiteStore("echo-veil.db")
+store = SQLiteStore(Path.home() / ".echo-veil-store" / "echo-veil.db")
 oracle = Oracle(environment="staging", shield=shield, storage=store)
 ```
 
 Always close the store on shutdown, or use it as a context manager. Protect and
-back up the database and cryptographic state together.
+back up the database and cryptographic state together. On Windows, use a
+dedicated database directory: `SQLiteStore` creates a missing parent with a
+private DACL, but rejects an existing parent that is not already private rather
+than rewriting permissions on a shared or working directory.
 
 ## Confidence behavior
 

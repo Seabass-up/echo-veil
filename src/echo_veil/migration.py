@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -23,6 +23,10 @@ from .agent_memory import (
     _reject_symlink_components,
     _validate_profile,
     default_state_dir,
+)
+from .agent_security import (
+    _windows_pinned_directory_chain,
+    _windows_verify_private_directory,
 )
 from .memory_layers import MemoryLayer, MemoryLayerContract
 
@@ -308,32 +312,43 @@ def _read_only_store(
     _reject_symlink_components(profile_dir)
     if not profile_dir.is_dir():
         raise ProfileMigrationVerificationError("profile directory does not exist")
-    info = profile_dir.stat()
-    if os.name != "nt" and (
-        info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
-    ):
-        raise ProfileMigrationVerificationError(
-            "profile directory must be current-user and owner-only"
-        )
-    payload_path = profile_dir / "payloads.db"
-    version = _payload_database_version(payload_path)
-    if version == LEGACY_PAYLOAD_SCHEMA_VERSION:
-        store = _EncryptedPayloadStore(
-            payload_path,
-            legacy_key=_load_existing_key(profile_dir / "agent.key"),
-            read_only=True,
-        )
-    elif version == PAYLOAD_SCHEMA_VERSION:
-        store = _EncryptedPayloadStore(
-            payload_path,
-            keyring=ProfileKeyring(profile_dir, scope, create=False),
-            read_only=True,
-        )
-    else:
-        raise ProfileMigrationVerificationError(
-            "profile payload schema is unsupported or uninitialized"
-        )
+    ancestry = ExitStack()
     try:
-        yield store
-    finally:
-        store.close()
+        if os.name == "nt":
+            ancestry.enter_context(_windows_pinned_directory_chain(profile_dir))
+            _windows_verify_private_directory(profile_dir)
+    except OSError as exc:
+        ancestry.close()
+        raise ProfileMigrationVerificationError(
+            "profile directory Windows DACL or ancestry is unsafe"
+        ) from exc
+    with ancestry:
+        info = profile_dir.stat()
+        if os.name != "nt" and (
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise ProfileMigrationVerificationError(
+                "profile directory must be current-user and owner-only"
+            )
+        payload_path = profile_dir / "payloads.db"
+        version = _payload_database_version(payload_path)
+        if version == LEGACY_PAYLOAD_SCHEMA_VERSION:
+            store = _EncryptedPayloadStore(
+                payload_path,
+                legacy_key=_load_existing_key(profile_dir / "agent.key"),
+                read_only=True,
+            )
+        elif version == PAYLOAD_SCHEMA_VERSION:
+            store = _EncryptedPayloadStore(
+                payload_path,
+                keyring=ProfileKeyring(profile_dir, scope, create=False),
+                read_only=True,
+            )
+        else:
+            raise ProfileMigrationVerificationError(
+                "profile payload schema is unsupported or uninitialized"
+            )
+        try:
+            yield store
+        finally:
+            store.close()

@@ -29,6 +29,16 @@ from typing import Any
 import numpy as np
 
 from ._json import strict_json_loads
+from .agent_security import (
+    _windows_create_private_staging,
+    _windows_ensure_private_directory,
+    _windows_expected_private_security,
+    _windows_open_private_file,
+    _windows_pinned_directory_chain,
+    _windows_verify_descriptor,
+    _windows_verify_private_directory,
+    _windows_verify_private_sqlite_sidecars,
+)
 from .archive import (
     INDEX_KINDS,
     EvictionRecord,
@@ -148,11 +158,50 @@ class SQLiteStore:
             raise ValueError("database path must not contain symbolic links")
         if candidate.exists() and not candidate.is_file():
             raise ValueError("database path must reference a regular file")
-        candidate.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name == "nt":
+            _windows_ensure_private_directory(
+                absolute_candidate.parent,
+                harden_existing=False,
+            )
+        else:
+            candidate.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return str(absolute_candidate), True
 
     @staticmethod
     def _secure_database_file(database_path: str) -> None:
+        path = Path(database_path)
+        if os.name == "nt":
+            _windows_ensure_private_directory(
+                path.parent,
+                harden_existing=False,
+            )
+            with _windows_pinned_directory_chain(path.parent):
+                _windows_verify_private_directory(path.parent)
+                try:
+                    descriptor, state = _windows_create_private_staging(path)
+                except FileExistsError:
+                    descriptor = _windows_open_private_file(
+                        path,
+                        writable=False,
+                        share_write=True,
+                    )
+                    state = None
+                try:
+                    _windows_verify_descriptor(
+                        descriptor,
+                        path,
+                        expected_payload=None,
+                        expected_state=state,
+                        expected_security=(
+                            None
+                            if state is not None
+                            else _windows_expected_private_security()
+                        ),
+                    )
+                finally:
+                    os.close(descriptor)
+            _windows_verify_private_sqlite_sidecars(path)
+            return
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
