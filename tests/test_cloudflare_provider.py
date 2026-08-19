@@ -63,9 +63,13 @@ class _GatewayTransport:
             )
             request_value = json.loads(plaintext)
             if path == "/v1/challenge":
+                assert request_value["profile"] == "echo-universal-qwen3-v1"
+                assert request_value["scope"] == "local-user"
                 response_value = {"challenge_b64": _b64(b"z" * 32)}
             elif path == "/v1/session":
                 assert request_value["proof_b64"] == _b64(b"zk-proof")
+                assert request_value["profile"] == "echo-universal-qwen3-v1"
+                assert request_value["scope"] == "local-user"
                 response_value = {"session": "opaque-session"}
             elif path == "/v1/vector/encrypt":
                 raw = np.asarray(request_value["vector"], dtype=np.float64).tobytes()
@@ -208,6 +212,23 @@ def test_cloudflare_provider_bounds_enclave_protocol_inputs() -> None:
         provider.encrypt_vector("bad\N{NO-BREAK SPACE}session", np.array([1.0]))
     with pytest.raises(ValueError, match="safety limit"):
         provider.encrypt_vector("session", np.ones(16_385))
+
+
+def test_cloudflare_provider_rejects_invalid_profile_or_scope_binding() -> None:
+    with pytest.raises(ValueError, match="profile binding"):
+        CloudflareEnclaveProvider(
+            "https://memory.example.com",
+            "id",
+            "secret",
+            profile="profile with spaces",
+        )
+    with pytest.raises(ValueError, match="scope binding"):
+        CloudflareEnclaveProvider(
+            "https://memory.example.com",
+            "id",
+            "secret",
+            scope="",
+        )
 
 
 def test_urllib_transport_redacts_upstream_error_body(monkeypatch) -> None:

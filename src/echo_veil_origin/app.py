@@ -18,6 +18,7 @@ from .core import (
 )
 from ._json import strict_json_loads
 from .openfhe_engine import OpenFheCkksEngine
+from .native_attestation import AzureMaaEvidenceProvider
 from .proof_verifier import RistrettoProofVerifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -74,6 +75,9 @@ def build_service() -> tuple[EnclaveService, str]:
         provider_id=_required_env("ECHO_VEIL_PROVIDER_ID"),
         measurement=_required_env("ECHO_VEIL_MEASUREMENT"),
         key_id=_required_env("ECHO_VEIL_CKKS_KEY_ID"),
+        cce_policy_hash=_required_env("ECHO_VEIL_CCE_POLICY_HASH"),
+        maa_policy_hash=_required_env("ECHO_VEIL_MAA_POLICY_HASH"),
+        workload_digest=_required_env("ECHO_VEIL_WORKLOAD_DIGEST"),
         region=os.environ.get("ECHO_VEIL_AZURE_REGION", "eastus2"),
     )
     transport_key: X25519PrivateKey = (  # gitleaks:allow -- value is loaded at runtime
@@ -86,6 +90,10 @@ def build_service() -> tuple[EnclaveService, str]:
         _required_env("ECHO_VEIL_ATTESTATION_SIGNING_KEY_FILE"),
         transport_public_key,
         config,
+        AzureMaaEvidenceProvider(
+            _required_env("ECHO_VEIL_MAA_SIDECAR_URL"),
+            _required_env("ECHO_VEIL_MAA_ENDPOINT"),
+        ),
     )
     verifier = RistrettoProofVerifier(
         _required_env("ECHO_VEIL_ZKP_BINARY"),

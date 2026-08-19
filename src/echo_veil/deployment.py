@@ -9,6 +9,7 @@ import os
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ._json import strict_json_loads
+from .azure_attestation import AzureMaaJwtVerifier
 from .cloudflare_provider import CloudflareEnclaveProvider, CloudflareTransport
 from .crypto_shield import Ed25519AttestationVerifier, EnclaveCryptoShield
 from .zkp import RistrettoSchnorrProofProvider
@@ -79,10 +80,20 @@ def build_production_enclave_shield_from_env(
         gateway_url,
         _required_env("CF_ACCESS_CLIENT_ID"),
         _required_env("CF_ACCESS_CLIENT_SECRET"),
+        profile=_required_env("ECHO_VEIL_PROFILE"),
+        scope=_required_env("ECHO_VEIL_SCOPE"),
         transport=transport,
     )
     verifier = Ed25519AttestationVerifier(
-        _attestation_public_key(), _allowed_measurements()
+        _attestation_public_key(),
+        _allowed_measurements(),
+        AzureMaaJwtVerifier.from_jwks_file(
+            _required_env("ECHO_VEIL_MAA_ISSUER"),
+            _required_env("ECHO_VEIL_MAA_JWKS_FILE"),
+        ),
+        expected_cce_policy_hash=_required_env("ECHO_VEIL_CCE_POLICY_HASH"),
+        expected_maa_policy_hash=_required_env("ECHO_VEIL_MAA_POLICY_HASH"),
+        expected_workload_digest=_required_env("ECHO_VEIL_WORKLOAD_DIGEST"),
     )
     proof_provider = RistrettoSchnorrProofProvider.from_env()
     raw_security = os.environ.get("ECHO_VEIL_MINIMUM_CKKS_SECURITY_BITS", "128")

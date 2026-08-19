@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from ._json import require_exact_keys, strict_json_loads
+from .attestation_binding import build_attestation_runtime_data
 from .vectors import Vector, as_vector, cosine_similarity
 
 AES_256_KEY_BYTES = 32
@@ -372,6 +373,21 @@ class ZeroKnowledgeProofProvider(Protocol):
         raise NotImplementedError
 
 
+class NativeAttestationVerifier(Protocol):
+    """Validate fresh vendor evidence bound to one runtime-data blob."""
+
+    def verify(
+        self,
+        evidence: bytes,
+        runtime_data: bytes,
+        *,
+        launch_measurement: str,
+        cce_policy_hash: str,
+        maa_policy_hash: str,
+    ) -> object:
+        raise NotImplementedError
+
+
 class Ed25519AttestationVerifier:
     """Verify normalized enclave claims signed by a deployment trust root.
 
@@ -384,7 +400,11 @@ class Ed25519AttestationVerifier:
         self,
         public_key: Ed25519PublicKey,
         allowed_measurements: set[str] | frozenset[str],
+        native_verifier: NativeAttestationVerifier,
         *,
+        expected_cce_policy_hash: str,
+        expected_maa_policy_hash: str,
+        expected_workload_digest: str,
         maximum_lifetime_seconds: float = 300.0,
     ) -> None:
         if not isinstance(public_key, Ed25519PublicKey):
@@ -407,6 +427,21 @@ class Ed25519AttestationVerifier:
             raise ValueError("maximum_lifetime_seconds must be within (0, 600]")
         self._public_key = public_key
         self._measurements = measurements
+        if not all(
+            _is_bounded_identifier(value)
+            for value in (
+                expected_cce_policy_hash,
+                expected_maa_policy_hash,
+                expected_workload_digest,
+            )
+        ):
+            raise ValueError("native attestation policy bindings are invalid")
+        if not callable(getattr(native_verifier, "verify", None)):
+            raise TypeError("native_verifier must validate vendor evidence")
+        self._native_verifier = native_verifier
+        self._expected_cce_policy_hash = expected_cce_policy_hash
+        self._expected_maa_policy_hash = expected_maa_policy_hash
+        self._expected_workload_digest = expected_workload_digest
         self._maximum_lifetime = float(maximum_lifetime_seconds)
 
     def verify(self, evidence: bytes, nonce: bytes) -> VerifiedEnclave:
@@ -435,6 +470,7 @@ class Ed25519AttestationVerifier:
                 claims,
                 {
                     "attestation_authority",
+                    "cce_policy_hash",
                     "ckks_security_bits",
                     "expires_at",
                     "hardware_isolation",
@@ -442,21 +478,42 @@ class Ed25519AttestationVerifier:
                     "issued_at",
                     "key_id",
                     "measurement",
+                    "maa_policy_hash",
+                    "native_evidence_b64",
                     "nonce_b64",
                     "platform",
                     "provider_id",
                     "region",
+                    "runtime_binding_b64",
                     "transport_public_key_b64",
+                    "workload_digest",
                     "zkp_access_gate",
                 },
             )
             encoded_nonce = claims["nonce_b64"]
             encoded_transport_key = claims["transport_public_key_b64"]
-            if not isinstance(encoded_nonce, str) or not isinstance(
-                encoded_transport_key, str
+            encoded_native_evidence = claims["native_evidence_b64"]
+            encoded_runtime_binding = claims["runtime_binding_b64"]
+            if (
+                not isinstance(encoded_nonce, str)
+                or not isinstance(encoded_transport_key, str)
+                or not isinstance(encoded_native_evidence, str)
+                or not isinstance(encoded_runtime_binding, str)
             ):
                 raise ValueError
             bound_nonce = _decode_urlsafe_base64(encoded_nonce, "nonce_b64")
+            transport_public_key = _decode_urlsafe_base64(
+                encoded_transport_key,
+                "transport_public_key_b64",
+            )
+            native_evidence = _decode_urlsafe_base64(
+                encoded_native_evidence,
+                "native_evidence_b64",
+            )
+            runtime_binding = _decode_urlsafe_base64(
+                encoded_runtime_binding,
+                "runtime_binding_b64",
+            )
         except Exception as exc:
             raise ValueError(
                 "attestation evidence signature or format is invalid"
@@ -464,7 +521,8 @@ class Ed25519AttestationVerifier:
         if not hmac.compare_digest(bound_nonce, nonce):
             raise ValueError("attestation evidence is not bound to this nonce")
         if (
-            claims.get("attestation_authority") != "azure-key-vault-secure-key-release"
+            claims.get("attestation_authority")
+            != "microsoft-azure-attestation+secure-key-release-v1"
             or claims.get("platform") != "azure-amd-sev-snp-confidential-vm"
             or claims.get("hardware_isolation") is not True
             or claims.get("zkp_access_gate") is not True
@@ -483,6 +541,37 @@ class Ed25519AttestationVerifier:
         measurement = str(measurement_value)
         if measurement not in self._measurements:
             raise ValueError("attestation measurement is not approved")
+        cce_policy_hash = claims.get("cce_policy_hash")
+        maa_policy_hash = claims.get("maa_policy_hash")
+        workload_digest = claims.get("workload_digest")
+        if (
+            cce_policy_hash != self._expected_cce_policy_hash
+            or maa_policy_hash != self._expected_maa_policy_hash
+            or workload_digest != self._expected_workload_digest
+        ):
+            raise ValueError("native attestation policy binding is not approved")
+        expected_runtime_binding = build_attestation_runtime_data(
+            nonce=nonce,
+            transport_public_key=transport_public_key,
+            provider_id=str(provider_value),
+            measurement=measurement,
+            key_id=str(key_value),
+            cce_policy_hash=self._expected_cce_policy_hash,
+            maa_policy_hash=self._expected_maa_policy_hash,
+            workload_digest=self._expected_workload_digest,
+        )
+        if not hmac.compare_digest(runtime_binding, expected_runtime_binding):
+            raise ValueError("attestation runtime binding is invalid")
+        try:
+            self._native_verifier.verify(
+                native_evidence,
+                expected_runtime_binding,
+                launch_measurement=measurement,
+                cce_policy_hash=self._expected_cce_policy_hash,
+                maa_policy_hash=self._expected_maa_policy_hash,
+            )
+        except Exception as exc:
+            raise ValueError("native attestation evidence is invalid") from exc
         issued_value = claims.get("issued_at")
         expires_value = claims.get("expires_at")
         bits_value = claims.get("ckks_security_bits")
@@ -498,7 +587,11 @@ class Ed25519AttestationVerifier:
         issued_at = float(issued_value)
         expires_at = float(expires_value)
         current = time.time()
-        if issued_at > current + 30.0 or expires_at <= current:
+        if (
+            issued_at > current + 30.0
+            or expires_at <= current
+            or expires_at < issued_at
+        ):
             raise ValueError("attestation evidence is not currently valid")
         if expires_at - issued_at > self._maximum_lifetime:
             raise ValueError("attestation evidence lifetime exceeds policy")
@@ -511,10 +604,7 @@ class Ed25519AttestationVerifier:
             hardware_isolation=True,
             zkp_access_gate=True,
             homomorphic_similarity=True,
-            transport_public_key=_decode_urlsafe_base64(
-                encoded_transport_key,
-                "transport_public_key_b64",
-            ),
+            transport_public_key=transport_public_key,
         )
 
 

@@ -18,6 +18,7 @@ from echo_veil import (
     VerifiedEnclave,
 )
 from echo_veil.crypto_shield import ProtectedVector
+from echo_veil.attestation_binding import build_attestation_runtime_data
 
 
 class _TestEnclaveProvider:
@@ -305,15 +306,50 @@ def test_enclave_crypto_shield_rejects_short_zkp_challenge() -> None:
 def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
     private_key = Ed25519PrivateKey.generate()
     nonce = b"n" * 32
+    transport_public_key = b"k" * 32
+    cce_policy_hash = "cce-policy-hash"
+    maa_policy_hash = "maa-policy-hash"
+    workload_digest = "sha256:workload"
+    runtime_binding = build_attestation_runtime_data(
+        nonce=nonce,
+        transport_public_key=transport_public_key,
+        provider_id="provider",
+        measurement="approved",
+        key_id="key-1",
+        cce_policy_hash=cce_policy_hash,
+        maa_policy_hash=maa_policy_hash,
+        workload_digest=workload_digest,
+    )
+
+    class NativeVerifier:
+        def verify(
+            self,
+            evidence: bytes,
+            runtime_data: bytes,
+            **bindings: str,
+        ) -> None:
+            assert evidence == b"native-evidence"
+            assert runtime_data == runtime_binding
+            assert bindings == {
+                "launch_measurement": "approved",
+                "cce_policy_hash": cce_policy_hash,
+                "maa_policy_hash": maa_policy_hash,
+            }
+
     now = time.time()
     claims = json.dumps(
         {
-            "attestation_authority": "azure-key-vault-secure-key-release",
+            "attestation_authority": "microsoft-azure-attestation+secure-key-release-v1",
+            "cce_policy_hash": cce_policy_hash,
             "nonce_b64": base64.urlsafe_b64encode(nonce).decode(),
             "platform": "azure-amd-sev-snp-confidential-vm",
             "provider_id": "provider",
             "region": "northamerica",
             "measurement": "approved",
+            "maa_policy_hash": maa_policy_hash,
+            "native_evidence_b64": base64.urlsafe_b64encode(
+                b"native-evidence"
+            ).decode(),
             "key_id": "key-1",
             "issued_at": now,
             "expires_at": now + 60,
@@ -321,7 +357,11 @@ def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
             "hardware_isolation": True,
             "zkp_access_gate": True,
             "homomorphic_similarity": True,
-            "transport_public_key_b64": base64.urlsafe_b64encode(b"k" * 32).decode(),
+            "runtime_binding_b64": base64.urlsafe_b64encode(runtime_binding).decode(),
+            "transport_public_key_b64": base64.urlsafe_b64encode(
+                transport_public_key
+            ).decode(),
+            "workload_digest": workload_digest,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -334,16 +374,28 @@ def test_ed25519_attestation_verifier_binds_nonce_and_measurement() -> None:
             ).decode(),
         }
     ).encode()
-    verifier = Ed25519AttestationVerifier(private_key.public_key(), {"approved"})
+    verifier = Ed25519AttestationVerifier(
+        private_key.public_key(),
+        {"approved"},
+        NativeVerifier(),
+        expected_cce_policy_hash=cce_policy_hash,
+        expected_maa_policy_hash=maa_policy_hash,
+        expected_workload_digest=workload_digest,
+    )
 
     verified = verifier.verify(evidence, nonce)
     assert verified.measurement == "approved"
     with pytest.raises(ValueError, match="nonce"):
         verifier.verify(evidence, b"x" * 32)
     with pytest.raises(ValueError, match="measurement"):
-        Ed25519AttestationVerifier(private_key.public_key(), {"different"}).verify(
-            evidence, nonce
-        )
+        Ed25519AttestationVerifier(
+            private_key.public_key(),
+            {"different"},
+            NativeVerifier(),
+            expected_cce_policy_hash=cce_policy_hash,
+            expected_maa_policy_hash=maa_policy_hash,
+            expected_workload_digest=workload_digest,
+        ).verify(evidence, nonce)
 
 
 def test_oracle_production_rejects_aes_gcm_shield() -> None:
