@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
   "source_date_epoch": 1784937600,
-  "tested_on": "2026-07-25",
+  "tested_on": "2026-08-11",
   "openclaw_version": "2026.7.1-2",
   "plugin": {
     "id": "echo-veil",
     "version": "0.7.0",
-    "archive_sha256": "0f765e5f3199e34f5cdc52a1e37de4749341b1c16cb8cf31d9896f614de614f0",
+    "archive_sha256": "9700030430239ef90c93f0e6056a4a4548711ce4ee1c5baba588d8ea15ba3041",
     "entrypoint_sha256": "b8268ffcc423d3fce70616571e827d3d2b0fd64c647276a0e5b911a4595af578"
   },
   "python": {
     "distribution": "echo-veil",
     "version": "0.7.0",
-    "wheel_sha256": "93e63fa45343927bf426aeaa0da0f63bc8c4e25b52ece365c4090ac964b6733d",
+    "wheel_sha256": "64e28b38b54dc7627160b07c5c174c8dc9ae3be3db1949601adaa3c367d5df68",
     "console_body_sha256": "fe4b01dda1ce3a070d6a727d9ff917a78a05090ca87480a12d1c5b5cc00c0019"
   },
   "profile": {

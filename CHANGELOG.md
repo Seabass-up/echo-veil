@@ -5,7 +5,29 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Ordinary `echo_veil_recall` and `echo_veil_context` are lifecycle-neutral.
+  Asking a question no longer advances decay, reinforcement, or twilight
+  eviction. Mutation remains available only through an explicit
+  `mutate_lifecycle=True` Python recall call.
+- Echo Veil is the primary mutable memory store, not a veto over wiki, files,
+  or other host evidence. The shared Agent Skill and Goose recipe no longer
+  require stopping all work when protection is unavailable.
+- Added a first-class Grok Build connector (`integrations/grok`) with MCP,
+  skill, marketplace, and hooks. Grok `UserPromptSubmit` injects protected
+  context and is documented as non-blocking; `PreToolUse` can deny
+  unpreflighted `spawn_subagent` calls. The hook parser accepts Grok's
+  camelCase envelope.
+
 ### Security
+
+- Isolated Codex profiles now disable the plugin loader, account-level apps,
+  the independently enabled remote plugin catalog, and app-backed MCP
+  connectors while applying an all-connectors-denied policy. The launcher
+  installs only the receipt-bound Echo hook and skill assets directly, so an
+  authenticated account cannot silently widen the Echo-only interactive tool
+  boundary.
 
 - Made Windows local-memory publication fail closed: key manifests now use
   private-at-creation native staging, binary fsync, same-volume write-through
@@ -17,6 +39,47 @@ All notable changes to Echo Veil are documented here. The project follows
   reject broad existing parents without rewriting caller-owned directory DACLs.
   Persisted raw keys are reopened with binary, non-inheritable Windows CRT
   descriptors so key bytes cannot be changed or truncated by text translation.
+- Replaced signed configuration-only enclave claims with native Azure
+  attestation verification bound to the nonce, ephemeral transport key,
+  workload digest, CCE/MAA policy, issuer/JWKS, launch measurement, and
+  non-debuggable/non-migratable SEV-SNP state.
+- Bound CKKS ciphertext wrappers and sessions to verified identity, profile,
+  scope, key fingerprint, dimension, version, and authenticated metadata;
+  rejected Ristretto identity public keys and added cross-client/tamper/replay
+  regressions.
+- Authenticated lifecycle, supersession, operation, vector-row, keyed-term, and
+  tombstone metadata, and added monotonic profile generation/CAS protection for
+  stale simultaneous writers.
+
+### Added
+
+- Added signed lifecycle-neutral `preflight_v2` receipts with exact
+  query/session/turn/model/tool/artifact bindings, one-use replay defense,
+  adaptive one-or-two-result evidence, compact ritual status, multilingual
+  causal intent routing, conservative token budgets, and payload-free stage
+  telemetry.
+- Added an owner-only serialized Unix-domain broker for warm Pi/Codex access.
+  It enforces bounded frames, same-user/socket permissions, sequential dispatch,
+  generic errors, payload-free transport telemetry, and fail-closed brokered
+  MCP startup.
+- Added receipt-bound Pi `0.84.1` and Codex `0.146.0` isolated boundaries. Pi
+  verifies the receipt at its provider boundary with sequential tools and
+  one-use consent; Codex binds its executable, wheel, entry points,
+  plugin/hooks/MCP, model, configuration, and optional broker authority.
+
+### Changed
+
+- Kept degraded Always-Available retrieval manual, read-only, visibly
+  non-semantic, mutation-disabled, and incapable of authorizing a required
+  model turn.
+- Explicitly disqualified direct Codex collaboration because children inherit
+  root context without a task-specific receipt, and downgraded direct Codex
+  singular-authority claims when competing mutable-memory plugins are exposed.
+- Expanded the real Qwen3 quality gate with concurrent Pi/Codex broker calls,
+  poisoned memories, forced outages, profile mutation snapshots, and a warm
+  p95 target below 500 ms. The 2026-08-19 run passed at 483.64 ms with zero
+  lost competing candidates, zero unrequested mutations, and zero
+  provider/agent/tool activity during required-gate failure.
 
 ## [0.7.0] - 2026-07-25
 

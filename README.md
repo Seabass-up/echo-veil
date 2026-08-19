@@ -206,6 +206,27 @@ codex mcp add echo-veil -- \
     --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
 ```
 
+Pi and Codex can share one warm, serialized profile through the optional local
+broker instead of opening Python for every preflight. Create an owner-only
+runtime directory, start the broker in the foreground, and pass the same socket
+to each shielded launcher:
+
+```bash
+echo-veil-agent --state-dir /absolute/echo-state \
+  --profile echo-universal-qwen3-v1 --scope local-user \
+  --embedder ollama --embedding-model qwen3-embedding:latest \
+  --embedding-dimension 1024 \
+  --broker-socket /absolute/owner-only-run/echo.sock broker
+```
+
+The parent must be owner-only; the broker creates a `0600` Unix socket, checks
+the peer user where the platform exposes it, accepts bounded JSON frames, and
+dispatches one request at a time. Set `ECHO_VEIL_BROKER_SOCKET` for Pi or pass
+`--broker-socket` to `echo-veil-shielded-run`. If the broker is absent,
+degraded, or returns invalid evidence, required host startup fails closed. The
+Always-Available path remains a separate manual, read-only diagnostic and can
+never satisfy the required preflight.
+
 The repository root is also a Codex plugin (`.codex-plugin/plugin.json` plus
 `.mcp.json`) with a local marketplace descriptor in
 `.agents/plugins/marketplace.json`. Claude Code has an equivalent local
@@ -232,21 +253,26 @@ recipe instructions. OpenClaw registers the ritual through its exclusive memory
 capability, and Algo CLI injects it into ordinary chat plus Agent Block prompts.
 The policy requires doctor-backed protected recall before substantive work,
 Contextual Logic for decision rationale, ambiguity/conflict preservation, and
-no mutable plaintext fallback. Algo required mode enforces its pre-model stop in
+no mutable plaintext fallback. A host-validated exact-turn preflight carries a
+compact `runtime_status`; `ritual_satisfied=true` replaces redundant doctor,
+recall, and applicable context calls for that turn only. It never authorizes a
+write, inferential access, collaboration, or later turn. Algo required mode enforces its pre-model stop in
 runtime code. OpenClaw enforces an early reply claim, protected prompt
 construction, and a one-use pre-model attestation when protected models are
-pinned to `agentRuntime.id="openclaw"`. Pi's native extension performs the same
-required recall in its input lifecycle, rechecks expanded skill/template
-prompts, aborts unauthorized agent starts, and blocks tools outside the
-authorized turn. Codex and Claude Code bundle a shared model-free hook for root
+pinned to `agentRuntime.id="openclaw"`. Pi's native extension obtains one
+signed, lifecycle-neutral `preflight_v2` receipt, rechecks expanded
+skill/template prompts, consumes the receipt at the provider boundary, aborts
+unauthorized agent starts, and blocks tools outside the authorized turn. Codex
+and Claude Code bundle a shared model-free hook for root
 `UserPromptSubmit` and supported `Agent` tool input. The installed Codex
 collaboration router currently bypasses its `PreToolUse` hook, so direct Codex
 subagents are explicitly outside the protected claim. OpenCode uses a
 global/project plugin to run recall at `chat.message`, require the matching
 message at `chat.params`, and preflight supported `Task` prompts. Each validates
-the scoped-v2 Qwen3 profile, recalls two candidates, traces bounded Contextual
-Logic for causal prompts, and returns only escaped, size-bounded untrusted
-evidence. A supported spawn is rewritten with task-specific protected context
+the scoped-v2 Qwen3 profile, preserves both candidates when ambiguity or
+conflict requires them, traces bounded Contextual Logic for multilingual causal
+prompts, and returns escaped, token/size-bounded untrusted evidence with
+payload-free latency telemetry. A supported spawn is rewritten with task-specific protected context
 before the child exists. Any readiness, retrieval, integrity, or output-bound
 failure stops the qualified root turn or denies the spawn without exposing the
 underlying error or consulting host memory.
@@ -273,11 +299,14 @@ Run `python scripts/verify_host_authority.py --installed` for the digest-bound
 host evidence matrix. It never treats adapter presence or a matching executable
 as proof of a live host gate. Use `--require-current HOST` only after reviewing
 the exact qualified boundary, and rerun the release smokes after any source or
-host-version drift.
+host-version drift. The current Pi `0.84.1` and Codex `0.146.0` implementations
+are intentionally recorded as `runtime_release_stale` until these exact changes
+are committed, released as immutable artifacts, installed, and requalified.
 
-Codex requires the current root hook to be enabled and explicitly trusted by
-exact hash for direct plugin-mode root turns. For a harder headless boundary,
-pipe the task to `echo-veil-shielded-run codex`; it preflights before Codex
+Direct Codex plugin mode can provide protected Echo recall, but it is not a
+singular-memory claim when other mutable plugins are exposed, and direct
+collaboration does not receive a child-specific receipt. For the receipt-bound
+boundary, use `echo-veil-shielded-run codex`; it preflights before Codex
 exists, ignores ambient user configuration, injects one required Echo MCP
 server, disables native memory, Chronicle, goals, plugins, and every current
 parallel-agent feature, uses an ephemeral session, and defaults to a read-only
@@ -285,7 +314,11 @@ sandbox. Codex receives a temporary owner-only home containing only a link to
 the existing owner-only auth file; ambient skills, model cache, goals, and
 session state are not exposed. An `OPENAI_API_KEY` may supply auth when no
 Codex auth file exists. `--sandbox workspace-write` and `--allow-non-git` are
-explicit opt-ins.
+explicit opt-ins. The launcher also supports an isolated interactive profile
+with `--codex-interactive`. Both modes require an out-of-band artifact authority
+ID produced by `--print-codex-artifact-receipt`; it binds Codex `0.146.0`, the
+wheel and entry points, plugin/hook/MCP files, model, configuration, and optional
+broker signing authority. One-byte drift blocks startup.
 
 ```bash
 printf '%s' 'Inspect the repository and report findings.' |
@@ -446,8 +479,11 @@ appear in application source.
 
 The production factory additionally requires the base64 Ed25519 trust key in
 `ECHO_VEIL_ATTESTATION_PUBLIC_KEY`, a JSON array in
-`ECHO_VEIL_ALLOWED_MEASUREMENTS`, and the Ristretto helper/key variables
-documented in the deployment runbook.
+`ECHO_VEIL_ALLOWED_MEASUREMENTS`, exact profile/scope, the approved CCE policy
+hash, MAA policy hash, workload digest, a pinned MAA issuer and owner-only
+offline JWKS file, and the Ristretto helper/key variables documented in the
+deployment runbook. The native MAA JWT binds the nonce and ephemeral transport
+key through SEV-SNP report data; the Ed25519 envelope alone is insufficient.
 
 `RistrettoSchnorrProofProvider.from_env()` uses the compiled
 `echo-veil-zkp` helper and an owner-only identity key. The included origin

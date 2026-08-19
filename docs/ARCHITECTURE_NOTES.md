@@ -65,14 +65,21 @@ Implemented and tested:
   reimplementing lifecycle rules per host. Bundled transports bind their host
   identity into protected provenance without treating caller identity as
   Long-Term or Contextual Logic evidence.
+- An owner-only Unix-domain local broker that keeps one profile open, validates
+  bounded same-user clients, serializes Pi/Codex operations, and emits only
+  payload-free latency telemetry. Required MCP/preflight clients reject an
+  unavailable or degraded broker; Windows retains direct serialized RPC.
 - One byte-identical fail-closed Agent Skill for Codex, Claude Code, Hermes,
   Pi, OpenCode, and Droid, with equivalent recipe policy for Goose. OpenClaw
   injects the same ritual through its selected memory capability and Algo
-  injects it in runtime code.
+  injects it in runtime code. A validated exact-turn compact runtime status can
+  satisfy completed doctor/recall/context steps without duplicate calls, but it
+  cannot authorize mutation, inference, collaboration, or another turn.
 - Host-owned hard-gate adapters where the current lifecycle permits one:
-  Algo CLI and Pi stop their complete pre-model paths; OpenClaw uses an early
-  reply claim plus single-use pre-model attestation on its OpenClaw runtime;
-  Codex and Claude Code gate root paths; Claude Code and OpenCode respectively
+  Algo CLI and receipt-bound Pi stop their complete pre-model paths; OpenClaw
+  uses an early reply claim plus single-use pre-model attestation on its
+  OpenClaw runtime; the Codex direct hook can stop a root path but remains
+  non-singular; Claude Code gates roots and Claude Code/OpenCode respectively
   gate supported Agent and Task paths;
   and Hermes pairs ephemeral pre-LLM context with an exact
   session/task/turn plus per-request-nonce provider-execution gate. Native or
@@ -80,18 +87,24 @@ Implemented and tested:
   paths that skip those hooks remain explicitly unqualified. Ordinary Hermes
   plugin mode must visibly load the plugin because its host does not fail
   startup when a general plugin fails to register.
-- A shield-owned headless launcher for Codex, Droid, Goose, and Hermes. It completes
+- A shield-owned launcher for Codex, Pi, Droid, Goose, and Hermes. It completes
   protected semantic preflight before starting the host and passes context only
   over child stdin. Codex ignores ambient user config, receives only the
   required Echo MCP server, receives an isolated owner-only auth view instead
-  of ambient skills/cache/state, and disables native memory and parallel agents;
+  of ambient skills/cache/state, and disables native memory and parallel agents.
+  Its headless and interactive profiles bind Codex 0.146.0, the installed wheel,
+  entry points, plugin/configuration, model, and optional broker authority in one
+  out-of-band artifact receipt. Pi loads only its 0.84.1 receipt-bound extension;
   Goose suppresses its default profile/session; Droid disables its
   unpreflighted `Task` path. Hermes receives a temporary owner-only home with
   one digest-bound plugin, disabled native memory, a fixed loopback provider,
   and Echo-only tools. Its requested subcommand is registered last so plugin
-  failure cannot fall through to model execution. Direct Codex collaboration,
-  bare Droid `exec`, interactive Droid, ordinary Goose recipe runs, and
-  ordinary Hermes plugin mode are outside this headless boundary.
+  failure cannot fall through to model execution. Direct Codex exposes
+  protected recall but is not singular when competing mutable plugins remain;
+  its collaboration children receive no task-specific receipt. Direct Codex
+  collaboration, bare Droid `exec`, interactive Droid, ordinary Goose recipe
+  runs, and ordinary Hermes plugin mode are outside their named isolated
+  boundaries.
 - A Mercury readiness skill that reports the local boundary only. Mercury's
   documented skill interface does not expose a safe structured custom-tool
   transport, so remember, recall, and forget are deliberately unavailable.

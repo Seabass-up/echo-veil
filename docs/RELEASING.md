@@ -104,7 +104,18 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    plugin hooks, and explicitly disable OpenClaw's built-in `session-memory`
    hook. Run `python scripts/verify_host_authority.py --installed` and review
    every boundary as current, conditional, externally unbound,
-   repository-only, blocked, or stale.
+   repository-only, release-pending, blocked, or stale. A Pi or Codex boundary
+   recorded as `runtime_release_stale` must not be promoted merely because the
+   host executable version matches.
+   For Pi, verify `integrations/pi/artifact-receipt.json` from both TypeScript
+   and Python and pin that exact authority ID in the isolated launcher. For
+   Codex, run the receipt-only mode with
+   `echo-veil-shielded-run codex --model MODEL --print-codex-artifact-receipt`,
+   review the path-free receipt, install the
+   exact wheel, and rerun both headless and isolated-interactive modes with its
+   out-of-band authority ID. One-byte drift in the host executable, wheel,
+   entry points, plugin, hooks, MCP config, model/configuration, or broker
+   authority must block startup.
    Use repeated `--require-current HOST` arguments for the installed boundaries
    the release claims. This digest and version check does not replace the live
    smokes. Run zero-model outage smokes for OpenClaw, Codex, Claude Code, Pi,
@@ -116,7 +127,15 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    and must not load the operator's ambient skills, cache, goals, plugins, or
    session state. Separately exercise the supported Claude
    Agent and OpenCode Task spawn paths. Direct Codex collaboration remains
-   excluded until its host exposes a blockable event.
+   excluded until its host exposes a blockable task-specific event. Direct
+   Codex also remains non-singular while any competing mutable-memory plugin is
+   exposed. Direct ambient Pi stacks retain extension-order risk; use the
+   isolated receipt-bound Pi launcher for a singular claim.
+   Run `uv run --locked python scripts/quality_benchmark.py` with local Qwen3.
+   The release gate requires zero lost ambiguous/conflicting candidates, zero
+   unrequested preflight mutations, zero provider/agent/tool activity on forced
+   outage, poisoned memory remaining escaped untrusted evidence, and warm
+   concurrent Pi/Codex broker p95 below 500 ms on the qualification machine.
    OpenClaw must also block a hot-reload attempt to re-enable native
    session-memory. Hermes and normal Goose recipe mode should be smoke-tested in isolated
    temporary host profiles so release checks never mutate an operator's

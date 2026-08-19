@@ -126,8 +126,9 @@ assembly, or authoritative delivery.
 The layer is SQLite read-only and cannot create a profile, remember, promote,
 forget, reindex, lower its safe threshold, authorize inferential recall, or
 mutate decay and reinforcement state. It still authenticates and decrypts the
-shielded semantic contract for every returned record. A long-lived CLI or MCP process makes a one-way
-transition into this mode if a later embedding call detects a service outage.
+shielded semantic contract for every returned record. A long-lived CLI, MCP,
+or broker process makes a one-way transition into this mode if a later embedding
+call detects a service outage.
 Paraphrases may be missed. Corrupt storage, invalid keys, model-identity
 mismatch, malformed embedding responses, and other trust failures still stop
 the adapter rather than entering degraded mode. Disable the outage path with
@@ -157,6 +158,33 @@ The console entry point accepts payload-bearing requests only through stdin:
 printf '%s' '{"action":"doctor","arguments":{}}' | echo-veil-agent rpc
 echo-veil-agent mcp
 ```
+
+### Serialized local broker
+
+For Pi/Codex concurrency and warm preflight latency, `echo-veil-agent broker`
+keeps one profile open and serializes bounded RPC/MCP calls over an owner-only
+Unix socket. Its parent directory must be owned by the current user with no
+group/other permissions; the socket is created as `0600`, peers are checked by
+UID when supported, messages are capped at 1 MiB, and failures expose only a
+generic error. Broker telemetry contains timing numbers and
+`payload_included=false`, never the query, topic, payload, or filesystem path.
+
+```bash
+echo-veil-agent --state-dir /absolute/echo-state \
+  --profile echo-universal-qwen3-v1 --scope local-user \
+  --embedder ollama --embedding-model qwen3-embedding:latest \
+  --embedding-dimension 1024 \
+  --broker-socket /absolute/owner-only-run/echo.sock broker
+```
+
+Use `ECHO_VEIL_BROKER_SOCKET` for a native Pi extension, or pass
+`--broker-socket /absolute/owner-only-run/echo.sock` to a shielded Pi/Codex
+launcher. MCP startup validates semantic doctor readiness through the broker;
+a missing/degraded broker stops before the host boundary. Do not use two
+brokers for one profile. Direct non-broker writers remain protected by the
+profile lease and generation/CAS checks, but the broker is the preferred
+single-writer QoS path. Windows currently uses direct RPC because this broker
+requires Unix-domain socket ownership semantics.
 
 Codex consumes `mcp` over stdio. The checked-in `.mcp.json` uses the installed
 `echo-veil-agent mcp` entry point when the repository is installed as a Codex
@@ -191,11 +219,15 @@ codex mcp add echo-veil -- \
     --embedding-model qwen3-embedding:latest --embedding-dimension 1024 mcp
 ```
 
-The installed Codex 0.144.5 collaboration router bypassed `PreToolUse` during
-both healthy and deny-only spawn attempts. Direct Codex child creation is
-therefore unqualified even though the bounded alias parser and hook contract
-remain tested. Use the separate shield-owned headless boundary when one
-fail-closed Codex turn is required:
+Codex 0.146.0 direct collaboration delivered a delegated task without a fresh
+task-specific Echo envelope; the child inherited the root turn's preflight.
+The same direct environment also exposed a separate mutable second-brain plugin.
+Direct root mode can therefore use protected Echo recall, but it is not a
+singular-memory boundary, and direct child creation is unqualified. A direct
+root preflight carries
+`collaboration_authorized=false`; inheriting that root envelope never qualifies
+a child, and agents must not reinterpret it as permission to delegate. Use the
+artifact-bound shielded boundary when a fail-closed Codex turn is required:
 
 ```bash
 printf '%s' 'Inspect the repository and report findings.' |
@@ -204,23 +236,39 @@ printf '%s' 'Inspect the repository and report findings.' |
 
 That launcher completes protected semantic preflight before creating Codex,
 ignores ambient user configuration, and creates a temporary owner-only Codex
-home containing only a link to the existing owner-only auth file. When no
+home containing only an owner-only copy of the existing auth file. When no
 Codex auth file exists, an explicitly supplied `OPENAI_API_KEY` can provide
 authentication. Ambient skills, model cache, goals, plugins, and session state
 are not exposed. The launcher injects exactly one required Echo MCP server,
 enables strict config parsing, disables native memory, Chronicle, goals,
-plugins, and the current
-`multi_agent`, `multi_agent_v2`, and fan-out paths, and uses an ephemeral
-session. It defaults to `--sandbox read-only`; workspace mutation and non-Git
+plugins, the remote plugin catalog, account-level apps/MCP connectors, and the
+current `multi_agent` collaboration feature, and uses an ephemeral session. It defaults to
+`--sandbox read-only`; workspace mutation and non-Git
 working directories require the explicit `--sandbox workspace-write` and
 `--allow-non-git` opt-ins. It does not claim protected subagents because it
 prevents their creation.
 
+Codex `0.146.0` is checked before launch. First run the same command with
+`--print-codex-artifact-receipt`, review the path-free receipt out of band, and
+pin its `artifact_authority_id` through
+`ECHO_VEIL_CODEX_ARTIFACT_AUTHORITY_ID` or
+`--codex-artifact-authority-id`. The receipt hashes the Codex executable, exact
+installed Echo wheel and entry points, plugin/hook/MCP bytes, model,
+configuration, state authority, and optional broker endpoint/signing authority.
+One-byte drift blocks startup. `--codex-interactive` creates an isolated
+interactive profile under the same receipt. It installs the verified Echo hook
+and skill payloads directly, keeps Codex's plugin loader disabled so account
+plugins cannot merge into the profile, and enables one required Echo MCP
+server. The repository implementation is
+release-pending; an ambient mutable checkout or matching version alone is not
+current authority evidence.
+
 OpenClaw loads `integrations/openclaw` as an exclusive native memory capability
 with the same nine tools. Pi loads a
 native TypeScript extension package. Algo CLI uses the same protected
-`AgentMemory` contract through its in-process bridge. Codex and Claude Code use
-plugin-bundled stdio MCP servers. Hermes, OpenCode, Droid, and Goose use their
+`AgentMemory` contract through its in-process bridge. Shielded Codex uses a
+receipt-bound stdio MCP server plus verified root hook/skill assets; Claude
+Code uses its plugin-bundled stdio MCP server. Hermes, OpenCode, Droid, and Goose use their
 documented stdio MCP configuration surfaces. Every full adapter exposes:
 
 - `echo_veil_remember` — opt-in Live, Short-Term, or Contextual Logic capture;
@@ -257,6 +305,16 @@ ambiguity/conflict handling, disciplined layer transitions, and fail-closed
 behavior without plaintext fallback. Static packaging proves policy
 availability, not that a host invoked it; qualify the actual installed runtime.
 
+A host-delivered exact-turn preflight can satisfy the initial ritual without
+making the model repeat tool calls. Its compact `runtime_status` must use
+`echo-veil-runtime-status-v1` and report semantic readiness, completed doctor
+and recall checks, completed Contextual Logic when required,
+`ritual_satisfied=true`, and `lifecycle_mutated=false`. The status and evidence
+are bound to that exact receipt/hook turn. They do not authorize a write,
+inferential access, collaboration, or reuse on another turn. Missing or
+inconsistent status falls back to the explicit tool ritual; degraded status
+never satisfies it.
+
 Goose's recipe prompt explicitly calls doctor and a two-slot minimal recall
 before waiting for a separate mutation request. Do not launch the recipe with
 `--no-profile`: Goose 1.41.0 suppresses recipe-defined extensions under that
@@ -271,15 +329,35 @@ apparent `--no-profile` difference is intentional: the launcher supplies Echo
 directly through `--with-extension`, while the portable recipe relies on its
 recipe-defined extension. Only the reviewed `developer` builtin may be added.
 
-Pi also enforces the policy in code. Its input hook runs doctor once per
-session and a two-slot, non-inferential recall for each non-empty turn. Causal
-or decision prompts add bounded Contextual Logic. If skill or template
-expansion changes the intent, the extension recalls again against the expanded
-prompt. Results are bounded and encoded as untrusted evidence before system
-prompt injection. Mid-run steering/follow-up is blocked because it can bypass
-a fresh agent-start boundary. Missing or failed preflight blocks normal input;
-an unauthorized agent start is aborted and all tools are denied, without a
-host-memory fallback.
+Pi `0.84.1` enforces one signed `preflight_v2` transaction in code. Its input
+hook requests lifecycle-neutral doctor/recall/applicable Contextual Logic
+evidence; expanded skill/template prompts receive a replacement receipt. The
+receipt binds the query, session, turn, model, active tool manifest, Pi artifact
+authority, evidence, embedding identity, nonce, and short expiry. Pi consumes
+it once at `before_provider_request` and verifies that the exact protected
+context remains in the outbound payload. Mid-run steering/follow-up is blocked
+because it can bypass a fresh agent-start boundary. Missing, degraded, altered,
+expired, replayed, cross-turn, cross-model, cross-tool, or stripped evidence
+blocks before a provider or tool call, without a host-memory fallback.
+
+Evidence is capped at 16,000 characters and an estimated 2,400 tokens. Payloads
+are omitted whole—context evidence first, then logic roots, then recall
+payloads—while authenticated record shells and every required
+ambiguous/conflicting candidate remain. Preflight telemetry is payload-free and
+reports only bounded doctor/recall/context/total latency, result count, and
+whether Contextual Logic ran. Every Echo tool is sequential; mutation,
+reindexing, and inferential access require a fresh one-use UI confirmation.
+`/echo-veil-availability` is the only degraded path and is manual, read-only,
+non-authoritative, and incapable of authorizing an agent or mutation.
+
+The Pi package is compiled against the real pinned `0.84.1` types and bound to
+`integrations/pi/artifact-receipt.json`; both the extension and shielded launcher
+require its out-of-band authority ID. The isolated `echo-veil-shielded-run pi`
+mode disables sessions, ambient extensions/skills/templates/context files, and
+built-in tools, then loads only the receipt-bound Echo package. Direct ambient
+Pi stacks remain weaker because a later extension can alter a provider payload
+after Echo's hook. Until this implementation is committed and released, the
+currently installed Pi version remains release-stale authority evidence.
 
 OpenClaw uses three runtime hooks around its selected memory capability.
 `before_agent_reply` claims the turn and can return a synthetic failure before
@@ -302,11 +380,15 @@ Codex and Claude Code use `echo-veil-preflight-hook` from their bundled
 invocation reads only a bounded hook JSON object, ignores transcript and
 working-directory paths, validates the exact scoped-v2 Qwen3 profile, performs
 two-slot, non-inferential recall, and adds a depth/record-bounded Contextual
-Logic trace for causal prompts. Returned records retain layer, score,
+Logic trace for causal prompts detected across English, Spanish, French,
+German, Portuguese, Italian, Chinese, Japanese, and Korean. Returned records retain layer, score,
 confidence, provenance, temporal state, and promotion/archive guidance. The
-hook serializes them as escaped untrusted JSON. A record larger than the
-per-record preflight budget is omitted with its authenticated ID and omission
-reason; it is never silently truncated into a different statement.
+hook serializes them as escaped untrusted JSON. Evidence obeys both a character
+cap and a conservative UTF-8 token estimate. A record larger than the
+per-record or total preflight budget is omitted with its authenticated shell,
+ID, byte-independent character count, and omission reason; it is never silently
+truncated into a different statement. Ambiguous/conflicting shells are never
+dropped to make the budget pass.
 
 Codex's matcher explicitly covers `Agent`, `SpawnAgent`, `spawn_agent`, and
 `collaboration.spawn_agent`. The parser accepts only those bounded aliases and
@@ -404,18 +486,20 @@ the Echo MCP toolset only.
 Do not collapse these integrations into one enforcement claim:
 
 - **Hard pre-model gate:** Algo CLI required mode, OpenClaw models pinned to the
-  OpenClaw runtime, Pi, and a loaded Hermes shield plugin own runtime
+  OpenClaw runtime, receipt-bound Pi, and a loaded Hermes shield plugin own runtime
   boundaries that stop the model turn when protected preflight is absent or
   fails. OpenClaw's claim additionally depends on the exclusive Echo slot,
   both hook permissions, native session-memory being explicitly disabled, and
   does not cover its Codex app-server runtime. Hermes general plugins are
   opt-in and registration failures do not abort host startup, so every
   installed run must verify that `echo-veil-shield` loaded.
-- **Hard shielded headless gate:** `echo-veil-shielded-run` starts Codex,
-  Droid, Goose, or Hermes only after a complete protected semantic preflight. Codex
+- **Hard shielded gate:** `echo-veil-shielded-run` starts Codex, Pi, Droid,
+  Goose, or Hermes only after a complete protected semantic preflight. Codex
   starts with one required Echo MCP server, isolated auth, and no ambient
   config/skills/cache; native memory, Chronicle, goals, plugins, and
-  parallel-agent paths are disabled. The
+  parallel-agent paths are disabled; its isolated interactive profile uses the
+  same artifact binding. Pi loads only its receipt-bound extension in a clean
+  one-turn home. The
   Droid path disables `Task`; the Goose path loads no default profile or
   session and adds only the explicit Echo extension plus an optional reviewed
   `developer` builtin. The Hermes path uses a digest-bound plugin, isolated
@@ -424,12 +508,13 @@ Do not collapse these integrations into one enforcement claim:
   conditional on visible plugin load. This claim does not extend to direct Codex
   collaboration, bare `droid exec`, interactive Droid, or ordinary Goose
   recipe runs.
-- **Hard root/tool gate:** Codex and Claude Code stop root user prompts through
-  native `UserPromptSubmit` hooks. Claude Code denies supported `Agent` tool
+- **Hard root/tool gate:** Claude Code stops root user prompts through native
+  `UserPromptSubmit` hooks and denies supported `Agent` tool
   spawns unless task-specific protected recall succeeds. OpenCode gates root
   prompts and supported `Task` spawns through the same contract.
-  Direct Codex root turns require the current plugin hook to be enabled and
-  trusted; direct Codex collaboration bypassed `PreToolUse` and is excluded.
+  Direct Codex root turns can receive protected Echo context, but the observed
+  direct environment exposed competing mutable memory and collaboration did not
+  receive child-specific preflight; neither is a singular-authority claim.
   Claude Code must not run with `--safe-mode` or `--bare`, which disable plugin hooks.
   OpenCode must not run with `--pure`. Droid's packaged native hooks require a
   separate interactive qualification and are not covered by the headless
@@ -457,7 +542,7 @@ adapter evidence, but they are not substitutes for that host evidence.
 Use `python scripts/verify_host_authority.py --installed` to compare the
 current checkout and installed host versions with the exact evidence snapshot.
 The report keeps qualified boundaries, conditional gates, externally unbound
-evidence, repository-only adapters, and blocked hosts distinct. Hosts with an
+evidence, repository-only adapters, release-pending/stale runtimes, and blocked hosts distinct. Hosts with an
 artifact receipt also fail current status on a missing, editable, mismatched,
 or tampered installation. It is a drift detector, not a replacement for
 installed model/provider outage smokes.
@@ -469,13 +554,14 @@ already-authorized plaintext context. Keep the preflight minimal, use host
 session-retention controls where appropriate, and never claim the host
 transcript is inside Echo's shield.
 
-Selecting Echo Veil for a required-protection host makes it the only mutable
-agent-memory authority. Existing host memory files and curated documents are
-retained as read-only evidence and migration sources; they are not deleted,
-automatically queried, or silently written. OpenClaw installation selects
-`plugins.slots.memory=echo-veil`. Skill-capable hosts receive the same rule,
-Goose receives it through the recipe or shielded launcher, and Algo required
-mode enforces it in runtime code.
+Selecting Echo Veil for a required-protection host makes it the primary
+mutable agent-memory store. Existing host memory files, wiki pages, and
+curated documents remain valid evidence when Echo has no answer; they are
+not deleted or silently written. OpenClaw installation still selects
+`plugins.slots.memory=echo-veil`. Skill-capable hosts share the same ritual,
+Goose receives it through the recipe or shielded launcher, Algo required
+mode enforces it in runtime code, and Grok Build injects protected context
+without claiming a singular pre-model stop.
 
 The shield boundary covers dynamic records sent through Echo Veil, including
 their semantic layer, provenance, promotion history, Contextual Logic links,

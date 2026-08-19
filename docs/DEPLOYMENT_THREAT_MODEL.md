@@ -31,9 +31,14 @@ There are two deliberately separate identity paths:
 The origin runs on an Azure `Standard_DC2as_v5` confidential VM in East US 2,
 with AMD SEV-SNP, Secure Boot, vTPM, and confidential OS-disk encryption. Azure
 Key Vault Premium Secure Key Release is the authority for the Ed25519
-attestation-normalization key and transport secrets. A client trusts normalized
-claims only when the Ed25519 signature is valid, the nonce is fresh, the image
-measurement is allowlisted, and every CKKS/hardware/ZKP capability is true.
+attestation-normalization key and transport secrets. A client trusts the
+normalized envelope only after it independently verifies a fresh Microsoft
+Azure Attestation JWT against a pinned issuer and offline JWKS. The native JWT
+must bind the exact nonce/ephemeral-transport/workload runtime data through
+SEV-SNP `reportdata`, the approved CCE policy through `hostdata`, the approved
+MAA policy, a non-debuggable/non-migratable VM, and the approved launch
+measurement. The Ed25519 signature alone can never make the deployment
+production-ready.
 
 The attestation signing key must never be copied into the image or source tree.
 It is released only after Azure attestation satisfies the Key Vault release
@@ -132,6 +137,15 @@ Layer filters are evaluated only after contract authentication. Bounded context
 traces use confidence-checked logic roots and authenticate each outgoing linked
 record; they do not materialize a plaintext graph or assign query confidence to
 relationship evidence.
+Temporal/supersession/operation fields, vector-row metadata, keyed lexical
+terms, and the protected semantic contract are covered by a per-record,
+domain-separated HMAC manifest. Authenticated deletion tombstones are verified
+on every open and doctor check. The lifecycle SQLite store also uses a monotonic
+generation compare-and-swap, so a second process cannot replace a newer L1
+checkpoint with a stale snapshot. These controls detect row-level tampering and
+stale writers; they do not prevent rollback of the entire database and keyring
+to a mutually consistent older backup. Deployments that require anti-rollback
+must add an external monotonic/version authority.
 Keyed lexical tokens and opaque identifiers minimize the index but still expose
 row counts, timestamps, vector dimensions, access patterns, and relationship
 shape. Plaintext is present in the authorized Python and local embedding

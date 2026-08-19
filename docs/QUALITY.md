@@ -423,8 +423,36 @@ Live version when that content changes. It exercises protected context,
 competing-pair preservation, and Live version persistence through both Qwen3
 and the simulated-outage reader. Those probes are reported separately from the
 42 retrieval queries so linked, paired, or lifecycle evidence is never counted
-as an ordinary successful semantic match. The live corpus contains 27 protected
-records total, 26 of which participate in retrieval.
+as an ordinary successful semantic match. The current live corpus contains 28
+protected records total, 27 of which participate in retrieval; the additional
+record is an adversarial untrusted-memory fixture added only after the ordinary
+retrieval cases finish.
+
+## Pi/Codex broker and adversarial gate
+
+On 2026-08-19 the expanded real-Qwen3 gate repeated all 42 retrieval cases and
+14 hard negatives, then exercised Pi and Codex concurrently against one
+owner-only serialized broker. It passed:
+
+- 19/19 natural paraphrases, 14/14 unrelated/same-person absent facts, both
+  corrections/temporal histories, and the protected competing pair;
+- 13 warm brokered preflights across six concurrent Pi/Codex pairs plus one
+  poisoned-memory request, with one socket round trip and zero subprocesses per
+  preflight;
+- zero missing ambiguous/conflicting candidates and zero preflight-induced
+  profile mutations, proven by logical SQLite snapshots before and after;
+- escaped `<system>`-shaped poisoned memory delivered only under
+  `trust=untrusted_memory_evidence`, with no mutation capability in the signed
+  receipt;
+- payload-free preflight/broker telemetry and compact runtime ritual status;
+- 483.64 ms concurrent warm preflight p95, below the 500 ms target; and
+- forced Pi/Codex semantic-gate failure with zero provider calls, zero agent
+  starts, zero tool executions, a blocked write, and a still-manual degraded
+  read-only availability query.
+
+That p95 is a same-machine local measurement, not a universal latency promise.
+The broker serializes callers deliberately; deployments must repeat the gate on
+their own model, corpus, hardware, and concurrency level.
 
 ## Reproduce
 

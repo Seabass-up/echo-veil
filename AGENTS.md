@@ -82,6 +82,8 @@ without reviewing the resulting dependency diff.
 - `cloudflare/enclave-gateway/`: Access-authenticated, mTLS Worker gateway.
 - `integrations/`: host-specific MCP configs, native OpenClaw/Pi packages, and
   the guarded Mercury readiness skill.
+- `src/echo_veil/agent_broker.py`: owner-only, bounded, serialized local broker
+  used to keep one Pi/Codex profile warm without weakening the required gate.
 - `src/echo_veil/guarded_runner.py`: fail-closed headless Droid/Goose launcher
   that completes semantic preflight before the host process exists.
 - `deploy/`: Azure, Cloudflare, Caddy, container, and secret templates.
@@ -132,16 +134,30 @@ state. Do not introduce an implicit network embedding dependency into the core.
   supersede obsolete data, or link evidence through protected Contextual Logic.
 - Inferential confidence requires explicit user override. Data Obscurity is a
   hard stop even when override is requested.
+- A host-validated exact-turn preflight with compact
+  `runtime_status.ritual_satisfied=true` may satisfy completed doctor, recall,
+  and applicable Contextual Logic steps for that turn only. Never reuse it for
+  another turn or reinterpret it as mutation, inference, or collaboration
+  authority. Preserve every required ambiguity/conflict shell when payloads are
+  omitted to meet the character/token budget; telemetry must remain
+  payload-free.
 - Mutate lifecycle state through `Oracle`/`Workspace` methods. Returned `Vine`
   objects are mutable and must not be edited concurrently.
-- For headless Codex, Droid, Goose, and Hermes, use
-  `echo-veil-shielded-run`. Direct Codex collaboration and Droid 0.180.0
+- For isolated Codex, Pi, Droid, Goose, and Hermes, use
+  `echo-veil-shielded-run`. Codex and Pi require their reviewed artifact
+  authority IDs. Direct Codex collaboration and Droid 0.180.0
   `exec` bypass their native pre-tool or prompt hooks, normal Goose recipe mode
   remains policy-driven, and ordinary Hermes plugin mode remains conditional
   on visible plugin load. The shielded Codex path disables parallel agents;
   the shielded Hermes path is local, one-turn, and Echo-tools-only. Do not
   extend the hard-gate claim beyond those exact installed-host boundaries
-  without new evidence.
+  without new evidence. Direct Codex is not singular when competing mutable
+  memory plugins are exposed. The isolated Codex path must keep collaboration
+  disabled until children receive and consume fresh task-specific receipts.
+- A shared local broker must use one owner-only Unix socket and one serialized
+  profile. Required preflight and MCP startup must reject broker loss,
+  degradation, malformed telemetry, or authority drift. Never let the manual
+  Always-Available reader satisfy a required brokered turn.
 - Mercury remains readiness-only until its host can suppress every native
   mutable-memory path and expose a structured fail-closed backend or hook.
 - When using `AgentMemory`, do not call its low-level `oracle` to create or
