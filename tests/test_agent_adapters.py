@@ -452,8 +452,10 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     ):
         assert required in pi_extension
     for required in (
-        "top_k: 2",
-        "allow_inferential: false",
+        'this.rpc("preflight_v2"',
+        "ritual_satisfied",
+        "MAX_PREFLIGHT_ESTIMATED_TOKENS",
+        "payload_included",
         "untrusted_memory_evidence",
         "ranking_ambiguous",
         "competing_memory_detected",

@@ -211,28 +211,42 @@
     {
       "id": "pi",
       "display_name": "Pi",
-      "adapter": "Native TypeScript extension and Agent Skill",
-      "evidence_state": "qualified",
-      "qualified_boundary": "Normal turns with the Echo extension loaded",
-      "tested_on": "2026-07-25",
-      "tested_version": "0.80.6",
+      "adapter": "Receipt-bound TypeScript extension, provider state machine, and isolated launcher",
+      "evidence_state": "release_pending",
+      "qualified_boundary": "Receipt-bound isolated one-turn Pi 0.84.1 runtime with Echo as the only extension",
+      "tested_on": "2026-08-11",
+      "tested_version": "0.84.1",
       "source_artifacts": [
+        "integrations/pi/artifact-receipt.json",
         "integrations/pi/package.json",
+        "integrations/pi/package-lock.json",
         "integrations/pi/extensions/index.ts",
+        "integrations/pi/src/artifact.ts",
         "integrations/pi/src/preflight.ts",
         "integrations/pi/src/runner.ts",
-        "integrations/pi/skills/echo-veil-memory/SKILL.md"
+        "integrations/pi/skills/echo-veil-memory/SKILL.md",
+        "integrations/pi/tests/artifact.test.ts",
+        "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:c429ad15fa0a4e287f6b1b7c5c8b5e29ea017560eef53fbcefffc2b8e19233f4",
+      "source_digest": "sha256:8cb063d8d7deb3ad0c4a8af46d6cb072a3452b54f323d7b7ac215cde9f0bb7e4",
       "checks": [
-        "Installed extension command discovery",
-        "Healthy protected preflight with no model call",
-        "Forced Echo failure with zero messages, tools, tokens, and cost",
-        "Repository ambiguity, conflict, and agent-start guard battery"
+        "Compiled against pinned real Pi 0.84.1 types",
+        "Artifact receipt binds source, package, lockfile, and extension authority",
+        "One signed lifecycle-neutral preflight_v2 call per protected turn",
+        "Session/turn/model/tool/query/artifact binding and one-use consumption at before_provider_request",
+        "Every Echo tool is sequential; mutations and inference require one-use UI consent",
+        "Restart, resume, fork, prompt replacement, queued input, tool ordering, and artifact drift tests",
+        "Forced semantic outage blocks before agent, provider, and tool execution",
+        "Manual Always-Available command remains degraded, read-only, and non-authorizing",
+        "Owner-only broker path uses one round trip with payload-free timing",
+        "Concurrent Pi/Codex Qwen3 gate preserved all conflicts with warm p95 below 500 ms",
+        "Healthy isolated Pi 0.84.1 one-turn runtime completed against the receipt-bound package"
       ],
       "remaining": [
+        "Repository changes are uncommitted and unreleased, so the installed 0.84.1 runtime remains release-stale",
+        "Direct ambient Pi stacks retain later-extension provider-payload ordering risk",
         "Extension-disabled runs are outside the claim",
-        "Requalify after Pi lifecycle-hook changes"
+        "Requalify after Pi lifecycle-hook or artifact changes"
       ]
     },
     {
@@ -337,6 +351,7 @@
   "limitations": [
     "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
     "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
+    "Pi remains release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified.",
     "Algo CLI and AIP implementation sources live in separate repositories and retain independent release gates.",
     "Production CKKS, enclave, mTLS, Access, ZKP, and operational controls require external deployment evidence."
   ]

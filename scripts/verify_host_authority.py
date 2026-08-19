@@ -41,6 +41,7 @@ EVIDENCE_STATES = frozenset(
         "conditional",
         "external_unbound",
         "repository_only",
+        "release_pending",
         "blocked",
     }
 )
@@ -619,6 +620,8 @@ def audit_authority(
             authority_status = "source_evidence_stale"
         elif evidence_state == "repository_only":
             authority_status = "repository_only"
+        elif evidence_state == "release_pending":
+            authority_status = "runtime_release_stale"
         elif evidence_state == "external_unbound":
             authority_status = "external_evidence_unbound"
         elif not installed:
