@@ -91,11 +91,12 @@ def test_authority_manifest_is_source_bound_and_truthful() -> None:
     assert report["shared_source_evidence_current"] is True
     assert report["all_hosts_singular_authority"] is False
     assert report["blocked_hosts"] == ["mercury"]
-    assert report["not_current_hosts"] == ["pi"]
+    assert report["not_current_hosts"] == ["codex", "pi"]
     statuses = {host["id"]: host["authority_status"] for host in report["hosts"]}
     assert statuses["algo-cli"] == "qualified_boundary_current"
     assert statuses["hermes"] == "qualified_boundary_current"
     assert statuses["droid"] == "qualified_boundary_current"
+    assert statuses["codex"] == "runtime_release_stale"
     assert statuses["pi"] == "runtime_release_stale"
     assert statuses["mercury"] == "blocked"
     assert statuses["aip"] == "qualified_boundary_current"
@@ -118,7 +119,7 @@ def test_authority_report_never_promotes_presence_or_a_new_version() -> None:
     )
     statuses = {host["id"]: host["authority_status"] for host in report["hosts"]}
 
-    assert statuses["codex"] == "runtime_version_stale"
+    assert statuses["codex"] == "runtime_release_stale"
     assert statuses["pi"] == "runtime_release_stale"
     assert statuses["mercury"] == "blocked"
 

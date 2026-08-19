@@ -8,15 +8,23 @@ import math
 import os
 import re
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Protocol
 
 from ._json import strict_json_loads
+from .agent_broker import BrokerClient
 from .agent_cli import _open_memory, build_parser as build_agent_parser
 from .agent_memory import (
     DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
     DEFAULT_OLLAMA_MODEL,
+)
+from .preflight_receipt import (
+    PREFLIGHT_RECEIPT_SCHEMA,
+    PreflightReceiptAuthority,
+    canonical_json,
+    sha256_digest,
 )
 
 CANONICAL_PROFILE = "echo-universal-qwen3-v1"
@@ -28,12 +36,21 @@ HOOK_HOSTS = (
     "opencode",
     "hermes",
     "droid",
+    "grok-build",
 )
-PREFLIGHT_HOSTS = (*HOOK_HOSTS, "goose", "aip")
+PREFLIGHT_HOSTS = (*HOOK_HOSTS, "goose", "aip", "pi")
 PROMPT_HOOK_EVENTS = ("UserPromptSubmit", "UserPromptExpansion")
 AGENT_HOOK_EVENT = "PreToolUse"
 HOOK_EVENTS = (*PROMPT_HOOK_EVENTS, AGENT_HOOK_EVENT)
 HOOK_MODES = ("prompt", "agent")
+_HOOK_EVENT_ALIASES = {
+    "UserPromptSubmit": "UserPromptSubmit",
+    "user_prompt_submit": "UserPromptSubmit",
+    "UserPromptExpansion": "UserPromptExpansion",
+    "user_prompt_expansion": "UserPromptExpansion",
+    "PreToolUse": "PreToolUse",
+    "pre_tool_use": "PreToolUse",
+}
 AGENT_TOOL_NAMES = {
     "codex": frozenset(
         {
@@ -45,11 +62,18 @@ AGENT_TOOL_NAMES = {
     ),
     "claude-code": frozenset({"Agent"}),
     "droid": frozenset({"Task"}),
+    "grok-build": frozenset({"spawn_subagent", "Task", "Agent"}),
 }
+GROK_PREFLIGHT_UNAVAILABLE = (
+    "ECHO_VEIL_PREFLIGHT_UNAVAILABLE. Echo Veil is the primary memory store "
+    "but is unavailable this turn. Use files, wiki, and other host evidence. "
+    "Do not invent stored facts or write a plaintext Echo substitute."
+)
 MEMORY_LAYERS = frozenset({"live", "short_term", "long_term", "contextual_logic"})
 MAX_HOOK_INPUT_BYTES = 65_536
 MAX_QUERY_CHARS = 20_000
 MAX_PREFLIGHT_CONTEXT_CHARS = 16_000
+MAX_PREFLIGHT_ESTIMATED_TOKENS = 2_400
 MAX_REWRITTEN_AGENT_PROMPT_CHARS = MAX_QUERY_CHARS + MAX_PREFLIGHT_CONTEXT_CHARS + 512
 MAX_PREFLIGHT_RESULTS = 8
 MAX_PREFLIGHT_PAYLOAD_CHARS = 4_000
@@ -59,10 +83,29 @@ REQUIRED_PREFLIGHT_FAILURE = (
     "no host memory fallback was used."
 )
 FORCE_AGENT_PREFLIGHT_FAILURE_ENV = "ECHO_VEIL_FORCE_AGENT_PREFLIGHT_FAILURE"
-_CAUSAL_QUERY = re.compile(
-    r"\b(?:why|reason|because|cause[ds]?|decision|decide[ds]?|trade-?off|"
-    r"principle|conflict|contradiction|rationale)\b",
+RUNTIME_STATUS_SCHEMA = "echo-veil-runtime-status-v1"
+EVIDENCE_BUDGET_SCHEMA = "echo-veil-evidence-budget-v1"
+PREFLIGHT_TELEMETRY_SCHEMA = "echo-veil-preflight-telemetry-v1"
+_LATIN_CAUSAL_QUERY = re.compile(
+    r"\b(?:"
+    r"why|reason|because|cause[ds]?|decision|decide[ds]?|trade-?off|"
+    r"principle|conflict|contradiction|rationale|"
+    r"por\s+qu[eéê]|porque|motivo|raz[oó]n|causa|decisi[oó]n|decidir|"
+    r"conflicto|contradicci[oó]n|fundamento|"
+    r"pourquoi|raison|parce\s+que|d[eé]cision|d[eé]cider|compromis|"
+    r"conflit|justification|"
+    r"warum|grund|weil|ursache|entscheidung|entscheiden|kompromiss|"
+    r"konflikt|widerspruch|begr[uü]ndung|"
+    r"raz[aã]o|decis[aã]o|conflito|contradi[cç][aã]o|justificativa|"
+    r"perch[eé]|ragione|decisione|decidere|compromesso|conflitto|"
+    r"contraddizione|motivazione"
+    r")\b",
     re.IGNORECASE,
+)
+_CJK_CAUSAL_QUERY = re.compile(
+    r"(?:为什么|為什麼|原因|因为|因為|决定|決定|决策|決策|冲突|衝突|"
+    r"矛盾|权衡|權衡|なぜ|どうして|理由|決定|判断|競合|トレードオフ|"
+    r"왜|이유|원인|결정|판단|충돌|모순|절충)"
 )
 
 
@@ -74,6 +117,7 @@ class HookRequest:
     query: str
     tool_input: dict[str, Any] | None = None
     query_field: str | None = None
+    raw_event: str | None = None
 
 
 class PreflightMemory(Protocol):
@@ -104,10 +148,39 @@ class PreflightMemory(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class PreflightV2Memory(PreflightMemory, Protocol):
+    """Memory surface required for a lifecycle-neutral signed preflight."""
+
+    def preview_recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def preview_context(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        max_depth: int = 1,
+        max_records: int = 8,
+    ) -> dict[str, Any]: ...
+
+
 def requires_contextual_logic(query: str) -> bool:
     """Return whether a bounded logic trace is relevant to the current intent."""
 
-    return _CAUSAL_QUERY.search(query) is not None
+    return (
+        _LATIN_CAUSAL_QUERY.search(query) is not None
+        or _CJK_CAUSAL_QUERY.search(query) is not None
+    )
 
 
 def assert_doctor_ready(
@@ -184,25 +257,28 @@ def prepare_preflight(
     clean_query = _bounded_required_string(query, "prompt", MAX_QUERY_CHARS).strip()
     if not clean_query:
         raise ValueError("prompt must not be empty")
+    context_required = requires_contextual_logic(clean_query)
     assert_doctor_ready(
         memory.doctor(),
         expected_profile=expected_profile,
         expected_model=expected_model,
         expected_dimension=expected_dimension,
     )
-    recall = memory.recall(
+    recall_method = getattr(memory, "preview_recall", memory.recall)
+    recall = recall_method(
         clean_query,
         top_k=2,
         allow_inferential=False,
     )
+    context_method = getattr(memory, "preview_context", memory.context)
     context = (
-        memory.context(
+        context_method(
             clean_query,
             allow_inferential=False,
             max_depth=2,
             max_records=8,
         )
-        if requires_contextual_logic(clean_query)
+        if context_required
         else None
     )
     return build_preflight_context(
@@ -210,7 +286,129 @@ def prepare_preflight(
         recall,
         context,
         query_source=query_source,
+        runtime_status=_ready_runtime_status(
+            contextual_logic_required=context_required,
+            contextual_logic_checked=context is not None,
+        ),
     )
+
+
+def prepare_preflight_v2(
+    memory: PreflightV2Memory,
+    query: str,
+    *,
+    authority: PreflightReceiptAuthority,
+    host: str,
+    profile: str,
+    scope: str,
+    session_id: str,
+    turn_id: str,
+    model_digest: str,
+    tool_manifest_digest: str,
+    artifact_authority_id: str,
+    expected_model: str = DEFAULT_OLLAMA_MODEL,
+    expected_dimension: int = DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
+    query_source: str = "current_user_prompt",
+) -> dict[str, object]:
+    """Issue one signed, lifecycle-neutral receipt for an exact host turn."""
+
+    started_at = time.perf_counter()
+    clean_query = _bounded_required_string(query, "prompt", MAX_QUERY_CHARS).strip()
+    if not clean_query:
+        raise ValueError("prompt must not be empty")
+    context_required = requires_contextual_logic(clean_query)
+    doctor_started_at = time.perf_counter()
+    doctor = assert_doctor_ready(
+        memory.doctor(),
+        expected_profile=profile,
+        expected_model=expected_model,
+        expected_dimension=expected_dimension,
+    )
+    doctor_ms = _elapsed_ms(doctor_started_at)
+    recall_started_at = time.perf_counter()
+    recall = memory.preview_recall(
+        clean_query,
+        top_k=2,
+        allow_inferential=False,
+    )
+    if recall.get("lifecycle_mutated") is not False:
+        raise RuntimeError("protected preflight recall changed lifecycle state")
+    recall_ms = _elapsed_ms(recall_started_at)
+    context_started_at = time.perf_counter()
+    context = (
+        memory.preview_context(
+            clean_query,
+            allow_inferential=False,
+            max_depth=2,
+            max_records=8,
+        )
+        if context_required
+        else None
+    )
+    context_ms = _elapsed_ms(context_started_at) if context_required else 0.0
+    if context is not None and context.get("lifecycle_mutated") is not False:
+        raise RuntimeError("protected preflight context changed lifecycle state")
+    evidence = build_preflight_evidence(
+        host,
+        recall,
+        context,
+        query_source=query_source,
+        adaptive_results=True,
+        runtime_status=_ready_runtime_status(
+            contextual_logic_required=context_required,
+            contextual_logic_checked=context is not None,
+        ),
+    )
+    embedding = _object(doctor.get("embedding"), "embedding readiness")
+    embedding_model_digest = sha256_digest(canonical_json(embedding))
+    compact_recall = _object(evidence.get("recall"), "preflight recall evidence")
+    capabilities = ["semantic_recall"]
+    if context is not None:
+        capabilities.append("contextual_logic")
+    receipt = authority.issue(
+        host=host,
+        profile=profile,
+        scope=scope,
+        session_id=session_id,
+        turn_id=turn_id,
+        query_source=query_source,
+        query_digest=sha256_digest(clean_query),
+        context_digest=sha256_digest(canonical_json(evidence)),
+        embedding_model_digest=embedding_model_digest,
+        model_digest=model_digest,
+        tool_manifest_digest=tool_manifest_digest,
+        artifact_authority_id=artifact_authority_id,
+        ambiguity=compact_recall.get("ranking_ambiguous") is True,
+        conflict=compact_recall.get("competing_memory_detected") is True,
+        allowed_capabilities=capabilities,
+    )
+    response: dict[str, object] = {
+        "preflight_ready": True,
+        "schema": PREFLIGHT_RECEIPT_SCHEMA,
+        "memory_authority": "echo-veil",
+        "host": host,
+        "profile": profile,
+        "scope": scope,
+        "query_source": query_source,
+        "semantic": True,
+        "lifecycle_mutated": False,
+        "evidence": evidence,
+        "context": render_preflight_evidence(evidence),
+        "receipt": receipt,
+        "authority_id": authority.authority_id,
+        "embedding_model_digest": embedding_model_digest,
+    }
+    response["telemetry"] = {
+        "schema": PREFLIGHT_TELEMETRY_SCHEMA,
+        "payload_included": False,
+        "total_ms": _elapsed_ms(started_at),
+        "doctor_ms": doctor_ms,
+        "recall_ms": recall_ms,
+        "context_ms": context_ms,
+        "result_count": len(compact_recall.get("results", [])),
+        "contextual_logic_used": context is not None,
+    }
+    return response
 
 
 def build_preflight_context(
@@ -219,25 +417,252 @@ def build_preflight_context(
     context_value: object | None = None,
     *,
     query_source: str = "current_user_prompt",
+    runtime_status: Mapping[str, object] | None = None,
 ) -> str:
     """Encode only the bounded memory fields a model may receive."""
+
+    envelope = build_preflight_evidence(
+        host,
+        recall_value,
+        context_value,
+        query_source=query_source,
+        runtime_status=runtime_status,
+    )
+    return render_preflight_evidence(envelope)
+
+
+def build_preflight_evidence(
+    host: str,
+    recall_value: object,
+    context_value: object | None = None,
+    *,
+    query_source: str = "current_user_prompt",
+    adaptive_results: bool = False,
+    runtime_status: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Return bounded evidence without copying the raw host query."""
 
     if host not in PREFLIGHT_HOSTS:
         raise ValueError("hook host is invalid")
     if query_source not in {"current_user_prompt", "subagent_task"}:
         raise ValueError("query source is invalid")
+    recall = _compact_recall(recall_value)
+    if adaptive_results and not (
+        recall["ranking_ambiguous"] or recall["competing_memory_detected"]
+    ):
+        recall["results"] = recall["results"][:1]
+        recall["competing_memory_groups"] = []
     envelope = {
         "authority": "echo-veil",
         "host": host,
         "trust": "untrusted_memory_evidence",
         "query_source": query_source,
-        "recall": _compact_recall(recall_value),
+        "collaboration_authorized": not (
+            host == "codex" and query_source == "current_user_prompt"
+        ),
+        "recall": recall,
         "contextual_logic": (
             None if context_value is None else _compact_context(context_value)
         ),
+        "runtime_status": _compact_runtime_status(runtime_status),
+        "evidence_budget": {
+            "schema": EVIDENCE_BUDGET_SCHEMA,
+            "estimator": "utf8_bytes_ceiling_div_3",
+            "max_context_chars": MAX_PREFLIGHT_CONTEXT_CHARS,
+            "max_estimated_tokens": MAX_PREFLIGHT_ESTIMATED_TOKENS,
+            "estimated_tokens": 0,
+            "payloads_omitted": 0,
+        },
     }
+    _apply_evidence_budget(envelope)
+    return envelope
+
+
+def render_preflight_evidence(evidence: object) -> str:
+    """Render signed preflight evidence for bounded model context injection."""
+
+    envelope = _object(evidence, "preflight evidence")
+    output = _render_preflight_output(envelope)
+    budget = _object(envelope.get("evidence_budget"), "preflight evidence budget")
+    estimated_tokens = _estimate_tokens(output)
+    if budget.get("estimated_tokens") != estimated_tokens:
+        raise RuntimeError("protected preflight token accounting is invalid")
+    if (
+        len(output) > MAX_PREFLIGHT_CONTEXT_CHARS
+        or estimated_tokens > MAX_PREFLIGHT_ESTIMATED_TOKENS
+    ):
+        raise RuntimeError("protected preflight exceeds the host context budget")
+    return output
+
+
+def _ready_runtime_status(
+    *,
+    contextual_logic_required: bool,
+    contextual_logic_checked: bool,
+) -> dict[str, object]:
+    return {
+        "schema": RUNTIME_STATUS_SCHEMA,
+        "ready": True,
+        "semantic_mode": "semantic",
+        "doctor_checked": True,
+        "recall_checked": True,
+        "contextual_logic_required": contextual_logic_required,
+        "contextual_logic_checked": contextual_logic_checked,
+        "ritual_satisfied": True,
+        "lifecycle_mutated": False,
+    }
+
+
+def _compact_runtime_status(
+    value: Mapping[str, object] | None,
+) -> dict[str, object]:
+    status: dict[str, object]
+    if value is None:
+        status = {
+            "schema": RUNTIME_STATUS_SCHEMA,
+            "ready": False,
+            "semantic_mode": "semantic",
+            "doctor_checked": False,
+            "recall_checked": True,
+            "contextual_logic_required": False,
+            "contextual_logic_checked": False,
+            "ritual_satisfied": False,
+            "lifecycle_mutated": False,
+        }
+    else:
+        status = dict(value)
+    expected = {
+        "schema",
+        "ready",
+        "semantic_mode",
+        "doctor_checked",
+        "recall_checked",
+        "contextual_logic_required",
+        "contextual_logic_checked",
+        "ritual_satisfied",
+        "lifecycle_mutated",
+    }
+    if set(status) != expected:
+        raise ValueError("runtime preflight status is invalid")
+    for field in (
+        "ready",
+        "doctor_checked",
+        "recall_checked",
+        "contextual_logic_required",
+        "contextual_logic_checked",
+        "ritual_satisfied",
+        "lifecycle_mutated",
+    ):
+        if not isinstance(status.get(field), bool):
+            raise ValueError("runtime preflight status is invalid")
+    if (
+        status.get("schema") != RUNTIME_STATUS_SCHEMA
+        or status.get("semantic_mode") != "semantic"
+    ):
+        raise ValueError("runtime preflight status is invalid")
+    ritual_satisfied = status.get("ritual_satisfied") is True
+    context_satisfied = (
+        status.get("contextual_logic_required") is not True
+        or status.get("contextual_logic_checked") is True
+    )
+    if ritual_satisfied and not (
+        status.get("ready") is True
+        and status.get("doctor_checked") is True
+        and status.get("recall_checked") is True
+        and context_satisfied
+        and status.get("lifecycle_mutated") is False
+    ):
+        raise ValueError("runtime preflight ritual status is inconsistent")
+    return status
+
+
+def _apply_evidence_budget(evidence: dict[str, Any]) -> None:
+    output = _refresh_evidence_budget(evidence)
+    if _within_evidence_budget(output):
+        return
+    for record in _payload_omission_order(evidence):
+        if record.get("payload") is None:
+            continue
+        record["payload"] = None
+        record["payload_omitted_reason"] = "host_preflight_token_budget"
+        output = _refresh_evidence_budget(evidence)
+        if _within_evidence_budget(output):
+            return
+    raise RuntimeError("protected preflight metadata exceeds the host context budget")
+
+
+def _refresh_evidence_budget(evidence: dict[str, Any]) -> str:
+    budget_value = evidence.get("evidence_budget")
+    if not isinstance(budget_value, dict):
+        raise ValueError("preflight evidence budget is invalid")
+    budget = budget_value
+    budget["payloads_omitted"] = sum(
+        record.get("payload_omitted_reason") is not None
+        for record in _all_evidence_records(evidence)
+    )
+    for _ in range(8):
+        output = _render_preflight_output(evidence)
+        estimated_tokens = _estimate_tokens(output)
+        if budget.get("estimated_tokens") == estimated_tokens:
+            return output
+        budget["estimated_tokens"] = estimated_tokens
+    raise RuntimeError("protected preflight token accounting did not converge")
+
+
+def _within_evidence_budget(output: str) -> bool:
+    return (
+        len(output) <= MAX_PREFLIGHT_CONTEXT_CHARS
+        and _estimate_tokens(output) <= MAX_PREFLIGHT_ESTIMATED_TOKENS
+    )
+
+
+def _payload_omission_order(evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    context = evidence.get("contextual_logic")
+    recall = _object(evidence.get("recall"), "preflight recall evidence")
+    groups: list[list[dict[str, Any]]] = []
+    if isinstance(context, Mapping):
+        compact_context = dict(context)
+        groups.extend(
+            (
+                _record_list(compact_context.get("evidence")),
+                _record_list(compact_context.get("logic_roots")),
+            )
+        )
+    groups.append(_record_list(recall.get("results")))
+    ordered: list[dict[str, Any]] = []
+    for group in groups:
+        ordered.extend(
+            sorted(
+                group,
+                key=lambda record: int(record.get("payload_char_count", 0)),
+                reverse=True,
+            )
+        )
+    return ordered
+
+
+def _all_evidence_records(evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    recall = _object(evidence.get("recall"), "preflight recall evidence")
+    records = _record_list(recall.get("results"))
+    context = evidence.get("contextual_logic")
+    if isinstance(context, Mapping):
+        compact_context = dict(context)
+        records.extend(_record_list(compact_context.get("logic_roots")))
+        records.extend(_record_list(compact_context.get("evidence")))
+    return records
+
+
+def _record_list(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError("preflight evidence records are invalid")
+    return value
+
+
+def _render_preflight_output(envelope: Mapping[str, Any]) -> str:
     encoded = _safe_json(envelope)
-    output = "\n".join(
+    host = envelope.get("host")
+    query_source = envelope.get("query_source")
+    return "\n".join(
         (
             "ECHO VEIL REQUIRED MEMORY PREFLIGHT",
             (
@@ -252,12 +677,24 @@ def build_preflight_context(
                 "The layer, confidence, provenance, temporal state, and "
                 "promotion/archive recommendations are part of each memory result."
             ),
+            (
+                "A direct Codex root receipt does not authorize collaboration or "
+                "subagent creation; direct Codex children remain outside the "
+                "qualified boundary."
+                if host == "codex" and query_source == "current_user_prompt"
+                else "This receipt applies only to the exact host query source shown."
+            ),
             f"MEMORY_EVIDENCE_JSON={encoded}",
         )
     )
-    if len(output) > MAX_PREFLIGHT_CONTEXT_CHARS:
-        raise RuntimeError("protected preflight exceeds the host context budget")
-    return output
+
+
+def _estimate_tokens(value: str) -> int:
+    return max(1, math.ceil(len(value.encode("utf-8")) / 3))
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round(max(0.0, (time.perf_counter() - started_at) * 1_000.0), 3)
 
 
 def parse_hook_request(
@@ -285,27 +722,39 @@ def parse_hook_request(
         raise ValueError("invalid hook request") from exc
     if not isinstance(request, Mapping):
         raise ValueError("hook request must be an object")
-    event = request.get("hook_event_name")
+    raw_event = _first_present(request, "hook_event_name", "hookEventName")
+    event = _HOOK_EVENT_ALIASES.get(str(raw_event) if raw_event is not None else "")
     if mode == "prompt":
         if event not in PROMPT_HOOK_EVENTS:
             raise ValueError("hook event is unsupported")
         prompt = _bounded_required_string(
-            request.get("prompt"),
+            _first_present(request, "prompt"),
             "prompt",
             MAX_QUERY_CHARS,
         )
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
-        return HookRequest(event=str(event), query=prompt)
+        return HookRequest(
+            event=event,
+            query=prompt,
+            raw_event=None if event == str(raw_event) else str(raw_event),
+        )
     agent_tools = AGENT_TOOL_NAMES.get(host)
-    if (
-        agent_tools is None
-        or event != AGENT_HOOK_EVENT
-        or request.get("tool_name") not in agent_tools
-    ):
+    tool_name = _first_present(request, "tool_name", "toolName")
+    if agent_tools is None or event != AGENT_HOOK_EVENT or tool_name not in agent_tools:
         raise ValueError("agent hook event is unsupported")
-    tool_input = _object(request.get("tool_input"), "agent tool input")
-    supported_fields = ("prompt",) if host == "droid" else ("message", "prompt")
+    tool_input = _object(
+        _first_present(request, "tool_input", "toolInput"),
+        "agent tool input",
+    )
+    supported_fields = (
+        ("prompt",)
+        if host in {"droid", "grok-build"}
+        else (
+            "message",
+            "prompt",
+        )
+    )
     query_fields = [
         field
         for field in supported_fields
@@ -326,6 +775,7 @@ def parse_hook_request(
         query=query,
         tool_input=tool_input,
         query_field=query_field,
+        raw_event=None if event == str(raw_event) else str(raw_event),
     )
 
 
@@ -336,6 +786,7 @@ def success_output(request: HookRequest, context: str) -> dict[str, Any]:
         raise ValueError("hook event is unsupported")
     if not context or len(context) > MAX_PREFLIGHT_CONTEXT_CHARS:
         raise ValueError("hook context is invalid")
+    hook_event = request.raw_event or request.event
     if request.event == AGENT_HOOK_EVENT:
         tool_input = _object(request.tool_input, "agent tool input")
         query_field = request.query_field
@@ -348,7 +799,7 @@ def success_output(request: HookRequest, context: str) -> dict[str, Any]:
         )
         return {
             "hookSpecificOutput": {
-                "hookEventName": AGENT_HOOK_EVENT,
+                "hookEventName": hook_event,
                 "permissionDecision": "allow",
                 "permissionDecisionReason": (
                     "Echo Veil protected subagent preflight completed."
@@ -358,13 +809,13 @@ def success_output(request: HookRequest, context: str) -> dict[str, Any]:
         }
     return {
         "hookSpecificOutput": {
-            "hookEventName": request.event,
+            "hookEventName": hook_event,
             "additionalContext": context,
         }
     }
 
 
-def blocked_output(mode: str = "prompt") -> dict[str, Any]:
+def blocked_output(mode: str = "prompt", *, host: str = "codex") -> dict[str, Any]:
     """Stop a host turn or deny an Agent tool without leaking failure detail."""
 
     if mode == "agent":
@@ -377,6 +828,15 @@ def blocked_output(mode: str = "prompt") -> dict[str, Any]:
         }
     if mode != "prompt":
         raise ValueError("hook mode is invalid")
+    if host == "grok-build":
+        # Grok UserPromptSubmit is non-blocking and hook failures fail open.
+        # Inject a warning instead of pretending the turn was stopped.
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": GROK_PREFLIGHT_UNAVAILABLE,
+            }
+        }
     return {
         "continue": False,
         "stopReason": REQUIRED_PREFLIGHT_FAILURE,
@@ -461,25 +921,53 @@ def main(argv: list[str] | None = None, *, stream: BinaryIO | None = None) -> in
                 "doctor",
             ]
         )
-        with _open_memory(runtime_args) as memory:
-            context = prepare_preflight(
-                memory,
-                request.query,
-                host=args.host,
-                expected_profile=args.profile,
-                expected_model=args.embedding_model,
-                expected_dimension=args.embedding_dimension,
-                query_source=(
-                    "subagent_task"
-                    if request.event == AGENT_HOOK_EVENT
-                    else "current_user_prompt"
-                ),
+        query_source = (
+            "subagent_task"
+            if request.event == AGENT_HOOK_EVENT
+            else "current_user_prompt"
+        )
+        if runtime_args.broker_socket is not None:
+            broker_result = BrokerClient(
+                runtime_args.broker_socket,
+                caller=args.host,
+            ).call(
+                "preflight",
+                {
+                    "query": request.query,
+                    "expected_profile": args.profile,
+                    "expected_scope": args.scope,
+                    "expected_model": args.embedding_model,
+                    "expected_dimension": args.embedding_dimension,
+                    "query_source": query_source,
+                },
             )
+            context_value = broker_result.get("context")
+            if (
+                broker_result.get("preflight_ready") is not True
+                or broker_result.get("semantic") is not True
+                or broker_result.get("profile") != args.profile
+                or broker_result.get("scope") != args.scope
+                or not isinstance(context_value, str)
+                or not context_value
+            ):
+                raise RuntimeError("broker preflight response is invalid")
+            context = context_value
+        else:
+            with _open_memory(runtime_args) as memory:
+                context = prepare_preflight(
+                    memory,
+                    request.query,
+                    host=args.host,
+                    expected_profile=args.profile,
+                    expected_model=args.embedding_model,
+                    expected_dimension=args.embedding_dimension,
+                    query_source=query_source,
+                )
         _write_output(success_output(request, context))
     except (BrokenPipeError, KeyboardInterrupt):
         return 0
     except Exception:
-        _write_output(blocked_output(args.hook_mode))
+        _write_output(blocked_output(args.hook_mode, host=args.host))
     return 0
 
 
@@ -684,6 +1172,13 @@ def _compact_edges(value: object) -> list[dict[str, Any]]:
             }
         )
     return edges
+
+
+def _first_present(request: Mapping[str, Any], *names: str) -> object:
+    for name in names:
+        if name in request:
+            return request[name]
+    return None
 
 
 def _object(value: object, label: str) -> dict[str, Any]:

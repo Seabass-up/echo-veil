@@ -3,13 +3,16 @@
   "profile": "echo-universal-qwen3-v1",
   "scope": "local-user",
   "shared_source_artifacts": [
+    "src/echo_veil/agent_broker.py",
     "src/echo_veil/agent_cli.py",
     "src/echo_veil/agent_memory.py",
     "src/echo_veil/agent_preflight.py",
+    "src/echo_veil/codex_artifact.py",
     "src/echo_veil/guarded_runner.py",
-    "src/echo_veil/memory_layers.py"
+    "src/echo_veil/memory_layers.py",
+    "src/echo_veil/preflight_receipt.py"
   ],
-  "shared_source_digest": "sha256:8d6025ee2d4b7b9a6e553a7b0ad21e97e5b02907ed48cc8199d9287e54a4566c",
+  "shared_source_digest": "sha256:b50586e4f69eec351ea2da066b7da3b055c645fe0cae45c9705d2a4481702e28",
   "hosts": [
     {
       "id": "algo-cli",
@@ -122,7 +125,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:e93def29d2da6dbda7e153fc2305bdb34e01ce67aabd33127980c36bf46f6b34",
+      "source_digest": "sha256:860151cc71766052982aaa97f7746c1b837742766590680f2a2a437963e90351",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -141,11 +144,11 @@
     {
       "id": "codex",
       "display_name": "Codex",
-      "adapter": "Trusted root hook plus shield-owned headless launcher and required stdio MCP",
-      "evidence_state": "qualified",
-      "qualified_boundary": "Trusted direct root turns and shielded headless turns with parallel agents disabled",
-      "tested_on": "2026-07-25",
-      "tested_version": "0.144.5",
+      "adapter": "Artifact-bound isolated headless/interactive profiles plus direct protected-recall hook",
+      "evidence_state": "release_pending",
+      "qualified_boundary": "Receipt-bound isolated headless and interactive 0.146.0 turns; direct mode and collaboration excluded",
+      "tested_on": "2026-08-11",
+      "tested_version": "0.146.0",
       "source_artifacts": [
         ".agents/plugins/marketplace.json",
         ".codex-plugin/plugin.json",
@@ -153,29 +156,31 @@
         "hooks/hooks.json",
         "skills/echo-veil-memory/SKILL.md",
         "pyproject.toml",
+        "src/echo_veil/codex_artifact.py",
         "src/echo_veil/guarded_runner.py",
+        "src/echo_veil/preflight_receipt.py",
+        "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:44812fcf19aa70f5a23cfeb26b1c0a8a63c35781411fc6d5b6dd257cb9ee5ff1",
+      "source_digest": "sha256:c18f3e9feb3f31d1a3a69d1968a8728b9adbe4fb58f1554348c56daac01b1c20",
       "checks": [
-        "Plugin and MCP loaded",
-        "Exact hook hashes trusted",
-        "Native memory disabled",
-        "Forced-outage zero-token root turn",
-        "Healthy shared Qwen3 preflight",
-        "Matcher covers Agent and current collaboration spawn tool aliases",
-        "Delivered Agent events deny before opening Echo under the child-only control",
-        "Shielded launcher preflights before Codex process creation",
-        "Shielded Codex ignores ambient user config and requires one Echo MCP server",
-        "Shielded Codex exposes only validated auth through an owner-only temporary home",
-        "Shielded Codex disables native memory, Chronicle, goals, plugins, and parallel agents",
-        "Healthy Codex headless turn completed through the validated installed wheel",
-        "Forced semantic outage returned before Codex startup"
+        "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
+        "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
+        "One-byte artifact drift blocks startup",
+        "Healthy isolated headless turn completed through one required Echo MCP server",
+        "Healthy isolated interactive profile loaded only verified Echo hook/skill assets and one required MCP server",
+        "Plugin loader, native memory, Chronicle, goals, account connectors, ambient plugins, and collaboration disabled",
+        "Forced semantic outage returned before Codex startup",
+        "Direct root receipt explicitly marks collaboration unauthorized",
+        "Direct child observed inheriting root preflight rather than receiving task-specific evidence",
+        "Direct environment observed exposing a competing mutable-memory plugin",
+        "Owner-only broker endpoint and Echo signing authority bound when enabled"
       ],
       "remaining": [
-        "Direct Codex collaboration bypassed PreToolUse and is not qualified",
-        "The shielded launcher deliberately disables subagents until Codex exposes an enforceable spawn boundary",
-        "Out-of-band spawn paths are not covered"
+        "Repository changes are uncommitted and unreleased, so the installed 0.146.0 runtime remains release-stale",
+        "Direct Codex is protected recall but not singular while competing mutable memory is exposed",
+        "Direct collaboration is unqualified until every child receives and consumes a fresh task-specific receipt",
+        "The isolated launcher deliberately disables subagents; out-of-band spawn paths are not covered"
       ]
     },
     {
@@ -351,7 +356,7 @@
   "limitations": [
     "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
     "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
-    "Pi remains release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified.",
+    "Pi and Codex remain release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified.",
     "Algo CLI and AIP implementation sources live in separate repositories and retain independent release gates.",
     "Production CKKS, enclave, mTLS, Access, ZKP, and operational controls require external deployment evidence."
   ]

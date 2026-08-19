@@ -70,8 +70,66 @@ def test_healthy_hook_injects_context_and_execution_calls_provider(
     assert calls == [request]
 
 
+def test_oversized_skill_expansion_uses_bounded_preflight_query(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger=plugin.__name__)
+    header = (
+        '[IMPORTANT: The user invoked the "llm-wiki" skill: private-skill-header]\n'
+    )
+    tail = "\n[Skill directory resolved]\nprivate-concrete-request-tail"
+    expanded_message = header + ("x" * (20_294 - len(header) - len(tail))) + tail
+    assert len(expanded_message) == 20_294
+    captured: dict[str, Any] = {}
+
+    def preflight(_action: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update(arguments)
+        return _preflight()
+
+    monkeypatch.setattr(plugin, "_run_rpc", preflight)
+    injected = plugin.on_pre_llm_call(
+        session_id="session",
+        task_id="task",
+        turn_id="skill-turn",
+        user_message=expanded_message,
+    )
+    assert injected is not None
+    bounded_query = captured["query"]
+    assert len(bounded_query) == plugin.MAX_QUERY_CHARS
+    assert bounded_query.startswith(header)
+    assert bounded_query.endswith(tail)
+    assert plugin._PREFLIGHT_QUERY_OMISSION in bounded_query
+    assert "reason=preflight_query_middle_omitted" in caplog.text
+    assert "private-skill-header" not in caplog.text
+    assert "private-concrete-request-tail" not in caplog.text
+
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": f"{expanded_message}\n\n{injected['context']}",
+            }
+        ]
+    }
+    provider_calls: list[object] = []
+    result = plugin.on_llm_execution(
+        request=request,
+        next_call=lambda value: provider_calls.append(value) or "provider-response",
+        session_id="session",
+        task_id="task",
+        turn_id="skill-turn",
+        api_mode="chat_completions",
+        model="local-model",
+    )
+
+    assert result == "provider-response"
+    assert provider_calls == [request]
+
+
 def test_failed_preflight_returns_generic_zero_usage_without_provider(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
         plugin,
@@ -105,6 +163,8 @@ def test_failed_preflight_returns_generic_zero_usage_without_provider(
     assert result.choices[0].message.content == plugin.REQUIRED_PREFLIGHT_FAILURE
     assert result.usage.total_tokens == 0
     assert "sensitive backend detail" not in result.choices[0].message.content
+    assert "reason=preflight_rpc_unavailable" in caplog.text
+    assert "sensitive backend detail" not in caplog.text
 
 
 def test_attestation_is_bound_to_exact_session_task_and_turn(
@@ -135,6 +195,7 @@ def test_attestation_is_bound_to_exact_session_task_and_turn(
 
 def test_execution_blocks_when_host_drops_current_turn_context(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(plugin, "_run_rpc", lambda *_args, **_kwargs: _preflight())
     injected = plugin.on_pre_llm_call(
@@ -147,7 +208,14 @@ def test_execution_blocks_when_host_drops_current_turn_context(
     provider_calls: list[object] = []
 
     result = plugin.on_llm_execution(
-        request={"messages": [{"role": "user", "content": "nonce was dropped"}]},
+        request={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "nonce was dropped: private-request-detail",
+                }
+            ]
+        },
         next_call=lambda value: provider_calls.append(value),
         session_id="session",
         task_id="task",
@@ -158,6 +226,227 @@ def test_execution_blocks_when_host_drops_current_turn_context(
 
     assert provider_calls == []
     assert result.usage.total_tokens == 0
+    assert "reason=protected_context_missing" in caplog.text
+    assert "private-request-detail" not in caplog.text
+
+
+def test_long_tool_turn_keeps_valid_current_user_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: tool schemas/history must not exhaust the nonce scan."""
+
+    monkeypatch.setattr(plugin, "_run_rpc", lambda *_args, **_kwargs: _preflight())
+    injected = plugin.on_pre_llm_call(
+        session_id="session",
+        task_id="task",
+        turn_id="long-tool-turn",
+        user_message="Complete the multi-step task.",
+    )
+    assert injected is not None
+
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": f"Complete the multi-step task.\n\n{injected['context']}",
+        }
+    ]
+    for index in range(150):
+        messages.extend(
+            (
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call-{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "inspect_workspace",
+                                "arguments": '{"path":"src"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": f"call-{index}",
+                    "content": f"tool result {index}: " + ("x" * 200),
+                },
+            )
+        )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"workspace_tool_{index}",
+                "description": "Inspect a workspace object. " + ("d" * 300),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "p" * 100},
+                        "options": {
+                            "type": "object",
+                            "properties": {
+                                "recursive": {"type": "boolean"},
+                                "limit": {"type": "integer"},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        for index in range(35)
+    ]
+    request = {"model": "local-model", "messages": messages, "tools": tools}
+    provider_calls: list[object] = []
+
+    result = plugin.on_llm_execution(
+        request=request,
+        next_call=lambda value: provider_calls.append(value) or "provider-response",
+        session_id="session",
+        task_id="task",
+        turn_id="long-tool-turn",
+        api_mode="chat_completions",
+        model="local-model",
+    )
+
+    assert result == "provider-response"
+    assert provider_calls == [request]
+
+
+def test_execution_ignores_nonce_copies_outside_user_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin, "_run_rpc", lambda *_args, **_kwargs: _preflight())
+    injected = plugin.on_pre_llm_call(
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        user_message="Use protected context.",
+    )
+    assert injected is not None
+    request = {
+        "messages": [{"role": "user", "content": "unprotected user message"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "untrusted_tool",
+                    "description": injected["context"],
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        "metadata": {"copied_context": injected["context"]},
+    }
+    provider_calls: list[object] = []
+
+    result = plugin.on_llm_execution(
+        request=request,
+        next_call=lambda value: provider_calls.append(value),
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        api_mode="chat_completions",
+        model="local-model",
+    )
+
+    assert provider_calls == []
+    assert result.usage.total_tokens == 0
+
+
+def test_execution_rejects_bare_nonce_without_protected_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin, "_run_rpc", lambda *_args, **_kwargs: _preflight())
+    injected = plugin.on_pre_llm_call(
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        user_message="Use protected context.",
+    )
+    assert injected is not None
+    nonce_line = next(
+        line
+        for line in injected["context"].splitlines()
+        if line.startswith("ECHO_VEIL_HERMES_TURN_NONCE=")
+    )
+    provider_calls: list[object] = []
+
+    result = plugin.on_llm_execution(
+        request={"messages": [{"role": "user", "content": nonce_line}]},
+        next_call=lambda value: provider_calls.append(value),
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        api_mode="chat_completions",
+        model="local-model",
+    )
+
+    assert provider_calls == []
+    assert result.usage.total_tokens == 0
+
+
+@pytest.mark.parametrize(
+    ("api_mode", "provider_request"),
+    (
+        (
+            "codex_responses",
+            {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "{context}"}],
+                    }
+                ]
+            },
+        ),
+        (
+            "anthropic_messages",
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "{context}"}],
+                    }
+                ]
+            },
+        ),
+        (
+            "bedrock_converse",
+            {"messages": [{"role": "user", "content": [{"text": "{context}"}]}]},
+        ),
+    ),
+)
+def test_execution_accepts_supported_provider_user_text_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    api_mode: str,
+    provider_request: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(plugin, "_run_rpc", lambda *_args, **_kwargs: _preflight())
+    injected = plugin.on_pre_llm_call(
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        user_message="Use protected context.",
+    )
+    assert injected is not None
+    container_name = "input" if api_mode == "codex_responses" else "messages"
+    provider_request[container_name][0]["content"][0]["text"] = injected["context"]
+    provider_calls: list[object] = []
+
+    result = plugin.on_llm_execution(
+        request=provider_request,
+        next_call=lambda value: provider_calls.append(value) or "provider-response",
+        session_id="session",
+        task_id="task",
+        turn_id="turn",
+        api_mode=api_mode,
+        model="local-model",
+    )
+
+    assert result == "provider-response"
+    assert provider_calls == [provider_request]
 
 
 def test_deny_only_outage_control_never_reaches_child_or_provider(

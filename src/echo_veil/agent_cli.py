@@ -7,13 +7,16 @@ import json
 import math
 import os
 import re
+import signal
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 from . import __version__
 from ._json import strict_json_loads
+from .agent_broker import BrokerClient, BrokerServer, default_broker_socket
 from .agent_memory import (
     AgentMemory,
     AlwaysAvailableMemory,
@@ -42,7 +45,10 @@ SERVER_INSTRUCTIONS = (
     "and Contextual Logic only for a typed relationship among existing memories. "
     "Write compact intent/outcome seed crystals rather than transcripts; use "
     "echo_veil_refresh_live to update active state without silent overwrite. "
-    "Call echo_veil_recall before relying on stored facts and use "
+    "A host-delivered exact-turn runtime_status with ritual_satisfied=true "
+    "satisfies its completed doctor, recall, and applicable context checks only "
+    "for that turn; do not repeat them. Otherwise call echo_veil_recall before "
+    "relying on stored facts and use "
     "echo_veil_context only when the protected Contextual Logic path is needed. "
     "State returned layers and provenance, respect gated results, follow "
     "promotion/archive recommendations, and use echo_veil_forget for explicit "
@@ -86,6 +92,14 @@ class _RuntimeAvailabilityMemory:
             reason="runtime_embedding_service_unavailable",
         )
         return self._memory
+
+    @property
+    def profile_dir(self) -> Path:
+        return self._memory.profile_dir
+
+    @property
+    def scope(self) -> str:
+        return self._memory.scope
 
     def remember(
         self,
@@ -195,6 +209,70 @@ class _RuntimeAvailabilityMemory:
                 layers=layers,
             )
 
+    def preview_recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            preview = getattr(self._memory, "preview_recall", None)
+            if callable(preview):
+                return preview(
+                    query,
+                    top_k=top_k,
+                    min_score=min_score,
+                    allow_inferential=allow_inferential,
+                    as_of=as_of,
+                    layers=layers,
+                )
+            return self._memory.recall(
+                query,
+                top_k=top_k,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+                layers=layers,
+            )
+        except EmbeddingUnavailable:
+            return self._degrade().recall(
+                query,
+                top_k=top_k,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+                layers=layers,
+            )
+
+    def availability_recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Force one encrypted, lifecycle-neutral availability lookup.
+
+        RPC processes are short lived. Closing the semantic adapter before
+        opening the read-only payload store prevents this diagnostic path from
+        sharing a writer or silently falling back to ordinary semantic recall.
+        """
+
+        return self._degrade().recall(
+            query,
+            top_k=top_k,
+            min_score=min_score,
+            allow_inferential=False,
+            as_of=as_of,
+            layers=layers,
+        )
+
     def context(
         self,
         query: str,
@@ -206,6 +284,45 @@ class _RuntimeAvailabilityMemory:
         max_records: int = 8,
     ) -> dict[str, Any]:
         try:
+            return self._memory.context(
+                query,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+                max_depth=max_depth,
+                max_records=max_records,
+            )
+        except EmbeddingUnavailable:
+            return self._degrade().context(
+                query,
+                min_score=min_score,
+                allow_inferential=allow_inferential,
+                as_of=as_of,
+                max_depth=max_depth,
+                max_records=max_records,
+            )
+
+    def preview_context(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        max_depth: int = 1,
+        max_records: int = 8,
+    ) -> dict[str, Any]:
+        try:
+            preview = getattr(self._memory, "preview_context", None)
+            if callable(preview):
+                return preview(
+                    query,
+                    min_score=min_score,
+                    allow_inferential=allow_inferential,
+                    as_of=as_of,
+                    max_depth=max_depth,
+                    max_records=max_records,
+                )
             return self._memory.context(
                 query,
                 min_score=min_score,
@@ -293,6 +410,7 @@ class _RuntimeAvailabilityMemory:
 
 MemoryAdapter = AgentMemory | AlwaysAvailableMemory | _RuntimeAvailabilityMemory
 MemoryFactory = Callable[[], MemoryAdapter]
+RpcDispatcher = Callable[[str, Mapping[str, Any]], dict[str, Any]]
 
 _ABSOLUTE_PATH = re.compile(
     r"(?:[A-Za-z]:[\\/](?:[^\s\\/]+[\\/])+[^\s]+|/(?:[^\s/]+/)+[^\s]+)"
@@ -502,14 +620,15 @@ TOOLS: tuple[dict[str, Any], ...] = (
     {
         "name": "echo_veil_recall",
         "description": (
-            "Recall relevant local Echo Veil memories and advance their decay "
-            "lifecycle. During an embedding outage, an explicitly marked read-only "
-            "availability layer can return only strong keyed lexical matches. "
-            "Payloads are withheld when confidence policy gates them. Preserve "
-            "both leading results when ranking_ambiguous=true and every returned "
-            "possible-conflict group member when competing_memory_detected=true. "
-            "Never infer a conflict resolution; degraded results are neither "
-            "semantic nor authoritative."
+            "Recall relevant local Echo Veil memories without advancing decay "
+            "or reinforcement. Ordinary recall is lifecycle-neutral. During an "
+            "embedding outage, an explicitly marked read-only availability layer "
+            "can return only strong keyed lexical matches. Payloads are withheld "
+            "when confidence policy gates them. Preserve both leading results "
+            "when ranking_ambiguous=true and every returned possible-conflict "
+            "group member when competing_memory_detected=true. Never infer a "
+            "conflict resolution; degraded results are neither semantic nor "
+            "authoritative."
         ),
         "inputSchema": {
             "type": "object",
@@ -570,9 +689,9 @@ TOOLS: tuple[dict[str, Any], ...] = (
             },
         },
         "annotations": {
-            "readOnlyHint": False,
+            "readOnlyHint": True,
             "destructiveHint": False,
-            "idempotentHint": False,
+            "idempotentHint": True,
             "openWorldHint": False,
         },
     },
@@ -885,6 +1004,50 @@ def dispatch(
             response.get("competing_pair_preserved", False)
         )
         return response
+    if action == "availability_recall":
+        _require_only(
+            supplied,
+            {"query", "top_k", "min_score", "as_of", "layers"},
+        )
+        requested_top_k = supplied.get("top_k", 5)
+        if isinstance(requested_top_k, bool) or not isinstance(requested_top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= requested_top_k <= 20:
+            raise ValueError("top_k must be between 1 and 20")
+        effective_top_k = max(MIN_HOST_RECALL_RESULTS, requested_top_k)
+        arguments_value = {
+            "query": _required_string(supplied, "query"),
+            "top_k": effective_top_k,
+            "min_score": supplied.get("min_score"),
+            "as_of": supplied.get("as_of"),
+            "layers": supplied.get("layers"),
+        }
+        if isinstance(memory, _RuntimeAvailabilityMemory):
+            response = memory.availability_recall(**arguments_value)  # type: ignore[arg-type]
+        elif isinstance(memory, AlwaysAvailableMemory):
+            response = memory.recall(
+                **arguments_value,  # type: ignore[arg-type]
+                allow_inferential=False,
+            )
+        else:
+            raise RuntimeError(
+                "availability recall requires the explicit read-only availability layer"
+            )
+        if (
+            response.get("degraded") is not True
+            or response.get("semantic_available") is not False
+            or response.get("lifecycle_mutated") is not False
+        ):
+            raise RuntimeError("availability recall did not remain read-only")
+        response["requested_top_k"] = requested_top_k
+        response["effective_top_k"] = effective_top_k
+        response["ambiguity_candidates_preserved"] = effective_top_k >= 2
+        response["competing_candidates_preserved"] = bool(
+            response.get("competing_pair_preserved", False)
+        )
+        response["model_turn_authorized"] = False
+        response["mutations_allowed"] = False
+        return response
     if action in {"context", "echo_veil_context"}:
         _require_only(
             supplied,
@@ -905,10 +1068,84 @@ def dispatch(
             max_depth=supplied.get("max_depth", 1),  # type: ignore[arg-type]
             max_records=supplied.get("max_records", 8),  # type: ignore[arg-type]
         )
+    if action == "preflight_v2":
+        _require_only(
+            supplied,
+            {
+                "query",
+                "expected_profile",
+                "expected_scope",
+                "query_source",
+                "session_id",
+                "turn_id",
+                "model_digest",
+                "tool_manifest_digest",
+                "artifact_authority_id",
+            },
+        )
+        if caller is None:
+            raise RuntimeError("preflight requires a bounded caller identity")
+        # This action is RPC-only and is not advertised as a model-callable tool.
+        from .agent_preflight import (
+            PREFLIGHT_HOSTS,
+            PreflightV2Memory,
+            prepare_preflight_v2,
+        )
+        from .preflight_receipt import PreflightReceiptAuthority
+
+        if caller not in PREFLIGHT_HOSTS:
+            raise RuntimeError("preflight caller is unsupported")
+        expected_profile = _required_string(supplied, "expected_profile")
+        expected_scope = _required_string(supplied, "expected_scope")
+        if (
+            _CALLER_ID.fullmatch(expected_profile) is None
+            or memory.profile_dir.name != expected_profile
+        ):
+            raise ValueError("expected_profile does not match the open profile")
+        if (
+            _CALLER_ID.fullmatch(expected_scope) is None
+            or memory.scope != expected_scope
+        ):
+            raise ValueError("expected_scope does not match the open profile")
+        if not callable(getattr(memory, "preview_recall", None)) or not callable(
+            getattr(memory, "preview_context", None)
+        ):
+            raise RuntimeError("lifecycle-neutral semantic preflight is unavailable")
+        query_source = supplied.get("query_source", "current_user_prompt")
+        if not isinstance(query_source, str):
+            raise TypeError("query_source must be a string")
+        authority = PreflightReceiptAuthority(memory.profile_dir)
+        return prepare_preflight_v2(
+            cast(PreflightV2Memory, memory),
+            _required_string(supplied, "query"),
+            authority=authority,
+            host=caller,
+            profile=expected_profile,
+            scope=expected_scope,
+            session_id=_required_string(supplied, "session_id"),
+            turn_id=_required_string(supplied, "turn_id"),
+            model_digest=_required_string(supplied, "model_digest"),
+            tool_manifest_digest=_required_string(
+                supplied,
+                "tool_manifest_digest",
+            ),
+            artifact_authority_id=_required_string(
+                supplied,
+                "artifact_authority_id",
+            ),
+            query_source=query_source,
+        )
     if action == "preflight":
         _require_only(
             supplied,
-            {"query", "expected_profile", "query_source"},
+            {
+                "query",
+                "expected_profile",
+                "expected_scope",
+                "expected_model",
+                "expected_dimension",
+                "query_source",
+            },
         )
         if caller is None:
             raise RuntimeError("preflight requires a bounded caller identity")
@@ -928,6 +1165,31 @@ def dispatch(
             or _CALLER_ID.fullmatch(expected_profile) is None
         ):
             raise ValueError("expected_profile must be a bounded profile identifier")
+        memory_scope = getattr(memory, "scope", "local-user")
+        expected_scope = supplied.get("expected_scope", memory_scope)
+        if (
+            not isinstance(expected_scope, str)
+            or _CALLER_ID.fullmatch(expected_scope) is None
+            or memory_scope != expected_scope
+        ):
+            raise ValueError("expected_scope does not match the open profile")
+        expected_model = supplied.get("expected_model", DEFAULT_OLLAMA_MODEL)
+        if (
+            not isinstance(expected_model, str)
+            or not expected_model
+            or len(expected_model) > 256
+        ):
+            raise ValueError("expected_model must be a bounded model identifier")
+        expected_dimension = supplied.get(
+            "expected_dimension",
+            DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
+        )
+        if (
+            isinstance(expected_dimension, bool)
+            or not isinstance(expected_dimension, int)
+            or expected_dimension < 1
+        ):
+            raise ValueError("expected_dimension must be a positive integer")
         query_source = supplied.get("query_source", "current_user_prompt")
         if not isinstance(query_source, str):
             raise TypeError("query_source must be a string")
@@ -936,6 +1198,8 @@ def dispatch(
             _required_string(supplied, "query"),
             host=caller,
             expected_profile=expected_profile,
+            expected_model=expected_model,
+            expected_dimension=expected_dimension,
             query_source=query_source,
         )
         return {
@@ -943,6 +1207,7 @@ def dispatch(
             "memory_authority": "echo-veil",
             "host": caller,
             "profile": expected_profile,
+            "scope": expected_scope,
             "query_source": query_source,
             "semantic": True,
             "context": context,
@@ -1034,15 +1299,20 @@ class McpServer:
         memory: MemoryAdapter | None = None,
         *,
         memory_factory: MemoryFactory | None = None,
+        rpc_dispatcher: RpcDispatcher | None = None,
         caller: str | None = None,
         operator_tools: bool = False,
     ) -> None:
-        if (memory is None) == (memory_factory is None):
+        if (
+            sum(value is not None for value in (memory, memory_factory, rpc_dispatcher))
+            != 1
+        ):
             raise ValueError(
-                "MCP server requires exactly one memory instance or memory factory"
+                "MCP server requires exactly one memory or broker dispatcher"
             )
         self.memory = memory
         self.memory_factory = memory_factory
+        self.rpc_dispatcher = rpc_dispatcher
         self.caller = _validate_caller(caller)
         self.operator_tools = operator_tools
         self.tools = TOOLS if operator_tools else AGENT_TOOLS
@@ -1093,7 +1363,12 @@ class McpServer:
         try:
             if tool_name not in self.allowed_tool_names:
                 raise ValueError("tool is not enabled for this MCP server")
-            if self.memory_factory is None:
+            if self.rpc_dispatcher is not None:
+                result = self.rpc_dispatcher(tool_name, arguments)
+                if tool_name == "echo_veil_doctor":
+                    result["mcp_profile_lease"] = "broker-persistent"
+                    result["shared_profile_safe"] = True
+            elif self.memory_factory is None:
                 if self.memory is None:  # pragma: no cover - constructor invariant
                     raise RuntimeError("MCP memory adapter is unavailable")
                 result = dispatch(
@@ -1144,12 +1419,14 @@ def run_mcp(
     memory: MemoryAdapter | None = None,
     *,
     memory_factory: MemoryFactory | None = None,
+    rpc_dispatcher: RpcDispatcher | None = None,
     caller: str | None = None,
     operator_tools: bool = False,
 ) -> int:
     server = McpServer(
         memory,
         memory_factory=memory_factory,
+        rpc_dispatcher=rpc_dispatcher,
         caller=caller,
         operator_tools=operator_tools,
     )
@@ -1195,7 +1472,14 @@ def _read_mcp_line(stream: BinaryIO) -> tuple[bytes, bool]:
     return raw_line, oversized
 
 
-def run_rpc(memory: MemoryAdapter, *, caller: str | None = None) -> int:
+def run_rpc(
+    memory: MemoryAdapter | None = None,
+    *,
+    rpc_dispatcher: RpcDispatcher | None = None,
+    caller: str | None = None,
+) -> int:
+    if (memory is None) == (rpc_dispatcher is None):
+        raise ValueError("RPC requires exactly one memory or broker dispatcher")
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds size limit")
@@ -1214,7 +1498,11 @@ def run_rpc(memory: MemoryAdapter, *, caller: str | None = None) -> int:
         raise ValueError("request contains unexpected fields")
     action = request.get("action")
     arguments = request.get("arguments", {})
-    result = dispatch(memory, action, arguments, caller=caller)  # type: ignore[arg-type]
+    if rpc_dispatcher is not None:
+        result = rpc_dispatcher(action, arguments)  # type: ignore[arg-type]
+    else:
+        assert memory is not None
+        result = dispatch(memory, action, arguments, caller=caller)  # type: ignore[arg-type]
     print(_json(result))
     return 0
 
@@ -1231,6 +1519,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--profile", default=os.environ.get("ECHO_VEIL_PROFILE", "default")
+    )
+    parser.add_argument(
+        "--broker-socket",
+        type=Path,
+        default=_optional_path_from_env("ECHO_VEIL_BROKER_SOCKET"),
+        help=(
+            "owner-only Unix socket for a persistent serialized Echo broker; "
+            "broker mode defaults to the selected profile directory"
+        ),
     )
     parser.add_argument(
         "--scope",
@@ -1303,7 +1600,7 @@ def build_parser() -> argparse.ArgumentParser:
             "default so ordinary agent hosts receive only the nine memory tools"
         ),
     )
-    parser.add_argument("mode", choices=("rpc", "mcp", "doctor"))
+    parser.add_argument("mode", choices=("rpc", "mcp", "doctor", "broker"))
     return parser
 
 
@@ -1311,6 +1608,43 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         caller = _validate_caller(args.caller)
+        if args.mode == "broker":
+            with _open_memory(args) as broker_memory:
+                socket_path = (
+                    default_broker_socket(broker_memory.profile_dir)
+                    if args.broker_socket is None
+                    else args.broker_socket.expanduser().absolute()
+                )
+                return _run_broker(broker_memory, socket_path)
+        if args.broker_socket is not None:
+            broker = BrokerClient(
+                args.broker_socket,
+                caller=caller or "local-cli",
+                timeout_seconds=min(
+                    float(args.profile_lock_timeout),
+                    120.0,
+                ),
+            )
+            if args.mode == "mcp":
+                # A required MCP server must prove the broker is reachable at
+                # startup, before the host is allowed to begin a model turn.
+                from .agent_preflight import assert_doctor_ready
+
+                assert_doctor_ready(
+                    broker.call("doctor", {}),
+                    expected_profile=args.profile,
+                    expected_model=args.embedding_model,
+                    expected_dimension=args.embedding_dimension,
+                )
+                return run_mcp(
+                    rpc_dispatcher=broker.call,
+                    caller=caller,
+                    operator_tools=args.operator_tools,
+                )
+            if args.mode == "rpc":
+                return run_rpc(rpc_dispatcher=broker.call, caller=caller)
+            print(_json(broker.call("doctor", {})))
+            return 0
         if args.mode == "mcp":
             # Validate the complete profile boundary at startup, then release
             # the writer lease. Each tool call reopens and closes the profile,
@@ -1334,6 +1668,37 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(_json(_public_error(exc)), file=sys.stderr)
         return 1
+
+
+def _run_broker(memory: MemoryAdapter, socket_path: Path) -> int:
+    """Serve a single profile until SIGINT/SIGTERM while preserving cleanup."""
+
+    stop = threading.Event()
+    previous_handlers: dict[int, Any] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop.set()
+
+    for signal_name in ("SIGINT", "SIGTERM"):
+        number = getattr(signal, signal_name, None)
+        if number is None:
+            continue
+        previous_handlers[int(number)] = signal.getsignal(number)
+        signal.signal(number, request_stop)
+    try:
+        BrokerServer(
+            socket_path,
+            lambda action, arguments, caller: dispatch(
+                memory,
+                action,
+                arguments,
+                caller=caller,
+            ),
+        ).serve_forever(stop_event=stop)
+    finally:
+        for number, handler in previous_handlers.items():
+            signal.signal(number, handler)
+    return 0
 
 
 def _open_memory(args: argparse.Namespace) -> MemoryAdapter:

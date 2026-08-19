@@ -118,6 +118,22 @@ def test_semantic_embedder_uses_calibrated_default_and_rejects_distractor(
     assert distractor["results"] == []
 
 
+def test_ordinary_recall_is_lifecycle_neutral(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        memory.remember("deployment location", "Current project documents live here.")
+        ordinary = memory.recall("Where should company files be kept?")
+        mutated = memory.recall(
+            "Where should company files be kept?",
+            mutate_lifecycle=True,
+        )
+
+    assert ordinary["lifecycle_mutated"] is False
+    assert mutated["lifecycle_mutated"] is True
+    recall_tool = next(tool for tool in TOOLS if tool["name"] == "echo_veil_recall")
+    assert "lifecycle-neutral" in recall_tool["description"]
+    assert recall_tool["annotations"]["readOnlyHint"] is True
+
+
 def test_semantic_answerability_rejects_same_subject_absent_fact(
     tmp_path: Path,
 ) -> None:
@@ -650,6 +666,7 @@ def test_pre_contract_scoped_profile_migrates_to_protected_short_term(
     profile = tmp_path / "default"
     database = sqlite3.connect(profile / "payloads.db")
     database.execute("DELETE FROM adapter_metadata WHERE key LIKE 'memory_contract%'")
+    database.execute("DELETE FROM adapter_metadata WHERE key LIKE 'record_integrity%'")
     database.commit()
     database.close()
     manifest_path = profile / "keyring.json"
@@ -682,7 +699,10 @@ def test_pre_contract_scoped_profile_migrates_to_protected_short_term(
     assert record["memory_layer"] == "short_term"
     assert record["provenance"] == ["migration:pre-layer-contract"]
     migrated_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert migrated_manifest["features"] == ["shielded-four-layer-v1"]
+    assert migrated_manifest["features"] == [
+        "record-integrity-hmac-v1",
+        "shielded-four-layer-v1",
+    ]
 
 
 def test_direct_long_term_write_is_blocked_until_explicit_promotion(
@@ -1574,6 +1594,49 @@ def test_always_available_recall_preserves_protected_competing_pair(
     )
 
 
+def test_rpc_availability_recall_is_manual_read_only_and_never_authorizes_turn(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        created = memory.remember(
+            "opal harbor recovery procedure",
+            "Use the opal harbor recovery procedure during a deployment outage.",
+        )
+    payload_database = tmp_path / "default" / "payloads.db"
+    lifecycle_database = tmp_path / "default" / "echo-veil.db"
+    payload_before = payload_database.read_bytes()
+    lifecycle_before = lifecycle_database.read_bytes()
+
+    with AlwaysAvailableMemory(tmp_path, reason="manual_read_only") as available:
+        response = dispatch(
+            available,
+            "availability_recall",
+            {"query": "opal harbor recovery procedure", "top_k": 1},
+            caller="pi",
+        )
+        with pytest.raises(ValueError, match="unexpected arguments"):
+            dispatch(
+                available,
+                "availability_recall",
+                {
+                    "query": "opal harbor recovery procedure",
+                    "allow_inferential": True,
+                },
+                caller="pi",
+            )
+
+    assert response["results"][0]["vine_id"] == created["vine_id"]
+    assert response["degraded"] is True
+    assert response["semantic_available"] is False
+    assert response["lifecycle_mutated"] is False
+    assert response["model_turn_authorized"] is False
+    assert response["mutations_allowed"] is False
+    assert response["requested_top_k"] == 1
+    assert response["effective_top_k"] == 2
+    assert payload_database.read_bytes() == payload_before
+    assert lifecycle_database.read_bytes() == lifecycle_before
+
+
 def test_runtime_embedding_outage_transitions_to_read_only_availability(
     tmp_path: Path,
 ) -> None:
@@ -1792,7 +1855,7 @@ def test_topic_token_swap_is_quarantined_before_conflict_signaling(
     assert report["quarantined_records"] == 1
 
 
-def test_reindex_repairs_missing_protected_retrieval_data(tmp_path: Path) -> None:
+def test_reindex_refuses_missing_authenticated_retrieval_data(tmp_path: Path) -> None:
     with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
         memory.remember("runbook", "Use the blue recovery runbook.")
         database = sqlite3.connect(tmp_path / "default" / "payloads.db")
@@ -1802,10 +1865,11 @@ def test_reindex_repairs_missing_protected_retrieval_data(tmp_path: Path) -> Non
         finally:
             database.close()
 
-        assert memory.doctor()["retrieval"]["unindexed_payload_count"] == 1
+        doctor = memory.doctor()
         report = memory.reindex()
-        assert report["reindexed"] == 1
-        assert memory.doctor()["retrieval"]["unindexed_payload_count"] == 0
+        assert doctor["adapter_ready"] is False
+        assert doctor["quarantined_records"] == 1
+        assert report["reindexed"] == 0
 
 
 def test_long_memory_uses_encrypted_multivectors_and_keyed_terms(
@@ -2435,6 +2499,7 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
         "competing_memory_wired": True,
         "content_policy_wired": True,
         "live_refresh_wired": True,
+        "preflight_receipt_wired": True,
         "rotation_ready": True,
         "healthy": True,
     }
@@ -2508,7 +2573,10 @@ def test_layer_feature_marker_is_authenticated_by_profile_scope(
 
     manifest_path = tmp_path / "default" / "keyring.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["features"] == ["shielded-four-layer-v1"]
+    assert manifest["features"] == [
+        "record-integrity-hmac-v1",
+        "shielded-four-layer-v1",
+    ]
     del manifest["features"]
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")),
@@ -2578,9 +2646,60 @@ def test_crafted_cross_scope_metadata_quarantines_only_the_bad_record(
         recalled = memory.recall("beta scope available")
         report = memory.doctor()
 
-    assert recalled["results"][0]["vine_id"] == healthy["vine_id"]
+        assert recalled["results"][0]["vine_id"] == healthy["vine_id"]
+        assert report["quarantined_records"] == 1
+        assert report["production_ready"] is False
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE payloads SET effective_at = effective_at + 1 WHERE vine_id = ?",
+        "UPDATE payloads SET superseded_by = 'forged-record' WHERE vine_id = ?",
+        "UPDATE memory_terms SET term_count = term_count + 1 WHERE vine_id = ?",
+    ],
+)
+def test_authenticated_lifecycle_and_term_tampering_is_quarantined(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:metadata-auth") as memory:
+        created = memory.remember(
+            "authenticated policy",
+            "The protected policy remains bound to its lifecycle metadata.",
+        )
+
+    connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    try:
+        connection.execute(statement, (created["vine_id"],))
+        connection.commit()
+    finally:
+        connection.close()
+
+    with AgentMemory(tmp_path, scope="workspace:metadata-auth") as memory:
+        report = memory.doctor()
+        recalled = memory.recall("authenticated protected policy")
+
+    assert report["adapter_ready"] is False
     assert report["quarantined_records"] == 1
-    assert report["production_ready"] is False
+    assert recalled["results"] == []
+
+
+def test_tombstone_authentication_is_verified_on_every_open(tmp_path: Path) -> None:
+    scope = "workspace:tombstone-auth"
+    with AgentMemory(tmp_path, scope=scope) as memory:
+        created = memory.remember("deletion marker", "Delete this protected record.")
+        memory.forget(str(created["vine_id"]))
+
+    connection = sqlite3.connect(tmp_path / "default" / "payloads.db")
+    try:
+        connection.execute("UPDATE deletion_tombstones SET deleted_at = deleted_at + 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="authenticated deletion state"):
+        AgentMemory(tmp_path, scope=scope)
 
 
 def test_cross_table_nonce_reuse_stops_profile_without_exposing_content(
@@ -3271,7 +3390,7 @@ def test_agent_memory_recalls_an_evicted_payload_from_cold_index(
         memory.remember(first_topic, first_payload)
         archived = memory.remember(second_topic, second_payload)
 
-        memory.recall(f"{first_topic}\n{first_payload}")
+        memory.recall(f"{first_topic}\n{first_payload}", mutate_lifecycle=True)
         recalled = memory.recall(f"{second_topic}\n{second_payload}")
 
     assert recalled["results"][0]["vine_id"] == archived["vine_id"]

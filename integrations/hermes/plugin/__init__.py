@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -48,6 +49,17 @@ SHIELDED_RUN_NONCE_ENV = "ECHO_VEIL_HERMES_LAUNCH_NONCE"
 SHIELDED_RUN_MARKER = "ECHO_VEIL_HERMES_LAUNCH_NONCE="
 SHIELDED_LOCAL_PROVIDER = "echo-veil-local"
 _MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
+
+_REQUEST_BINDING_PRESENT = "present"
+_REQUEST_BINDING_INVALID = "invalid_request"
+_REQUEST_BINDING_MISSING = "protected_context_missing"
+_REQUEST_BINDING_NODE_LIMIT = "message_scan_node_limit"
+_REQUEST_BINDING_CHAR_LIMIT = "message_scan_character_limit"
+_PREFLIGHT_QUERY_OMISSION = (
+    "\n\n[ECHO_VEIL_HERMES_PREFLIGHT_QUERY_MIDDLE_OMITTED]\n\n"
+)
+
+logger = logging.getLogger(__name__)
 
 _CHILD_ENV_NAMES = (
     "HOME",
@@ -245,38 +257,123 @@ def _protected_context(context: str, nonce: str) -> str:
     )
 
 
-def _request_contains_turn_nonce(request: object, nonce: str) -> bool:
+def _bounded_preflight_query(user_message: str) -> str:
+    """Preserve both ends of a long current prompt within Echo's query bound.
+
+    Hermes expands slash-invoked skills into the current user message before
+    ``pre_llm_call``. A valid expansion can therefore be slightly larger than
+    Echo Veil's semantic-query limit even though it is still safe for the
+    provider. Keep the invocation/header and the prompt tail, where the user's
+    concrete request commonly appears, instead of denying the model turn.
+    """
+
+    if not isinstance(user_message, str) or not user_message.strip():
+        raise ValueError("user message is invalid")
+    if len(user_message) <= MAX_QUERY_CHARS:
+        return user_message
+    available = MAX_QUERY_CHARS - len(_PREFLIGHT_QUERY_OMISSION)
+    prefix_chars = available // 2
+    suffix_chars = available - prefix_chars
+    return "".join(
+        (
+            user_message[:prefix_chars],
+            _PREFLIGHT_QUERY_OMISSION,
+            user_message[-suffix_chars:],
+        )
+    )
+
+
+def _text_has_protected_turn_context(value: str, marker: str) -> bool:
+    """Require the nonce inside one complete protected-context envelope."""
+
+    start = 0
+    nonce_line = f"\n{marker}\n"
+    while True:
+        begin = value.find(CONTEXT_BEGIN, start)
+        if begin < 0:
+            return False
+        end = value.find(CONTEXT_END, begin + len(CONTEXT_BEGIN))
+        if end < 0:
+            return False
+        if nonce_line in value[begin:end]:
+            return True
+        start = begin + len(CONTEXT_BEGIN)
+
+
+def _request_turn_binding_status(request: object, nonce: str) -> str:
+    """Validate the protected nonce only in provider-visible user text.
+
+    Hermes request dictionaries can contain large tool schemas, metadata, and
+    tool outputs. None of those fields can prove that the protected context
+    survived in the current user message, and traversing them made otherwise
+    valid long tool turns exceed the generic node budget. Search only the
+    provider message containers and only their user-authored text blocks.
+    """
+
+    if not isinstance(request, dict) or not isinstance(nonce, str):
+        return _REQUEST_BINDING_INVALID
     marker = f"ECHO_VEIL_HERMES_TURN_NONCE={nonce}"
-    stack: list[object] = [request]
+    message_containers = [
+        value
+        for name in ("messages", "input")
+        if isinstance((value := request.get(name)), (list, tuple))
+    ]
+    if not message_containers:
+        return _REQUEST_BINDING_INVALID
+
     seen: set[int] = set()
     nodes = 0
     characters = 0
-    while stack:
-        value = stack.pop()
-        nodes += 1
-        if nodes > MAX_REQUEST_SCAN_NODES:
-            return False
-        if isinstance(value, str):
-            characters += len(value)
-            if characters > MAX_REQUEST_SCAN_CHARS:
-                return False
-            if marker in value:
-                return True
-            continue
-        if isinstance(value, dict):
-            identity = id(value)
-            if identity in seen:
+
+    for messages in message_containers:
+        for message in reversed(messages):
+            nodes += 1
+            if nodes > MAX_REQUEST_SCAN_NODES:
+                return _REQUEST_BINDING_NODE_LIMIT
+            if not isinstance(message, dict) or message.get("role") != "user":
                 continue
-            seen.add(identity)
-            stack.extend(value.values())
-            continue
-        if isinstance(value, (list, tuple)):
-            identity = id(value)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            stack.extend(value)
-    return False
+
+            stack: list[object] = [message.get("content")]
+            while stack:
+                value = stack.pop()
+                nodes += 1
+                if nodes > MAX_REQUEST_SCAN_NODES:
+                    return _REQUEST_BINDING_NODE_LIMIT
+                if isinstance(value, str):
+                    characters += len(value)
+                    if characters > MAX_REQUEST_SCAN_CHARS:
+                        return _REQUEST_BINDING_CHAR_LIMIT
+                    if _text_has_protected_turn_context(value, marker):
+                        return _REQUEST_BINDING_PRESENT
+                    continue
+                if isinstance(value, (list, tuple)):
+                    identity = id(value)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    stack.extend(value)
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                identity = id(value)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                block_type = value.get("type")
+                if block_type not in (None, "text", "input_text"):
+                    continue
+                text = value.get("text")
+                if isinstance(text, str):
+                    stack.append(text)
+                if block_type is None:
+                    nested = value.get("content")
+                    if isinstance(nested, (str, list, tuple, dict)):
+                        stack.append(nested)
+    return _REQUEST_BINDING_MISSING
+
+
+def _request_contains_turn_nonce(request: object, nonce: str) -> bool:
+    return _request_turn_binding_status(request, nonce) == _REQUEST_BINDING_PRESENT
 
 
 def _zero_usage() -> SimpleNamespace:
@@ -375,6 +472,7 @@ def on_pre_llm_call(
     """Prepare one exact model turn; failures remain denied for middleware."""
 
     key: tuple[str, str, str] | None = None
+    failure_reason = "invalid_turn_identity"
     try:
         key = _turn_key(
             session_id=session_id,
@@ -383,30 +481,50 @@ def on_pre_llm_call(
         )
         _clear_turn(key)
         if os.environ.get("ECHO_VEIL_FORCE_HERMES_PREFLIGHT_FAILURE") == "1":
+            logger.warning(
+                "Echo Veil Hermes preflight denied before provider preparation "
+                "(reason=forced_outage_control)"
+            )
             return None
         if (
             not isinstance(user_message, str)
             or not user_message.strip()
-            or len(user_message) > MAX_QUERY_CHARS
         ):
-            return None
-        context = _validate_preflight(
-            _run_rpc(
-                "preflight",
-                {
-                    "query": user_message,
-                    "expected_profile": CANONICAL_PROFILE,
-                    "query_source": "current_user_prompt",
-                },
+            logger.warning(
+                "Echo Veil Hermes preflight denied before provider preparation "
+                "(reason=invalid_user_message)"
             )
+            return None
+        preflight_query = _bounded_preflight_query(user_message)
+        if len(user_message) > MAX_QUERY_CHARS:
+            logger.info(
+                "Echo Veil Hermes bounded the current prompt for semantic preflight "
+                "(reason=preflight_query_middle_omitted)"
+            )
+        failure_reason = "preflight_rpc_unavailable"
+        preflight = _run_rpc(
+            "preflight",
+            {
+                "query": preflight_query,
+                "expected_profile": CANONICAL_PROFILE,
+                "query_source": "current_user_prompt",
+            },
         )
+        failure_reason = "preflight_receipt_invalid"
+        context = _validate_preflight(preflight)
         nonce = secrets.token_hex(16)
         protected = _protected_context(context, nonce)
+        failure_reason = "attestation_state_error"
         _mark_turn_ready(key, nonce)
         return {"context": protected}
     except BaseException:
         if key is not None:
             _clear_turn(key)
+        logger.warning(
+            "Echo Veil Hermes preflight denied before provider preparation "
+            "(reason=%s)",
+            failure_reason,
+        )
         return None
 
 
@@ -423,6 +541,8 @@ def on_llm_execution(
 ) -> Any:
     """Permit the provider only for an exact successful preflight turn."""
 
+    ready = False
+    denial_reason = "invalid_turn_identity"
     try:
         key = _turn_key(
             session_id=session_id,
@@ -430,17 +550,31 @@ def on_llm_execution(
             turn_id=turn_id,
         )
         nonce = _turn_nonce(key)
-        ready = (
-            os.environ.get("ECHO_VEIL_FORCE_HERMES_PREFLIGHT_FAILURE") != "1"
-            and nonce is not None
-            and _request_contains_turn_nonce(
-                request,
-                nonce,
-            )
-        )
+        if os.environ.get("ECHO_VEIL_FORCE_HERMES_PREFLIGHT_FAILURE") == "1":
+            denial_reason = "forced_outage_control"
+        elif nonce is None:
+            denial_reason = "missing_turn_attestation"
+        else:
+            denial_reason = _request_turn_binding_status(request, nonce)
+            ready = denial_reason == _REQUEST_BINDING_PRESENT
     except BaseException:
-        ready = False
+        denial_reason = "execution_validation_error"
     if not ready:
+        mode = str(api_mode or "").strip().casefold()
+        if mode not in {
+            "anthropic_messages",
+            "bedrock_converse",
+            "chat_completions",
+            "codex_app_server",
+            "codex_responses",
+        }:
+            mode = "unknown"
+        logger.warning(
+            "Echo Veil Hermes execution denied before provider "
+            "(reason=%s, api_mode=%s)",
+            denial_reason,
+            mode,
+        )
         return _blocked_response(api_mode, model)
     # Do not catch downstream provider failures. Hermes must preserve its own
     # retry/fallback behavior after the Echo boundary has admitted the turn.
