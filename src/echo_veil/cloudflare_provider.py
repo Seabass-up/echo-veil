@@ -38,6 +38,8 @@ MAX_ACCESS_CREDENTIAL_BYTES = 16 * 1024
 MAX_ENCLAVE_VECTOR_ELEMENTS = 16_384
 MAX_PROOF_BYTES = 4_096
 MAX_SESSION_CHARS = 4_096
+DEFAULT_ENCLAVE_PROFILE = "echo-universal-qwen3-v1"
+DEFAULT_ENCLAVE_SCOPE = "local-user"
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -146,6 +148,8 @@ class CloudflareEnclaveProvider:
         access_client_id: str,
         access_client_secret: str,
         *,
+        profile: str = DEFAULT_ENCLAVE_PROFILE,
+        scope: str = DEFAULT_ENCLAVE_SCOPE,
         timeout_seconds: float = 10.0,
         transport: CloudflareTransport | None = None,
     ) -> None:
@@ -166,6 +170,8 @@ class CloudflareEnclaveProvider:
             raise ValueError("gateway_url must be a credential-free HTTPS origin")
         self._validate_access_credential(access_client_id, "client ID")
         self._validate_access_credential(access_client_secret, "client secret")
+        self._validate_binding(profile, "profile")
+        self._validate_binding(scope, "scope")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, Real):
             raise TypeError("timeout_seconds must be a finite positive number")
         timeout = float(timeout_seconds)
@@ -187,6 +193,8 @@ class CloudflareEnclaveProvider:
         self._timeout = timeout
         self._transport = transport or UrllibCloudflareTransport()
         self._enclave_transport_key = None
+        self._profile: str = profile
+        self._scope: str = scope
 
     @classmethod
     def from_env(
@@ -208,6 +216,8 @@ class CloudflareEnclaveProvider:
             gateway_url,
             client_id,
             client_secret,
+            profile=os.environ.get("ECHO_VEIL_PROFILE", DEFAULT_ENCLAVE_PROFILE),
+            scope=os.environ.get("ECHO_VEIL_SCOPE", DEFAULT_ENCLAVE_SCOPE),
             timeout_seconds=timeout_seconds,
         )
 
@@ -228,7 +238,10 @@ class CloudflareEnclaveProvider:
 
     def access_challenge(self) -> bytes:
         challenge = self._decode_bytes(
-            self._secure_post("v1/challenge", {}),
+            self._secure_post(
+                "v1/challenge",
+                {"profile": self._profile, "scope": self._scope},
+            ),
             "challenge_b64",
             maximum=256,
         )
@@ -240,7 +253,12 @@ class CloudflareEnclaveProvider:
         if not isinstance(proof, bytes) or not 0 < len(proof) <= MAX_PROOF_BYTES:
             raise ValueError("enclave proof exceeds the safety limit")
         value = self._secure_post(
-            "v1/session", {"proof_b64": self._encode_bytes(proof)}
+            "v1/session",
+            {
+                "proof_b64": self._encode_bytes(proof),
+                "profile": self._profile,
+                "scope": self._scope,
+            },
         )
         session = value.get("session")
         if (
@@ -388,6 +406,17 @@ class CloudflareEnclaveProvider:
             or any(not 33 <= ord(character) <= 126 for character in value)
         ):
             raise ValueError(f"Cloudflare Access {label} is invalid")
+
+    @staticmethod
+    def _validate_binding(value: str, label: str) -> None:
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value) > 128
+            or any(not 33 <= ord(character) <= 126 for character in value)
+        ):
+            raise ValueError(f"enclave {label} binding is invalid")
 
     @staticmethod
     def _validate_session(value: str) -> None:

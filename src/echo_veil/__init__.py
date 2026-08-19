@@ -10,6 +10,7 @@ __version__ = "0.7.0"
 
 from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
 from .agent_memory import AgentMemory, HashingTextEmbedder, OllamaTextEmbedder
+from .azure_attestation import AzureMaaJwtVerifier
 from .cloudflare_provider import CloudflareEnclaveProvider, CloudflareGatewayError
 from .confidence import ConfidenceBand, classify
 from .conflict import (
@@ -62,6 +63,7 @@ __all__ = [
     "CapabilityStatus",
     "CloudflareEnclaveProvider",
     "CloudflareGatewayError",
+    "AzureMaaJwtVerifier",
     "Workspace",
     "WorkspaceConfig",
     "Vine",

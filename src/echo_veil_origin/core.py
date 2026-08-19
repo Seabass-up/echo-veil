@@ -26,6 +26,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from echo_veil.attestation_binding import build_attestation_runtime_data
+
 from ._json import require_exact_keys, strict_json_loads
 
 MAX_VECTOR_ELEMENTS = 16_384
@@ -34,6 +36,7 @@ MAX_OUTSTANDING_CHALLENGES = 10_000
 MAX_ACTIVE_SESSIONS = 10_000
 MAX_REPLAY_CACHE_ENTRIES = 50_000
 ENVELOPE_INFO = b"echo-veil-cloudflare-envelope-v1:"
+CKKS_WRAPPER_INFO = b"echo-veil-authenticated-ckks-wrapper-v1"
 
 
 class ProtocolError(RuntimeError):
@@ -56,8 +59,34 @@ class CkksEngine(Protocol):
 
 
 class ProofVerifier(Protocol):
-    def verify(self, proof: bytes, config: OriginConfig) -> bytes:
+    def verify(self, proof: bytes, config: OriginConfig) -> VerifiedProof:
         raise NotImplementedError
+
+
+class NativeEvidenceProvider(Protocol):
+    def evidence(self, runtime_data: bytes) -> bytes:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class VerifiedProof:
+    challenge: bytes
+    public_key: bytes
+
+
+@dataclass(frozen=True)
+class _ChallengeBinding:
+    expires_at: float
+    profile: str
+    scope: str
+
+
+@dataclass(frozen=True)
+class _SessionBinding:
+    expires_at: float
+    profile: str
+    scope: str
+    proof_public_key: bytes
 
 
 def _decode_base64(value: object, field: str, *, maximum: int) -> bytes:
@@ -79,6 +108,18 @@ def _decode_base64(value: object, field: str, *, maximum: int) -> bytes:
 
 def _encode_base64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii")
+
+
+def _bounded_binding(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 128
+        or any(not 33 <= ord(character) <= 126 for character in value)
+    ):
+        raise ProtocolError(f"invalid {label}")
+    return value
 
 
 def _read_secret(path: Path, expected_bytes: int, label: str) -> bytes:
@@ -129,6 +170,9 @@ class OriginConfig:
     provider_id: str
     measurement: str
     key_id: str
+    cce_policy_hash: str
+    maa_policy_hash: str
+    workload_digest: str
     region: str = "eastus2"
     challenge_ttl_seconds: float = 60.0
     session_ttl_seconds: float = 300.0
@@ -140,6 +184,9 @@ class OriginConfig:
             ("provider_id", self.provider_id),
             ("measurement", self.measurement),
             ("key_id", self.key_id),
+            ("cce_policy_hash", self.cce_policy_hash),
+            ("maa_policy_hash", self.maa_policy_hash),
+            ("workload_digest", self.workload_digest),
             ("region", self.region),
         ):
             if (
@@ -179,6 +226,7 @@ class AttestationSigner:
         signing_key: Ed25519PrivateKey,
         transport_public_key: bytes,
         config: OriginConfig,
+        native_evidence_provider: NativeEvidenceProvider,
     ) -> None:
         if not isinstance(signing_key, Ed25519PrivateKey):
             raise TypeError("signing_key must be Ed25519PrivateKey")
@@ -190,6 +238,7 @@ class AttestationSigner:
         self._signing_key = signing_key
         self._transport_public_key = transport_public_key
         self._config = config
+        self._native_evidence_provider = native_evidence_provider
 
     @classmethod
     def from_secret_file(
@@ -197,19 +246,45 @@ class AttestationSigner:
         signing_key_file: str | os.PathLike[str],
         transport_public_key: bytes,
         config: OriginConfig,
+        native_evidence_provider: NativeEvidenceProvider,
     ) -> AttestationSigner:
         raw = _read_secret(Path(signing_key_file), 32, "attestation signing key")
         return cls(
-            Ed25519PrivateKey.from_private_bytes(raw), transport_public_key, config
+            Ed25519PrivateKey.from_private_bytes(raw),
+            transport_public_key,
+            config,
+            native_evidence_provider,
         )
 
     def issue(self, nonce: bytes) -> bytes:
         if not isinstance(nonce, bytes) or not 16 <= len(nonce) <= 256:
             raise ProtocolError("invalid attestation nonce")
+        runtime_data = build_attestation_runtime_data(
+            nonce=nonce,
+            transport_public_key=self._transport_public_key,
+            provider_id=self._config.provider_id,
+            measurement=self._config.measurement,
+            key_id=self._config.key_id,
+            cce_policy_hash=self._config.cce_policy_hash,
+            maa_policy_hash=self._config.maa_policy_hash,
+            workload_digest=self._config.workload_digest,
+        )
+        try:
+            native_evidence = self._native_evidence_provider.evidence(runtime_data)
+        except ProtocolError:
+            raise
+        except Exception as exc:
+            raise ProtocolError("native attestation evidence is unavailable") from exc
+        if (
+            not isinstance(native_evidence, bytes)
+            or not 0 < len(native_evidence) <= 65_536
+        ):
+            raise ProtocolError("native attestation evidence is invalid")
         issued_at = time.time()
         claims = json.dumps(
             {
-                "attestation_authority": "azure-key-vault-secure-key-release",
+                "attestation_authority": "microsoft-azure-attestation+secure-key-release-v1",
+                "cce_policy_hash": self._config.cce_policy_hash,
                 "ckks_security_bits": 128,
                 "expires_at": issued_at + self._config.attestation_ttl_seconds,
                 "hardware_isolation": True,
@@ -217,11 +292,15 @@ class AttestationSigner:
                 "issued_at": issued_at,
                 "key_id": self._config.key_id,
                 "measurement": self._config.measurement,
+                "maa_policy_hash": self._config.maa_policy_hash,
+                "native_evidence_b64": _encode_base64(native_evidence),
                 "nonce_b64": _encode_base64(nonce),
                 "platform": "azure-amd-sev-snp-confidential-vm",
                 "provider_id": self._config.provider_id,
                 "region": self._config.region,
+                "runtime_binding_b64": _encode_base64(runtime_data),
                 "transport_public_key_b64": _encode_base64(self._transport_public_key),
+                "workload_digest": self._config.workload_digest,
                 "zkp_access_gate": True,
             },
             sort_keys=True,
@@ -266,8 +345,19 @@ class EnclaveService:
         self._attestation_signer = attestation_signer
         self._proof_verifier = proof_verifier
         self._ckks = ckks
-        self._challenges: dict[bytes, float] = {}
-        self._sessions: dict[str, float] = {}
+        transport_secret = transport_key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+        self._ckks_wrapper_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=hashlib.sha256(config.key_id.encode("utf-8")).digest(),
+            info=CKKS_WRAPPER_INFO,
+        ).derive(transport_secret)
+        self._challenges: dict[bytes, _ChallengeBinding] = {}
+        self._sessions: dict[str, _SessionBinding] = {}
         self._seen_envelopes: dict[bytes, float] = {}
         self._lock = threading.RLock()
 
@@ -375,46 +465,68 @@ class EnclaveService:
 
     def _dispatch(self, path: str, request: Mapping[str, object]) -> dict[str, object]:
         if path == "/v1/challenge":
+            profile = _bounded_binding(request.get("profile"), "profile")
+            scope = _bounded_binding(request.get("scope"), "scope")
             challenge = os.urandom(32)
             with self._lock:
                 self._purge(time.time())
                 if len(self._challenges) >= MAX_OUTSTANDING_CHALLENGES:
                     raise ProtocolError("challenge capacity reached")
-                self._challenges[challenge] = (
-                    time.time() + self.config.challenge_ttl_seconds
+                self._challenges[challenge] = _ChallengeBinding(
+                    expires_at=time.time() + self.config.challenge_ttl_seconds,
+                    profile=profile,
+                    scope=scope,
                 )
             return {"challenge_b64": _encode_base64(challenge)}
         if path == "/v1/session":
+            profile = _bounded_binding(request.get("profile"), "profile")
+            scope = _bounded_binding(request.get("scope"), "scope")
             proof = _decode_base64(request.get("proof_b64"), "proof_b64", maximum=4096)
             try:
-                challenge = self._proof_verifier.verify(proof, self.config)
+                verified_proof = self._proof_verifier.verify(proof, self.config)
             except ProtocolError:
                 raise
             except Exception as exc:
                 raise ProtocolError("zero-knowledge proof rejected") from exc
-            if not isinstance(challenge, bytes) or not 32 <= len(challenge) <= 256:
+            if (
+                not isinstance(verified_proof, VerifiedProof)
+                or not isinstance(verified_proof.challenge, bytes)
+                or not 32 <= len(verified_proof.challenge) <= 256
+                or not isinstance(verified_proof.public_key, bytes)
+                or len(verified_proof.public_key) != 32
+            ):
                 raise ProtocolError("proof verifier returned an invalid challenge")
             with self._lock:
                 now = time.time()
                 self._purge(now)
-                expiry = self._challenges.pop(challenge, None)
-                if expiry is None or expiry <= now:
+                challenge_binding = self._challenges.pop(verified_proof.challenge, None)
+                if (
+                    challenge_binding is None
+                    or challenge_binding.expires_at <= now
+                    or challenge_binding.profile != profile
+                    or challenge_binding.scope != scope
+                ):
                     raise ProtocolError(
-                        "proof challenge is unknown, expired, or consumed"
+                        "proof challenge is unknown, expired, consumed, or misbound"
                     )
                 if len(self._sessions) >= MAX_ACTIVE_SESSIONS:
                     raise ProtocolError("session capacity reached")
                 new_session = secrets.token_urlsafe(32)
-                self._sessions[new_session] = now + self.config.session_ttl_seconds
+                self._sessions[new_session] = _SessionBinding(
+                    expires_at=now + self.config.session_ttl_seconds,
+                    profile=profile,
+                    scope=scope,
+                    proof_public_key=verified_proof.public_key,
+                )
             return {"session": new_session}
         session_value = request.get("session")
         if (
             not isinstance(session_value, str)
             or not 0 < len(session_value) <= 4_096
             or any(not 33 <= ord(character) <= 126 for character in session_value)
-            or not self._valid_session(session_value)
         ):
             raise ProtocolError("invalid or expired enclave session")
+        session = self._session(session_value)
         if path == "/v1/vector/encrypt":
             vector = self._vector(request.get("vector"), "vector")
             normalized = self._normalize(vector)
@@ -427,16 +539,32 @@ class EnclaveService:
                 or not 0 < len(ciphertext) <= 16 * 1024 * 1024
             ):
                 raise ProtocolError("CKKS engine returned an invalid ciphertext")
-            return {"ciphertext_b64": _encode_base64(ciphertext)}
+            try:
+                if self._ckks.ciphertext_dimension(ciphertext) != len(normalized):
+                    raise ProtocolError("CKKS engine returned a dimension mismatch")
+            except ProtocolError:
+                raise
+            except Exception as exc:
+                raise ProtocolError("CKKS encryption validation failed") from exc
+            return {
+                "ciphertext_b64": _encode_base64(
+                    self._wrap_ckks_ciphertext(ciphertext, len(normalized), session)
+                )
+            }
         if path == "/v1/vector/similarity":
             intent = self._vector(request.get("intent"), "intent")
-            ciphertext = _decode_base64(
+            wrapped_ciphertext = _decode_base64(
                 request.get("ciphertext_b64"),
                 "ciphertext_b64",
                 maximum=16 * 1024 * 1024,
             )
+            dimension, ciphertext = self._unwrap_ckks_ciphertext(
+                wrapped_ciphertext, session
+            )
             try:
-                if self._ckks.ciphertext_dimension(ciphertext) != len(intent):
+                if dimension != len(intent):
+                    raise ProtocolError("vector dimension mismatch")
+                if self._ckks.ciphertext_dimension(ciphertext) != dimension:
                     raise ProtocolError("vector dimension mismatch")
                 score = float(
                     self._ckks.cosine_similarity(self._normalize(intent), ciphertext)
@@ -456,8 +584,8 @@ class EnclaveService:
         request: Mapping[str, object],
     ) -> None:
         expected_fields = {
-            "/v1/challenge": set(),
-            "/v1/session": {"proof_b64"},
+            "/v1/challenge": {"profile", "scope"},
+            "/v1/session": {"proof_b64", "profile", "scope"},
             "/v1/vector/encrypt": {"session", "vector"},
             "/v1/vector/similarity": {"session", "intent", "ciphertext_b64"},
         }.get(path)
@@ -492,19 +620,114 @@ class EnclaveService:
             raise ProtocolError("zero-norm vectors are not supported")
         return [value / norm for value in vector]
 
-    def _valid_session(self, value: str) -> bool:
+    def _session(self, value: str) -> _SessionBinding:
         now = time.time()
         with self._lock:
             self._purge(now)
-            expiry = self._sessions.get(value)
-            return expiry is not None and expiry > now
+            binding = self._sessions.get(value)
+            if binding is None or binding.expires_at <= now:
+                raise ProtocolError("invalid or expired enclave session")
+            return binding
+
+    def _wrap_ckks_ciphertext(
+        self,
+        ciphertext: bytes,
+        dimension: int,
+        session: _SessionBinding,
+    ) -> bytes:
+        authenticated = {
+            "ciphertext_b64": _encode_base64(ciphertext),
+            "dimension": dimension,
+            "format": "echo-veil-authenticated-ckks-v1",
+            "key_id": self.config.key_id,
+            "profile": session.profile,
+            "proof_public_key_b64": _encode_base64(session.proof_public_key),
+            "scope": session.scope,
+        }
+        serialized = json.dumps(
+            authenticated, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        authenticated["tag_b64"] = _encode_base64(
+            hmac.new(self._ckks_wrapper_key, serialized, hashlib.sha256).digest()
+        )
+        return json.dumps(authenticated, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+
+    def _unwrap_ckks_ciphertext(
+        self,
+        wrapped: bytes,
+        session: _SessionBinding,
+    ) -> tuple[int, bytes]:
+        try:
+            value = strict_json_loads(wrapped)
+            if not isinstance(value, dict):
+                raise ValueError
+            require_exact_keys(
+                value,
+                {
+                    "ciphertext_b64",
+                    "dimension",
+                    "format",
+                    "key_id",
+                    "profile",
+                    "proof_public_key_b64",
+                    "scope",
+                    "tag_b64",
+                },
+            )
+            tag = _decode_base64(value.pop("tag_b64"), "tag_b64", maximum=32)
+            if len(tag) != 32:
+                raise ValueError
+            serialized = json.dumps(
+                value, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            expected_tag = hmac.new(
+                self._ckks_wrapper_key, serialized, hashlib.sha256
+            ).digest()
+            if not hmac.compare_digest(tag, expected_tag):
+                raise ValueError
+            if value.get("format") != "echo-veil-authenticated-ckks-v1":
+                raise ValueError
+            if value.get("key_id") != self.config.key_id:
+                raise ValueError
+            if value.get("profile") != session.profile:
+                raise ValueError
+            if value.get("scope") != session.scope:
+                raise ValueError
+            public_key = _decode_base64(
+                value.get("proof_public_key_b64"),
+                "proof_public_key_b64",
+                maximum=32,
+            )
+            if not hmac.compare_digest(public_key, session.proof_public_key):
+                raise ValueError
+            dimension = value.get("dimension")
+            if (
+                isinstance(dimension, bool)
+                or not isinstance(dimension, int)
+                or not 0 < dimension <= self.config.maximum_vector_elements
+            ):
+                raise ValueError
+            ciphertext = _decode_base64(
+                value.get("ciphertext_b64"),
+                "ciphertext_b64",
+                maximum=16 * 1024 * 1024,
+            )
+        except Exception as exc:
+            raise ProtocolError("CKKS ciphertext authentication failed") from exc
+        return dimension, ciphertext
 
     def _purge(self, now: float) -> None:
         self._challenges = {
-            key: expiry for key, expiry in self._challenges.items() if expiry > now
+            key: binding
+            for key, binding in self._challenges.items()
+            if binding.expires_at > now
         }
         self._sessions = {
-            key: expiry for key, expiry in self._sessions.items() if expiry > now
+            key: binding
+            for key, binding in self._sessions.items()
+            if binding.expires_at > now
         }
         self._seen_envelopes = {
             key: expiry for key, expiry in self._seen_envelopes.items() if expiry > now

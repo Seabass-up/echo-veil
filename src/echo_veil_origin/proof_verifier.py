@@ -15,7 +15,7 @@ from echo_veil._bounded_process import (
 )
 
 from ._json import require_exact_keys, strict_json_loads
-from .core import OriginConfig, ProtocolError
+from .core import OriginConfig, ProtocolError, VerifiedProof
 
 
 class RistrettoProofVerifier:
@@ -59,7 +59,7 @@ class RistrettoProofVerifier:
             raise ValueError("verifier timeout must be within (0, 30] seconds")
         self._timeout = float(timeout_seconds)
 
-    def verify(self, proof: bytes, config: OriginConfig) -> bytes:
+    def verify(self, proof: bytes, config: OriginConfig) -> VerifiedProof:
         if not isinstance(proof, bytes) or not 0 < len(proof) <= 4_096:
             raise ProtocolError("zero-knowledge proof rejected")
         if not isinstance(config, OriginConfig):
@@ -127,4 +127,4 @@ class RistrettoProofVerifier:
             raise ProtocolError("proof verifier returned invalid output") from exc
         if not 32 <= len(challenge) <= 256:
             raise ProtocolError("proof verifier returned invalid challenge")
-        return challenge
+        return VerifiedProof(challenge=challenge, public_key=public_key)

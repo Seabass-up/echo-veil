@@ -22,7 +22,12 @@ from echo_veil import (
     EnclaveCryptoShield,
     VerifiedEnclave,
 )
-from echo_veil_origin import AttestationSigner, EnclaveService, OriginConfig
+from echo_veil_origin import (
+    AttestationSigner,
+    EnclaveService,
+    OriginConfig,
+    VerifiedProof,
+)
 from echo_veil_origin.app import (
     MAX_REQUEST_BYTES,
     _read_bounded_request_body,
@@ -31,6 +36,42 @@ from echo_veil_origin.app import (
 from echo_veil_origin.core import ProtocolError, origin_token_matches
 from echo_veil_origin.openfhe_engine import OpenFheCkksEngine
 from echo_veil_origin.proof_verifier import RistrettoProofVerifier
+
+CCE_POLICY_HASH = "cce-policy-hash"
+MAA_POLICY_HASH = "maa-policy-hash"
+WORKLOAD_DIGEST = "sha256:workload"
+
+
+class _NativeEvidenceProvider:
+    def evidence(self, runtime_data: bytes) -> bytes:
+        return b"native:" + runtime_data
+
+
+class _NativeVerifier:
+    def verify(
+        self,
+        evidence: bytes,
+        runtime_data: bytes,
+        *,
+        launch_measurement: str,
+        cce_policy_hash: str,
+        maa_policy_hash: str,
+    ) -> None:
+        assert evidence == b"native:" + runtime_data
+        assert launch_measurement == "approved-measurement"
+        assert cce_policy_hash == CCE_POLICY_HASH
+        assert maa_policy_hash == MAA_POLICY_HASH
+
+
+def _client_verifier(signing_key: Ed25519PrivateKey) -> Ed25519AttestationVerifier:
+    return Ed25519AttestationVerifier(
+        signing_key.public_key(),
+        {"approved-measurement"},
+        _NativeVerifier(),
+        expected_cce_policy_hash=CCE_POLICY_HASH,
+        expected_maa_policy_hash=MAA_POLICY_HASH,
+        expected_workload_digest=WORKLOAD_DIGEST,
+    )
 
 
 class _TestCkks:
@@ -50,17 +91,42 @@ class _TestCkks:
 
 
 class _ProofVerifier:
-    def verify(self, proof: bytes, config: OriginConfig) -> bytes:
+    def __init__(self, public_key: bytes = b"p" * 32) -> None:
+        self.public_key = public_key
+
+    def verify(self, proof: bytes, config: OriginConfig) -> VerifiedProof:
         assert config.measurement == "approved-measurement"
         if not proof.startswith(b"proof:"):
             raise ProtocolError("invalid proof")
-        return proof.removeprefix(b"proof:")
+        return VerifiedProof(
+            challenge=proof.removeprefix(b"proof:"),
+            public_key=self.public_key,
+        )
 
 
 class _ProofProvider:
     def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
         assert enclave.measurement == "approved-measurement"
         return b"proof:" + challenge
+
+
+class _IdentityProofVerifier:
+    def verify(self, proof: bytes, config: OriginConfig) -> VerifiedProof:
+        assert config.measurement == "approved-measurement"
+        if not proof.startswith(b"identity-proof:") or len(proof) < 79:
+            raise ProtocolError("invalid proof")
+        public_key = proof[15:47]
+        challenge = proof[47:]
+        return VerifiedProof(challenge=challenge, public_key=public_key)
+
+
+class _IdentityProofProvider:
+    def __init__(self, public_key: bytes) -> None:
+        self.public_key = public_key
+
+    def prove(self, challenge: bytes, enclave: VerifiedEnclave) -> bytes:
+        assert enclave.measurement == "approved-measurement"
+        return b"identity-proof:" + self.public_key + challenge
 
 
 class _StreamingRequest:
@@ -157,11 +223,14 @@ def test_openfhe_engine_enables_advanced_she_before_eval_sum_keygen(
     assert context.enabled == ["PKE", "KEYSWITCH", "LEVELEDSHE", "ADVANCEDSHE"]
 
 
-def _service():
+def _service(proof_verifier=None):
     config = OriginConfig(
         provider_id="azure-sev-snp-eastus2",
         measurement="approved-measurement",
         key_id="ckks-key-1",
+        cce_policy_hash=CCE_POLICY_HASH,
+        maa_policy_hash=MAA_POLICY_HASH,
+        workload_digest=WORKLOAD_DIGEST,
     )
     transport_key = X25519PrivateKey.generate()
     signing_key = Ed25519PrivateKey.generate()
@@ -169,9 +238,16 @@ def _service():
         signing_key,
         EnclaveService.transport_public_key(transport_key),
         config,
+        _NativeEvidenceProvider(),
     )
     return (
-        EnclaveService(config, transport_key, signer, _ProofVerifier(), _TestCkks()),
+        EnclaveService(
+            config,
+            transport_key,
+            signer,
+            _ProofVerifier() if proof_verifier is None else proof_verifier,
+            _TestCkks(),
+        ),
         signing_key,
     )
 
@@ -182,6 +258,9 @@ def test_origin_config_rejects_whitespace_identifiers() -> None:
             provider_id="provider\N{NO-BREAK SPACE}name",
             measurement="measurement",
             key_id="key",
+            cce_policy_hash=CCE_POLICY_HASH,
+            maa_policy_hash=MAA_POLICY_HASH,
+            workload_digest=WORKLOAD_DIGEST,
         )
 
 
@@ -194,9 +273,7 @@ def test_origin_interoperates_with_cloudflare_provider_and_shield() -> None:
         "access-secret",
         transport=transport,
     )
-    verifier = Ed25519AttestationVerifier(
-        signing_key.public_key(), {"approved-measurement"}
-    )
+    verifier = _client_verifier(signing_key)
 
     shield = EnclaveCryptoShield(provider, verifier, _ProofProvider())
     protected = shield.protect(np.array([3.0, 4.0]))
@@ -225,9 +302,7 @@ def test_origin_consumes_challenge_exactly_once() -> None:
         transport=_OriginTransport(service),
     )
     nonce = b"n" * 32
-    verifier = Ed25519AttestationVerifier(
-        signing_key.public_key(), {"approved-measurement"}
-    )
+    verifier = _client_verifier(signing_key)
     verified = verifier.verify(provider.attest(nonce), nonce)
     provider.bind_attestation(verified)
     challenge = provider.access_challenge()
@@ -236,6 +311,95 @@ def test_origin_consumes_challenge_exactly_once() -> None:
     assert provider.open_session(proof)
     with pytest.raises(ProtocolError, match="consumed"):
         provider.open_session(proof)
+
+
+def test_origin_binds_challenge_to_profile_and_scope() -> None:
+    service, signing_key = _service()
+    provider = CloudflareEnclaveProvider(
+        "https://memory.algo-cli.com",
+        "access-id",
+        "access-secret",
+        profile="profile-a",
+        scope="scope-a",
+        transport=_OriginTransport(service),
+    )
+    nonce = b"n" * 32
+    verified = _client_verifier(signing_key).verify(provider.attest(nonce), nonce)
+    provider.bind_attestation(verified)
+    challenge = provider.access_challenge()
+    provider._profile = "profile-b"  # noqa: SLF001 - deliberate binding attack
+
+    with pytest.raises(ProtocolError, match="misbound"):
+        provider.open_session(b"proof:" + challenge)
+
+
+def test_origin_authenticates_ckks_wrapper_before_engine_use() -> None:
+    service, signing_key = _service()
+    transport = _OriginTransport(service)
+    provider = CloudflareEnclaveProvider(
+        "https://memory.algo-cli.com",
+        "access-id",
+        "access-secret",
+        transport=transport,
+    )
+    shield = EnclaveCryptoShield(
+        provider,
+        _client_verifier(signing_key),
+        _ProofProvider(),
+    )
+    protected = shield.protect(np.array([3.0, 4.0]))
+    wrapper = json.loads(protected.ciphertext)
+    encoded = wrapper["ciphertext_b64"]
+    wrapper["ciphertext_b64"] = ("A" if encoded[0] != "A" else "B") + encoded[1:]
+    tampered = type(protected)(
+        provider_id=protected.provider_id,
+        key_id=protected.key_id,
+        ciphertext=json.dumps(wrapper, sort_keys=True, separators=(",", ":")).encode(),
+        shape=protected.shape,
+    )
+
+    with pytest.raises(ProtocolError, match="authentication"):
+        shield.similarity(np.array([3.0, 4.0]), tampered)
+
+
+@pytest.mark.parametrize("different_profile", [False, True])
+def test_origin_rejects_cross_identity_or_cross_profile_ciphertext(
+    different_profile: bool,
+) -> None:
+    service, signing_key = _service(_IdentityProofVerifier())
+    transport = _OriginTransport(service)
+    verifier = _client_verifier(signing_key)
+    first_provider = CloudflareEnclaveProvider(
+        "https://memory.algo-cli.com",
+        "access-id",
+        "access-secret",
+        profile="profile-a",
+        scope="local-user",
+        transport=transport,
+    )
+    first = EnclaveCryptoShield(
+        first_provider,
+        verifier,
+        _IdentityProofProvider(b"a" * 32),
+    )
+    protected = first.protect(np.array([1.0, 0.0]))
+
+    second_provider = CloudflareEnclaveProvider(
+        "https://memory.algo-cli.com",
+        "access-id",
+        "access-secret",
+        profile="profile-b" if different_profile else "profile-a",
+        scope="local-user",
+        transport=transport,
+    )
+    second = EnclaveCryptoShield(
+        second_provider,
+        verifier,
+        _IdentityProofProvider(b"a" * 32 if different_profile else b"b" * 32),
+    )
+
+    with pytest.raises(ProtocolError, match="authentication"):
+        second.similarity(np.array([1.0, 0.0]), protected)
 
 
 def test_origin_rejects_replayed_envelope() -> None:
@@ -248,9 +412,7 @@ def test_origin_rejects_replayed_envelope() -> None:
         transport=transport,
     )
     nonce = b"n" * 32
-    verified = Ed25519AttestationVerifier(
-        signing_key.public_key(), {"approved-measurement"}
-    ).verify(provider.attest(nonce), nonce)
+    verified = _client_verifier(signing_key).verify(provider.attest(nonce), nonce)
     provider.bind_attestation(verified)
     provider.access_challenge()
     path, envelope = transport.sealed_requests[-1]
@@ -315,7 +477,14 @@ def test_origin_rejects_invalid_content_length_before_streaming(
 
 def test_origin_rejects_engine_key_id_mismatch() -> None:
     service, _ = _service()
-    config = OriginConfig("provider", "measurement", "different-key")
+    config = OriginConfig(
+        "provider",
+        "measurement",
+        "different-key",
+        CCE_POLICY_HASH,
+        MAA_POLICY_HASH,
+        WORKLOAD_DIGEST,
+    )
     with pytest.raises(RuntimeError, match="key ID"):
         EnclaveService(
             config,
@@ -331,9 +500,17 @@ def test_origin_rejects_attestation_transport_key_mismatch() -> None:
         provider_id="azure-sev-snp-eastus2",
         measurement="approved-measurement",
         key_id="ckks-key-1",
+        cce_policy_hash=CCE_POLICY_HASH,
+        maa_policy_hash=MAA_POLICY_HASH,
+        workload_digest=WORKLOAD_DIGEST,
     )
     signing_key = Ed25519PrivateKey.generate()
-    signer = AttestationSigner(signing_key, b"x" * 32, config)
+    signer = AttestationSigner(
+        signing_key,
+        b"x" * 32,
+        config,
+        _NativeEvidenceProvider(),
+    )
 
     with pytest.raises(RuntimeError, match="transport key"):
         EnclaveService(

@@ -8,7 +8,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use echo_veil_zkp::{
     ProofContext, decode_proof, decode_secret, encode_proof, generate_secret, prove, public_key,
-    verify,
+    validate_public_key, verify,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -177,9 +177,11 @@ fn load_allowed(path: &Path) -> Result<Vec<[u8; 32]>, String> {
             if URL_SAFE.encode(&decoded) != *value {
                 return Err("invalid allowlisted public key".into());
             }
-            decoded
+            let key = decoded
                 .try_into()
-                .map_err(|_| "invalid allowlisted public key length".into())
+                .map_err(|_| "invalid allowlisted public key length".to_string())?;
+            validate_public_key(&key).map_err(|_| "invalid allowlisted public key".to_string())?;
+            Ok(key)
         })
         .collect::<Result<Vec<[u8; 32]>, String>>()?;
     let unique = decoded.iter().copied().collect::<HashSet<_>>();
@@ -330,5 +332,22 @@ mod tests {
         symlink(&real, &linked).unwrap();
 
         assert!(write_private_key(&linked.join("identity.key"), b"secret").is_err());
+    }
+
+    #[test]
+    fn public_key_allowlist_rejects_the_ristretto_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("allowed.json");
+        let encoded = URL_SAFE.encode([0_u8; 32]);
+        fs::write(&path, serde_json::to_vec(&vec![encoded]).unwrap()).unwrap();
+
+        assert_eq!(
+            load_allowed(&path).unwrap_err(),
+            "invalid allowlisted public key"
+        );
     }
 }

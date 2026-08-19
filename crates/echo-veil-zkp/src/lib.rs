@@ -7,6 +7,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT, ristretto::CompressedRistretto, scalar::Scalar,
+    traits::Identity,
 };
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,17 @@ fn decode_challenge(value: &str) -> Result<Vec<u8>, ProofError> {
     Ok(challenge)
 }
 
+pub fn validate_public_key(value: &[u8; 32]) -> Result<(), ProofError> {
+    let point = CompressedRistretto::from_slice(value)
+        .map_err(|_| ProofError("invalid public key".into()))?
+        .decompress()
+        .ok_or_else(|| ProofError("invalid public key".into()))?;
+    if point == curve25519_dalek::ristretto::RistrettoPoint::identity() {
+        return Err(ProofError("identity public key is forbidden".into()));
+    }
+    Ok(())
+}
+
 fn transcript_challenge(
     context: &ProofContext,
     challenge: &[u8],
@@ -190,6 +202,7 @@ pub fn verify(
     }
     let challenge = decode_challenge(&proof.challenge_b64)?;
     let public_key_bytes = decode_fixed(&proof.public_key_b64, "public_key_b64")?;
+    validate_public_key(&public_key_bytes)?;
     if !allowed_public_keys
         .iter()
         .any(|allowed| allowed == &public_key_bytes)
@@ -291,5 +304,24 @@ mod tests {
     fn proof_json_rejects_unknown_fields() {
         let value = br#"{"version":1,"challenge_b64":"","public_key_b64":"","commitment_b64":"","response_b64":"","extra":true}"#;
         assert!(decode_proof(value).is_err());
+    }
+
+    #[test]
+    fn identity_public_key_cannot_forge_proof_without_a_secret() {
+        let identity = curve25519_dalek::ristretto::RistrettoPoint::identity()
+            .compress()
+            .to_bytes();
+        let nonce = Scalar::from(7_u64);
+        let commitment = (nonce * RISTRETTO_BASEPOINT_POINT).compress().to_bytes();
+        let forged = SchnorrProof {
+            version: 1,
+            challenge_b64: URL_SAFE.encode([4_u8; 32]),
+            public_key_b64: URL_SAFE.encode(identity),
+            commitment_b64: URL_SAFE.encode(commitment),
+            response_b64: URL_SAFE.encode(nonce.to_bytes()),
+        };
+
+        let error = verify(&forged, &context(), &[identity]).unwrap_err();
+        assert_eq!(error.0, "identity public key is forbidden");
     }
 }
