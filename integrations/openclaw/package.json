@@ -32,6 +32,10 @@
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
+  "overrides": {
+    "nanoid": "3.3.18",
+    "postcss": "8.5.26"
+  },
   "openclaw": {
     "extensions": [
       "./dist/index.js"

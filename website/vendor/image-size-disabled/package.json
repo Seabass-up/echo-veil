@@ -1,0 +1,26 @@
+{
+  "name": "@echo-veil/image-size-disabled",
+  "version": "1.0.0",
+  "description": "Fail-closed replacement for an unused vulnerable vinext image parser dependency.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    },
+    "./fromFile": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    }
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
