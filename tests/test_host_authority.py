@@ -91,7 +91,7 @@ def test_authority_manifest_is_source_bound_and_truthful() -> None:
     assert report["shared_source_evidence_current"] is True
     assert report["all_hosts_singular_authority"] is False
     assert report["blocked_hosts"] == ["mercury"]
-    assert report["not_current_hosts"] == ["codex", "pi"]
+    assert report["not_current_hosts"] == ["codex", "pi", "grok-build"]
     statuses = {host["id"]: host["authority_status"] for host in report["hosts"]}
     assert statuses["algo-cli"] == "qualified_boundary_current"
     assert statuses["hermes"] == "qualified_boundary_current"
@@ -292,5 +292,6 @@ def test_authority_manifest_contains_no_local_paths_or_payloads() -> None:
         "opencode",
         "droid",
         "goose",
+        "grok-build",
         "mercury",
     ]

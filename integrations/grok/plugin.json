@@ -1,0 +1,19 @@
+{
+  "name": "echo-veil",
+  "version": "0.7.0",
+  "description": "Primary four-layer memory tools, skill, and Grok hooks. UserPromptSubmit injects protected context and is non-blocking; PreToolUse can deny unpreflighted subagents.",
+  "author": {
+    "name": "Algo-cli.com",
+    "url": "https://github.com/Seabass-up"
+  },
+  "homepage": "https://echo.algo-cli.com",
+  "repository": "https://github.com/Seabass-up/echo-veil",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "agents",
+    "retrieval",
+    "privacy",
+    "grok"
+  ]
+}

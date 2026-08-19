@@ -59,6 +59,7 @@ VERSION_COMMANDS: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode", "--version"),
     "droid": ("droid", "--version"),
     "goose": ("goose", "--version"),
+    "grok-build": ("grok", "--version"),
 }
 VERSION_EXTRACTORS: dict[str, re.Pattern[str]] = {
     "aip": re.compile(r"^aip ([0-9][0-9A-Za-z.+-]*)\b", re.MULTILINE),
@@ -71,6 +72,7 @@ VERSION_EXTRACTORS: dict[str, re.Pattern[str]] = {
     "opencode": re.compile(r"^([0-9][0-9A-Za-z.+-]*)\b", re.MULTILINE),
     "droid": re.compile(r"^([0-9][0-9A-Za-z.+-]*)\b", re.MULTILINE),
     "goose": re.compile(r"\b([0-9]+(?:\.[0-9]+){2}[0-9A-Za-z.+-]*)\b"),
+    "grok-build": re.compile(r"^grok ([0-9][0-9A-Za-z.+-]*)\b", re.MULTILINE),
 }
 ARTIFACT_RECEIPT_COMMANDS: dict[str, tuple[str, ...]] = {
     "aip": ("aip", "authority-receipt"),

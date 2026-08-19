@@ -8,7 +8,8 @@ pairs them:
    bounded, ephemeral protected-context block;
 2. the middleware admits a provider call only when the exact
    session/task/turn tuple has that successful preflight attestation and its
-   random per-turn nonce survives into the provider request; and
+   random per-turn nonce survives inside the complete protected-context
+   envelope of a provider-visible user message; and
 3. a missing, malformed, timed-out, oversized, or semantically unavailable
    preflight returns a zero-usage blocked response without calling the provider.
 
@@ -18,6 +19,21 @@ bounded request/response, a timeout, a child-environment allowlist, profile
 `qwen3-embedding:latest` at 1,024 dimensions. Protected hook context is capped
 below Hermes's default spill threshold so it stays ephemeral rather than being
 written to a spill file.
+
+The execution check deliberately ignores tool schemas, tool outputs, system
+messages, and request metadata. Large tool-driven turns therefore cannot
+exhaust validation by expanding unrelated request fields, and a copied nonce
+outside user-message text cannot satisfy the gate. Validation remains bounded
+and fail-closed. Denials log only stable reason codes and a normalized API mode;
+they do not log prompts, protected context, nonces, identifiers, backend error
+details, or request payloads.
+
+Hermes may expand a slash-invoked skill into a current user message larger
+than Echo Veil's 20,000-character semantic-query limit. For preflight only,
+the plugin deterministically retains both ends of that current prompt with an
+explicit middle-omission marker. The provider-facing user message is not
+truncated, and it must still contain the complete protected-context envelope
+before the provider is admitted.
 
 Install the Python command first. Then place the plugin at
 `~/.hermes/plugins/echo-veil-shield/`, enable `echo-veil-shield` under

@@ -41,10 +41,11 @@ opening memory when it is missing.
 The plugin also bundles the `echo-veil-memory` Agent Skill. Claude Code may
 invoke it implicitly whenever prior work, decisions, preferences, open loops,
 memory updates, contradictions, or decision rationale matter. The skill makes
-Echo Veil the exclusive mutable memory authority, requires doctor plus minimal
-recall at task start, uses Contextual Logic for “why,” preserves ambiguity and
-competing records, and blocks host plaintext fallback. Static project files and
-curated documents remain read-only evidence.
+Echo Veil the primary mutable memory store, requires doctor plus one
+lifecycle-neutral recall at task start, uses Contextual Logic for “why,”
+preserves ambiguity and competing records, and forbids a plaintext Echo
+substitute. Wiki pages, source files, and curated documents remain valid
+evidence when Echo has no answer.
 
 The plugin's `UserPromptSubmit` and `PreToolUse(Agent)` hooks are its enforced
 boundaries. The root hook runs before Claude processes the prompt. The Agent

@@ -2,13 +2,14 @@ version: 1.0.0
 title: Echo Veil memory
 description: Opt-in, encrypted, confidence-gated local memory tools.
 instructions: |
-  Use Echo Veil as the only mutable agent-memory authority. Treat host notes,
-  source files, curated documents, and legacy memory as read-only evidence,
-  never as a plaintext fallback.
+  Use Echo Veil as the primary mutable agent-memory store. Treat host notes,
+  source files, curated documents, and legacy memory as valid evidence when
+  Echo has no answer, never as a plaintext fallback that pretends to be Echo.
   Call echo_veil_doctor before the first memory-dependent operation in a
   session and after any availability or integrity error.
-  For every substantive task, call echo_veil_recall with a minimal,
-  intent-focused query and at least two result slots. Skip recall only when the
+  For a substantive task whose answer may depend on prior state, call
+  echo_veil_recall once with a minimal, intent-focused query and at least two
+  result slots. Ordinary recall is lifecycle-neutral. Skip recall only when the
   request is trivial and wholly self-contained.
   Use echo_veil_remember only when the user explicitly intends memory capture.
   Store compact intent/outcome seed crystals, not raw transcripts. Raw dialogue
@@ -34,13 +35,13 @@ instructions: |
   Use echo_veil_reindex only after explicit confirmation; it is a protected
   lifecycle mutation, not an ordinary read.
   Do not describe the local staging adapter as a production enclave.
-  If the Echo Veil tools are absent, stop before substantive work and report
-  that the required memory extension was not loaded. Do not continue with a
-  host-memory substitute. When using this recipe, do not launch Goose with
+  If the Echo Veil tools are absent, report that the memory extension was not
+  loaded and continue non-memory work from files and other host evidence.
+  When using this recipe, do not launch Goose with
   --no-profile; Goose 1.41.0 suppresses recipe-defined extensions under that
   flag.
-  If required Echo protection is unavailable, stop memory-dependent work
-  rather than consulting or writing a host plaintext fallback.
+  If required Echo protection is unavailable, continue non-memory work using
+  host evidence rather than writing a host plaintext fallback.
   This portable recipe is policy-driven. For a repository-owned headless gate
   that completes protected preflight before Goose starts, use
   echo-veil-shielded-run goose as documented in integrations/goose/README.md.
@@ -50,7 +51,7 @@ extensions:
     cmd: echo-veil-agent
     args: ["--profile", "echo-universal-qwen3-v1", "--scope", "local-user", "--caller", "goose", "--embedder", "ollama", "--embedding-model", "qwen3-embedding:latest", "--embedding-dimension", "1024", "--availability-layer", "mcp"]
 prompt: |
-  Echo Veil is the exclusive mutable memory authority. Begin with
+  Echo Veil is the primary mutable memory store. Begin with
   echo_veil_doctor. If local protection is ready, call echo_veil_recall with
   the minimal query "Echo Veil singular memory authority current state",
   top_k 2, and inferential recall disabled. Preserve ambiguity, conflicts,

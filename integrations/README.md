@@ -5,7 +5,7 @@ Echo Veil exposes one bounded local tool contract to every supported host:
 `echo_veil_recall`, `echo_veil_context`, `echo_veil_forget`,
 `echo_veil_list`, `echo_veil_doctor`, and explicitly confirmed
 `echo_veil_reindex`. Remember, refresh, promote, and forget are always explicit
-operations. Recall advances the memory lifecycle and can return
+operations. Ordinary recall is lifecycle-neutral and can return
 confidence-gated metadata without revealing a payload. List is bounded
 administrative inventory only; it is non-semantic, lifecycle-neutral, and
 must not be bulk-injected into a model prompt.
@@ -18,23 +18,32 @@ OpenClaw's own runtime. Algo CLI injects the ritual directly into protected
 ordinary-chat and Agent Block prompts. Codex and Claude Code bundle a shared
 root-prompt and `Agent`-input preflight, OpenCode provides a native
 `chat.message`/`chat.params` root gate plus a `Task` boundary, and Pi enforces
-the ritual through input, pre-model, agent-start, and tool-call lifecycle
-hooks. Hermes pairs ephemeral `pre_llm_call` context with an exact
+one signed `preflight_v2` receipt through input, pre-model, agent-start,
+provider, and tool-call lifecycle hooks. Hermes pairs ephemeral `pre_llm_call` context with an exact
 session/task/turn and per-request-nonce `llm_execution` provider gate. The
-`echo-veil-shielded-run` command gives Codex, Droid, Goose, and Hermes a
-separate headless boundary that completes protected preflight before the host
+`echo-veil-shielded-run` command gives Codex, Pi, Droid, Goose, and Hermes a
+separate isolated boundary that completes protected preflight before the host
 process exists. The
 required behavioral
-contract is a doctor-backed preflight, minimal
+contract is a doctor-backed preflight, one lifecycle-neutral
 recall for substantive tasks, Contextual Logic for causal or decision
-questions, ambiguity/conflict preservation, and a stop instead of a plaintext
-memory fallback. The host enforcement tier below determines the exact
+questions, ambiguity/conflict preservation, and no plaintext Echo substitute.
+Wiki, files, and other host evidence remain valid when Echo has no answer.
+The host enforcement tier below determines the exact
 lifecycle boundary repository code currently proves.
+
+An exact-turn protected preflight can carry compact
+`runtime_status.ritual_satisfied=true`, satisfying completed doctor/recall/
+context steps without duplicate calls. The status is semantic-only,
+lifecycle-neutral, turn-bound, and never authorizes mutation, inference,
+collaboration, or reuse. Pi and Codex may use one owner-only serialized local
+broker to keep the profile warm; broker loss or degradation blocks required
+startup, while Always-Available remains manual and non-authorizing.
 
 Run `python scripts/verify_host_authority.py --installed` for the
 machine-readable evidence matrix. It reports source-digest drift, installed
 version drift, externally unbound evidence, repository-only integrations,
-conditional gates, and blocked hosts separately. A matching executable is
+release-pending/stale runtimes, conditional gates, and blocked hosts separately. A matching executable is
 never promoted into a host-gate
 claim: the report binds recorded smokes to their exact Echo source artifacts
 and tested host versions, while the release procedure still reruns the live
@@ -82,6 +91,9 @@ model-turn gates are stricter: they stop the qualified turn boundary when
 semantic Qwen3 readiness is unavailable rather than injecting degraded hints
 as if the semantic preflight succeeded. Shielded headless Codex, Droid, Goose,
 and Hermes runs apply the same rule before starting the host executable.
+Pi exposes degraded keyed retrieval only through the manual
+`/echo-veil-availability` command. That command does not authorize an agent,
+provider request, tool execution, inference, or mutation.
 
 Install the Python command before using a standalone host configuration:
 
@@ -104,30 +116,31 @@ adapters can auto-detect this checkout when loaded from the repository.
 | AIP | Artifact-bound provider gate + fresh-process RPC backend | **Hard runtime pre-provider gate** for Agent, SDK, workflow, chat, stream, and vision generation; no plaintext/RAM shadow store | Install the exact reviewed AIP wheel, verify `aip authority-receipt`, then require current AIP evidence; see `integrations/aip/README.md` |
 | OpenClaw | Exclusive native memory capability + nine tools + three-stage turn attestation | **Hard OpenClaw-runtime pre-model gate** plus exclusive memory routing; the native Codex app-server runtime is not a qualified path | Select the memory slot, enable both required hook permissions, disable built-in `session-memory`, pin each protected model to `agentRuntime.id="openclaw"`, then run a zero-model outage smoke |
 | Hermes | Shield-owned headless launcher plus native pre-LLM/execution plugin and stdio MCP | **Hard shielded memory-only gate** through `echo-veil-shielded-run hermes`; ordinary plugin mode remains conditional on visible plugin load | Install the reviewed plugin, then use the shielded launcher with an explicit local model; it isolates `HERMES_HOME`, disables both native memories, binds plugin digests and a launch nonce, and exposes only Echo tools |
-| Codex | Trusted root plugin hook plus shield-owned headless launcher, implicit Agent Skill, and stdio MCP | **Hard direct root gate** with the exact hook trusted; **hard shielded headless gate** with parallel agents disabled; direct collaboration spawns are unqualified | Prefer `echo-veil-shielded-run codex`; it isolates Codex home/auth, injects required Echo MCP, disables native memory/Chronicle/goals/plugins/parallel agents, and defaults to read-only |
+| Codex | Artifact-bound shielded headless/interactive profiles plus direct protected-recall plugin | **Hard isolated gate** with ambient mutable memory and parallel agents disabled; direct mode is not singular and direct collaboration is unqualified | Use `echo-veil-shielded-run codex` with the reviewed 0.146.0 artifact authority ID; the current implementation remains release-pending |
 | Claude Code | Claude plugin, root/expansion/Agent hooks, implicit Agent Skill, and stdio MCP | **Hard root/Agent-spawn gate** in normal plugin mode; `--safe-mode` and `--bare` disable it, and only supported `Agent` tool spawns are covered | Disable Claude auto-memory without disabling hooks, validate the plugin, then run root-outage and Agent-spawn smokes |
-| Pi | Native TypeScript extension with enforced pre-model gate + canonical memory skill | **Hard pre-model gate** through input, prompt-expansion, agent-start, and tool hooks | `pi install ./integrations/pi`, then run `/echo-veil-doctor` and `/echo-veil-preflight <intent>` |
+| Pi | Receipt-bound TypeScript extension, provider-bound state machine, and isolated launcher | **Hard isolated pre-provider gate** for the single-extension launcher; direct ambient stacks retain extension-order risk | Use `echo-veil-shielded-run pi` with the reviewed 0.84.1 artifact authority ID; `/echo-veil-availability` remains manual only and the implementation is release-pending |
 | OpenCode | Global/project plugin + local MCP config + canonical memory skill | **Hard root/Task-spawn gate** in the normal plugin pipeline; `--pure` disables external plugins | Merge `integrations/opencode/opencode.json`, copy `integrations/opencode/.opencode`, run the plugin tests, then run healthy and zero-token outage smokes |
 | Droid | Shield-owned headless launcher plus project/plugin MCP, skill, and native hooks | **Hard shielded headless gate**; native interactive hooks remain separately unqualified | Use `echo-veil-shielded-run droid`; Droid 0.180.0 `exec` bypasses native prompt hooks, so bare `droid exec` is outside the claim |
 | Goose | Shield-owned headless launcher plus portable recipe | **Hard shielded headless gate**; the normal recipe remains policy-driven | Use `echo-veil-shielded-run goose`; see `integrations/goose/README.md` for the explicit Echo-only profile and recipe distinction |
+| grok-build | Plugin skill, stdio MCP, prompt injection, and subagent PreToolUse | **Protected recall and injected context**; UserPromptSubmit is non-blocking and hook failures fail open | `grok plugin validate ./integrations/grok`, then `grok plugin install ./integrations/grok --trust`; do not claim a singular pre-model stop |
 | Mercury | Readiness-only guarded Agent Skill; incompatible with singular-authority mode | **Blocked for singular authority** because native mutable memory remains active | `mercury skills install --from ./integrations/mercury/SKILL.md`; disabling Second Brain still leaves native mutable memory, so payload operations remain blocked |
 
-Algo CLI required mode, OpenClaw's pinned runtime, Pi, and a loaded Hermes
+Algo CLI required mode, OpenClaw's pinned runtime, receipt-bound isolated Pi, and a loaded Hermes
 shield plugin currently own broad tested model-turn stop boundaries. Codex and
-Claude Code hard-stop root user turns. Claude Code intercepts supported
+Claude Code have isolated/root stop boundaries respectively. Claude Code intercepts supported
 `Agent` tool calls before subagent creation; OpenCode
-does the same for root turns and supported `Task` calls. The Codex, Claude Code,
-and OpenCode root boundaries are installed-host qualified. Their
+does the same for root turns and supported `Task` calls. Claude Code and
+OpenCode root boundaries retain their recorded installed-host evidence. Their
 Agent/Task-spawn boundaries retain repository/schema evidence but still require
-installed provider smokes; Codex direct collaboration is currently known to
-bypass `PreToolUse` and is excluded. The deny-only
+installed provider smokes; Codex direct collaboration receives no child-specific
+receipt and is excluded. Direct Codex also exposed a competing mutable-memory
+plugin, so its root path is protected recall rather than singular authority. The deny-only
 `ECHO_VEIL_FORCE_AGENT_PREFLIGHT_FAILURE` and
 `ECHO_VEIL_FORCE_TASK_PREFLIGHT_FAILURE` controls isolate the child boundary
 without failing a healthy root preflight; they are qualification controls, not
-runtime modes. Direct Codex root
-claims apply only while the exact hook hashes are enabled and trusted. The
-shielded Codex launcher owns a separate process boundary and disables every
-current parallel-agent feature instead of relying on that bypassed hook. Claude
+runtime modes. The shielded Codex launcher owns a separate process boundary,
+binds its executable/wheel/plugin/configuration, and disables every current
+parallel-agent feature instead of relying on the direct hook. Claude
 Code must not use `--safe-mode` or `--bare`; OpenCode must not use `--pure`;
 Droid native interactive hooks must not be suppressed through
 `allowManagedHooksOnly`, but Droid 0.180.0 `exec` bypasses native prompt hooks

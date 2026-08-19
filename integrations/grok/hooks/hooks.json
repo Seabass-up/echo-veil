@@ -1,0 +1,30 @@
+{
+  "description": "Echo Veil memory preflight for Grok Build. Prompt injection is best-effort; subagent PreToolUse can deny.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host grok-build --hook-mode prompt",
+            "timeout": 30,
+            "statusMessage": "Loading Echo Veil context"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "spawn_subagent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo-veil-preflight-hook --host grok-build --hook-mode agent",
+            "timeout": 30,
+            "statusMessage": "Shielding Grok subagent context"
+          }
+        ]
+      }
+    ]
+  }
+}
