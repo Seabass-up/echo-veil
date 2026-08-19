@@ -59,10 +59,10 @@ recursive-include integrations/opencode/tests *.mjs
 include integrations/pi/package.json
 include integrations/pi/package-lock.json
 include integrations/pi/README.md
+include integrations/pi/artifact-receipt.json
 include integrations/pi/tsconfig.json
 include integrations/pi/vitest.config.ts
 recursive-include integrations/pi/extensions *.ts
 recursive-include integrations/pi/src *.ts
 recursive-include integrations/pi/skills *.md
 recursive-include integrations/pi/tests *.ts
-recursive-include integrations/pi/types *.d.ts
