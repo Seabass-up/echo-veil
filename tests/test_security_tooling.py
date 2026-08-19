@@ -145,6 +145,8 @@ def test_release_metadata_is_consistent() -> None:
     assert "recursive-include integrations/claude-code/skills *.md" in manifest
     assert "include hooks/hooks.json" in manifest
     assert "recursive-include integrations/claude-code/hooks *.json" in manifest
+    assert "include .grok-plugin/marketplace.json" in manifest
+    assert "recursive-include integrations/grok/hooks *.json" in manifest
 
 
 def test_release_artifacts_are_bound_to_deployment_lock(tmp_path: Path) -> None:

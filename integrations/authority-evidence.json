@@ -125,7 +125,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:860151cc71766052982aaa97f7746c1b837742766590680f2a2a437963e90351",
+      "source_digest": "sha256:78215f17e9db226584e383dc61e2c63503fa7ee1ff8e05a25193791d00366554",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -162,7 +162,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:c18f3e9feb3f31d1a3a69d1968a8728b9adbe4fb58f1554348c56daac01b1c20",
+      "source_digest": "sha256:001db294ad5651b74825a68308c716431a011cf908fa9d40154ad48c9a48c409",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -198,7 +198,7 @@
         "integrations/claude-code/hooks/hooks.json",
         "integrations/claude-code/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:9d763bd2552bfddde8ad8e0a1bebc7832947b25b636f4d643703f5b9b3898202",
+      "source_digest": "sha256:8c166972929652d25422c02ea2db2de0f02fa405d0cc279b3a52fd93b27cc7a8",
       "checks": [
         "Plugin MCP connected",
         "Native auto-memory disabled",
@@ -233,7 +233,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:8cb063d8d7deb3ad0c4a8af46d6cb072a3452b54f323d7b7ac215cde9f0bb7e4",
+      "source_digest": "sha256:f506abeba956d5f269ebb8f9f9a0679b7781b30e134074f113909b739f772b04",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -268,7 +268,7 @@
         "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
         "integrations/opencode/tests/echo-veil-shield.test.mjs"
       ],
-      "source_digest": "sha256:36d41673ad6180142a449203bc56f843fc0a03b0d69aed38ddde155ba1616c07",
+      "source_digest": "sha256:72e2220afdaf0b526aa514a1600c26d7ebe1febc4489d8b087d501da237db65d",
       "checks": [
         "Installed root-turn protected marker",
         "Forced-outage zero-assistant-message, zero-token, and zero-cost result",
@@ -296,7 +296,7 @@
         "integrations/droid/hooks/echo-veil-preflight.sh",
         "integrations/droid/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:cdac1fc812e0660305038c00b774bfab1694963a06d5c3a4e57d501085964b1b",
+      "source_digest": "sha256:ce11bc7065d0bc6b0144282d4b72ed5bbbe08ee273a625e9e8cb953d4705d607",
       "checks": [
         "Installed plugin and MCP connection",
         "Healthy shield-owned headless turn",
@@ -321,7 +321,7 @@
         "integrations/goose/echo-veil.yaml",
         "integrations/goose/README.md"
       ],
-      "source_digest": "sha256:fe059dd644c035f8ada16619f3a62256b59dad386bbfbee730a839bf068de6f9",
+      "source_digest": "sha256:2a05d131748e52f6895898e6b5e2a21aad692824b15abb8242cccc76a1899ca5",
       "checks": [
         "Installed recipe doctor and two-slot recall",
         "Healthy shield-owned Echo-only run",
@@ -331,6 +331,35 @@
       "remaining": [
         "The normal Goose recipe remains policy-driven rather than a hard pre-model boundary",
         "No-profile suppresses recipe extensions outside the shield-owned launcher"
+      ]
+    },
+    {
+      "id": "grok-build",
+      "display_name": "Grok Build",
+      "adapter": "Plugin skill, stdio MCP, prompt injection, and subagent PreToolUse",
+      "evidence_state": "repository_only",
+      "qualified_boundary": "Protected recall and injected context; UserPromptSubmit is non-blocking",
+      "tested_on": "2026-08-13",
+      "tested_version": "1.0.3",
+      "source_artifacts": [
+        ".grok-plugin/marketplace.json",
+        "integrations/grok/plugin.json",
+        "integrations/grok/.mcp.json",
+        "integrations/grok/hooks/hooks.json",
+        "integrations/grok/skills/echo-veil-memory/SKILL.md",
+        "integrations/grok/README.md"
+      ],
+      "source_digest": "sha256:4ad9c0d50a78cd22fd2e9c9f7d72e14627c0f2f36e02cc097449d1dc5de86aaa",
+      "checks": [
+        "Plugin layout matches Grok marketplace and hook schema",
+        "MCP binds echo-universal-qwen3-v1 and caller grok-build",
+        "Hook parser accepts Grok camelCase envelopes",
+        "Prompt-mode outage injects a warning instead of claiming a turn stop"
+      ],
+      "remaining": [
+        "UserPromptSubmit is non-blocking and hook failures fail open",
+        "No installed zero-token outage smoke has been recorded",
+        "Grok native memory is not a detectable exclusive-disable switch"
       ]
     },
     {

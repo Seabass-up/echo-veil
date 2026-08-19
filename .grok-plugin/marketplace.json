@@ -1,0 +1,16 @@
+{
+  "name": "echo-veil-local",
+  "owner": {
+    "name": "Algo-cli.com"
+  },
+  "description": "Local marketplace for the Echo Veil Grok Build plugin.",
+  "plugins": [
+    {
+      "name": "echo-veil",
+      "source": "./integrations/grok",
+      "description": "Primary four-layer memory tools, skill, and Grok hooks.",
+      "version": "0.7.0",
+      "category": "Productivity"
+    }
+  ]
+}

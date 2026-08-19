@@ -7,6 +7,7 @@ include .mcp.json
 include .codex-plugin/plugin.json
 include .agents/plugins/marketplace.json
 include .claude-plugin/marketplace.json
+include .grok-plugin/marketplace.json
 include .factory-plugin/marketplace.json
 include hooks/hooks.json
 recursive-include docs *.md
@@ -33,6 +34,11 @@ include integrations/claude-code/.mcp.json
 include integrations/claude-code/README.md
 recursive-include integrations/claude-code/skills *.md
 recursive-include integrations/claude-code/hooks *.json
+include integrations/grok/plugin.json
+include integrations/grok/.mcp.json
+include integrations/grok/README.md
+recursive-include integrations/grok/skills *.md
+recursive-include integrations/grok/hooks *.json
 include integrations/droid/.factory/mcp.json
 include integrations/droid/.factory/hooks.json
 include integrations/droid/.factory/hooks/echo-veil-preflight.sh

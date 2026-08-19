@@ -26,6 +26,7 @@ HOSTS = (
     "opencode",
     "droid",
     "goose",
+    "grok-build",
     "mercury",
 )
 FULL_TOOL_HOSTS = (
@@ -37,6 +38,7 @@ FULL_TOOL_HOSTS = (
     "opencode",
     "droid",
     "goose",
+    "grok-build",
 )
 
 HOST_ENFORCEMENT_TIERS = {
@@ -44,17 +46,18 @@ HOST_ENFORCEMENT_TIERS = {
     "aip": "Hard runtime pre-provider gate",
     "openclaw": "Hard OpenClaw-runtime pre-model gate",
     "hermes": "Hard shielded memory-only gate",
-    "codex": "Hard direct root gate",
+    "codex": "Hard isolated gate",
     "claude-code": "Hard root/Agent-spawn gate",
-    "pi": "Hard pre-model gate",
+    "pi": "Hard isolated pre-provider gate",
     "opencode": "Hard root/Task-spawn gate",
     "droid": "Hard shielded headless gate",
     "goose": "Hard shielded headless gate",
+    "grok-build": "Protected recall and injected context",
     "mercury": "Blocked for singular authority",
 }
 
 MEMORY_SKILL_REQUIRED_TEXT = (
-    "exclusive mutable memory authority",
+    "primary mutable agent-memory store",
     "echo_veil_doctor",
     "echo_veil_recall",
     "echo_veil_context",
@@ -64,6 +67,7 @@ MEMORY_SKILL_REQUIRED_TEXT = (
     "Long-Term",
     "Contextual Logic",
     "plaintext fallback",
+    "lifecycle-neutral",
 )
 
 
@@ -81,6 +85,9 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
     codex = _mapping(_mapping(_json(".mcp.json")["mcpServers"])["echo-veil"])
     claude = _mapping(
         _mapping(_json("integrations/claude-code/.mcp.json")["mcpServers"])["echo-veil"]
+    )
+    grok = _mapping(
+        _mapping(_json("integrations/grok/.mcp.json")["mcpServers"])["echo-veil"]
     )
     droid = _mapping(
         _mapping(_json("integrations/droid/.factory/mcp.json")["mcpServers"])[
@@ -104,7 +111,11 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
     assert codex["args"] == ["mcp"]
     assert claude["command"] == "echo-veil-agent"
     assert claude["args"] == ["mcp"]
-    for config, caller in ((codex, "codex"), (claude, "claude-code")):
+    for config, caller in (
+        (codex, "codex"),
+        (claude, "claude-code"),
+        (grok, "grok-build"),
+    ):
         assert config["env"]["ECHO_VEIL_SCOPE"] == "local-user"
         assert config["env"]["ECHO_VEIL_CALLER"] == caller
         assert config["env"]["ECHO_VEIL_EMBEDDER"] == "ollama"
@@ -162,6 +173,7 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
     for path in (
         ".codex-plugin/plugin.json",
         "integrations/claude-code/.claude-plugin/plugin.json",
+        "integrations/grok/plugin.json",
         "integrations/openclaw/openclaw.plugin.json",
         "integrations/openclaw/package.json",
         "integrations/opencode/package.json",
@@ -178,6 +190,12 @@ def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
     claude_entry = _mapping(claude_plugins[0])
     assert claude_entry["source"] == "./integrations/claude-code"
     assert claude_entry["version"] == VERSION
+    grok_marketplace = _json(".grok-plugin/marketplace.json")
+    grok_plugins = grok_marketplace["plugins"]
+    assert isinstance(grok_plugins, list) and len(grok_plugins) == 1
+    grok_entry = _mapping(grok_plugins[0])
+    assert grok_entry["source"] == "./integrations/grok"
+    assert grok_entry["version"] == VERSION
 
 
 def test_droid_plugin_packages_root_and_task_contract_without_timeout_bypass() -> None:
@@ -256,18 +274,23 @@ def test_skill_capable_hosts_ship_one_fail_closed_memory_ritual() -> None:
     droid_skill = (
         ROOT / "integrations/droid/.factory/skills/echo-veil-memory/SKILL.md"
     ).read_text(encoding="utf-8")
+    grok_skill = (
+        ROOT / "integrations/grok/skills/echo-veil-memory/SKILL.md"
+    ).read_text(encoding="utf-8")
     openai_metadata = (ROOT / "skills/echo-veil-memory/agents/openai.yaml").read_text(
         encoding="utf-8"
     )
     codex_manifest = _json(".codex-plugin/plugin.json")
     codex_hooks = _json("hooks/hooks.json")
     claude_hooks = _json("integrations/claude-code/hooks/hooks.json")
+    grok_hooks = _json("integrations/grok/hooks/hooks.json")
 
     assert codex_skill == claude_skill
     assert codex_skill == hermes_skill
     assert codex_skill == pi_skill
     assert codex_skill == opencode_skill
     assert codex_skill == droid_skill
+    assert codex_skill == grok_skill
     assert codex_skill.startswith("---\nname: echo-veil-memory\n")
     for required in MEMORY_SKILL_REQUIRED_TEXT:
         assert required in codex_skill
@@ -280,10 +303,12 @@ def test_skill_capable_hosts_ship_one_fail_closed_memory_ritual() -> None:
     codex_agent_hooks = _mapping(codex_hooks["hooks"])["PreToolUse"]
     claude_prompt_hooks = _mapping(claude_hooks["hooks"])["UserPromptSubmit"]
     claude_expansion_hooks = _mapping(claude_hooks["hooks"])["UserPromptExpansion"]
+    grok_prompt_hooks = _mapping(grok_hooks["hooks"])["UserPromptSubmit"]
     for hooks, caller in (
         (codex_prompt_hooks, "codex"),
         (claude_prompt_hooks, "claude-code"),
         (claude_expansion_hooks, "claude-code"),
+        (grok_prompt_hooks, "grok-build"),
     ):
         assert isinstance(hooks, list) and len(hooks) == 1
         handlers = _mapping(hooks[0])["hooks"]
@@ -305,6 +330,11 @@ def test_skill_capable_hosts_ship_one_fail_closed_memory_ritual() -> None:
             "claude-code",
             "Agent",
         ),
+        (
+            _mapping(grok_hooks["hooks"])["PreToolUse"],
+            "grok-build",
+            "spawn_subagent|Task",
+        ),
     ):
         assert isinstance(hooks, list) and len(hooks) == 1
         hook_group = _mapping(hooks[0])
@@ -325,6 +355,10 @@ def test_skill_capable_hosts_ship_one_fail_closed_memory_ritual() -> None:
         _mapping(_mapping(claude_prompt_hooks[0])["hooks"][0])["command"]
         == "echo-veil-preflight-hook --host claude-code --hook-mode prompt"
     )
+    assert (
+        _mapping(_mapping(grok_prompt_hooks[0])["hooks"][0])["command"]
+        == "echo-veil-preflight-hook --host grok-build --hook-mode prompt"
+    )
 
 
 def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
@@ -339,7 +373,8 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
             re.IGNORECASE,
         )
     assert re.search(
-        r"Algo CLI required mode,\s+OpenClaw's pinned runtime,\s+Pi,\s+and a "
+        r"Algo CLI required mode,\s+OpenClaw's pinned runtime,\s+"
+        r"receipt-bound isolated Pi,\s+and a "
         r"loaded Hermes\s+shield plugin currently own broad tested "
         r"model-turn stop",
         integration_readme,
@@ -402,8 +437,10 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     assert "ordinary plugin mode" in hermes_readme
     assert "echo_veil_reindex only after explicit confirmation" in goose
     assert "Call echo_veil_doctor before the first memory-dependent operation" in goose
-    assert "For every substantive task, call echo_veil_recall" in goose
-    assert "only mutable agent-memory authority" in goose
+    assert (
+        "For a substantive task whose answer may depend on prior state, call" in goose
+    )
+    assert "primary mutable agent-memory store" in goose
     assert "host plaintext fallback" in goose
     assert "not independently query-scored" in goose
     assert "never as\n" in goose
