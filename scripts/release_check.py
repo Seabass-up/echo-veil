@@ -82,6 +82,9 @@ REQUIRED_SDIST_FILES = {
     "scripts/secure_bundle.py",
     "scripts/security_scan.py",
     "src/echo_veil/guarded_runner.py",
+    "src/echo_veil/agent_broker.py",
+    "src/echo_veil/codex_artifact.py",
+    "src/echo_veil/preflight_receipt.py",
     "skills/echo-veil-memory/SKILL.md",
     "skills/echo-veil-memory/agents/openai.yaml",
 }
@@ -313,6 +316,11 @@ def check_metadata(root: Path, tag: str | None = None) -> tuple[str, list[str]]:
             "untrusted_memory_evidence",
             "ranking_ambiguous",
             "competing_memory_detected",
+        ),
+        "src/echo_veil/agent_broker.py": (
+            "owner-only",
+            "payload_included",
+            "serve_forever",
         ),
         "integrations/droid/hooks/hooks.json": (
             "UserPromptSubmit",

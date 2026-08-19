@@ -50,7 +50,7 @@ from .crypto_shield import is_serializable_protected_payload, load_protected_vec
 from .vectors import Vector, as_vector, cosine_similarity
 from .vine import Vine, VineState
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_METADATA_BYTES = 65_536
 
@@ -85,6 +85,8 @@ class SQLiteStore:
     _closed: bool
     _connection: sqlite3.Connection
     _lsh: RandomProjectionLSH
+    _workspace_generation: int
+    _transaction_generation: int | None
 
     def __init__(
         self,
@@ -114,6 +116,8 @@ class SQLiteStore:
         self._lsh = RandomProjectionLSH()
         self._lock = RLock()
         self._closed = False
+        self._workspace_generation = 0
+        self._transaction_generation = None
         if durable:
             self._secure_database_file(database_path)
         self._connection = sqlite3.connect(
@@ -126,6 +130,7 @@ class SQLiteStore:
         try:
             self._configure_connection(timeout)
             self._initialize_schema()
+            self._workspace_generation = self._read_generation_locked()
             if verify_integrity:
                 self.verify_integrity()
         except Exception:
@@ -244,11 +249,11 @@ class SQLiteStore:
         with self._lock:
             version_row = self._connection.execute("PRAGMA user_version").fetchone()
             version = int(version_row[0]) if version_row is not None else 0
-            if version not in {0, 1, SCHEMA_VERSION}:
+            if version not in {0, 1, 2, SCHEMA_VERSION}:
                 raise RuntimeError(
                     f"unsupported Echo Veil SQLite schema version: {version}"
                 )
-            self._begin_locked()
+            self._begin_locked(advance_generation=False)
             try:
                 self._connection.execute(
                     """
@@ -261,6 +266,22 @@ class SQLiteStore:
                         dimension INTEGER NOT NULL CHECK (dimension > 0),
                         updated_at REAL NOT NULL
                     )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workspace_generation (
+                        singleton INTEGER PRIMARY KEY NOT NULL
+                            CHECK(singleton = 1),
+                        generation INTEGER NOT NULL CHECK(generation >= 0)
+                    )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO workspace_generation(singleton, generation)
+                    VALUES (1, 0)
+                    ON CONFLICT(singleton) DO NOTHING
                     """
                 )
                 self._connection.execute(
@@ -362,6 +383,7 @@ class SQLiteStore:
                 "twilight_cycles",
                 "crest_rank",
             ),
+            "workspace_generation": ("singleton", "generation"),
         }
         for table, expected in expected_columns.items():
             rows = self._connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -415,6 +437,7 @@ class SQLiteStore:
             "active_workspace",
             "cold_archive",
             "eviction_metadata",
+            "workspace_generation",
         }
         expected_objects = {
             *(("table", table, table) for table in tables),
@@ -775,10 +798,16 @@ class SQLiteStore:
         MetadataIndex._validate_key(key)
         with self._lock:
             self._ensure_open_locked()
-            result = self._connection.execute(
-                "DELETE FROM metadata_index WHERE key = ?", (key,)
-            )
-            return result.rowcount > 0
+            self._begin_locked()
+            try:
+                result = self._connection.execute(
+                    "DELETE FROM metadata_index WHERE key = ?", (key,)
+                )
+                self._commit_locked()
+                return result.rowcount > 0
+            except Exception:
+                self._rollback_locked()
+                raise
 
     def _index_rows(self, query: Vector) -> list[tuple[str, str, bytes, int]]:
         signatures = self._lsh.signatures(query)
@@ -848,16 +877,13 @@ class SQLiteStore:
         validated = self._validate_payload(payload, "archive")
         with self._lock:
             self._ensure_open_locked()
-            self._connection.execute(
-                """
-                INSERT INTO cold_archive(key, payload, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                (key, validated, time.time()),
-            )
+            self._begin_locked()
+            try:
+                self._put_archive_locked(key, validated)
+                self._commit_locked()
+            except Exception:
+                self._rollback_locked()
+                raise
 
     def _get_archive(self, key: str) -> bytes | None:
         MetadataIndex._validate_key(key)
@@ -873,10 +899,16 @@ class SQLiteStore:
         MetadataIndex._validate_key(key)
         with self._lock:
             self._ensure_open_locked()
-            result = self._connection.execute(
-                "DELETE FROM cold_archive WHERE key = ?", (key,)
-            )
-            return result.rowcount > 0
+            self._begin_locked()
+            try:
+                result = self._connection.execute(
+                    "DELETE FROM cold_archive WHERE key = ?", (key,)
+                )
+                self._commit_locked()
+                return result.rowcount > 0
+            except Exception:
+                self._rollback_locked()
+                raise
 
     def _archive_length(self) -> int:
         return self._table_length("cold_archive")
@@ -947,14 +979,23 @@ class SQLiteStore:
         """Load and validate the most recent durable L1 checkpoint."""
         with self._lock:
             self._ensure_open_locked()
-            rows = self._connection.execute(
-                """
-                SELECT key, topic, created_at, last_touched, state, locked,
-                       score, twilight_since, payload_kind, payload, dimension,
-                       twilight_cycles, crest_rank
-                FROM active_workspace ORDER BY key
-                """
-            ).fetchall()
+            self._connection.execute("BEGIN")
+            try:
+                generation = self._read_generation_locked()
+                rows = self._connection.execute(
+                    """
+                    SELECT key, topic, created_at, last_touched, state, locked,
+                           score, twilight_since, payload_kind, payload, dimension,
+                           twilight_cycles, crest_rank
+                    FROM active_workspace ORDER BY key
+                    """
+                ).fetchall()
+                self._connection.execute("COMMIT")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+            self._workspace_generation = generation
         vines: list[Vine] = []
         cycles: dict[str, int] = {}
         ranked_crests: list[tuple[int, str]] = []
@@ -1195,16 +1236,51 @@ class SQLiteStore:
             (key, metadata_json),
         )
 
-    def _begin_locked(self) -> None:
+    def _read_generation_locked(self) -> int:
+        row = self._connection.execute(
+            "SELECT generation FROM workspace_generation WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("workspace generation state is missing")
+        generation = int(row[0])
+        if generation < 0:
+            raise RuntimeError("workspace generation state is invalid")
+        return generation
+
+    def _begin_locked(self, *, advance_generation: bool = True) -> None:
         self._ensure_open_locked()
         self._connection.execute("BEGIN IMMEDIATE")
+        self._transaction_generation = None
+        if not advance_generation:
+            return
+        current = self._read_generation_locked()
+        if current != self._workspace_generation:
+            self._connection.execute("ROLLBACK")
+            raise RuntimeError("stale workspace generation; reload before writing")
+        next_generation = current + 1
+        updated = self._connection.execute(
+            """
+            UPDATE workspace_generation
+            SET generation = ?
+            WHERE singleton = 1 AND generation = ?
+            """,
+            (next_generation, current),
+        )
+        if updated.rowcount != 1:
+            self._connection.execute("ROLLBACK")
+            raise RuntimeError("stale workspace generation; reload before writing")
+        self._transaction_generation = next_generation
 
     def _commit_locked(self) -> None:
         self._connection.execute("COMMIT")
+        if self._transaction_generation is not None:
+            self._workspace_generation = self._transaction_generation
+        self._transaction_generation = None
 
     def _rollback_locked(self) -> None:
         if self._connection.in_transaction:
             self._connection.execute("ROLLBACK")
+        self._transaction_generation = None
 
     def _ensure_open_locked(self) -> None:
         if self._closed:

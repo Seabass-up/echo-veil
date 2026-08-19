@@ -15,6 +15,7 @@ from echo_veil import (
     AesGcmCryptoShield,
     Oracle,
     SQLiteStore,
+    Vine,
     VineState,
     WorkspaceConfig,
 )
@@ -697,4 +698,27 @@ def test_schema_v1_is_migrated_and_backfilled_for_ann(tmp_path: Path) -> None:
     with SQLiteStore(path) as store:
         assert store.index.search(vector, top_k=1) == [("legacy", 1.0)]
         version_row = store._connection.execute("PRAGMA user_version").fetchone()
-        assert version_row is not None and version_row[0] == 2
+        assert version_row is not None and version_row[0] == 3
+
+
+def test_workspace_generation_rejects_a_stale_cross_process_snapshot(
+    tmp_path: Path,
+) -> None:
+    path = _database_path(tmp_path, "generation-cas.db")
+    first = SQLiteStore(path)
+    second = SQLiteStore(path)
+    try:
+        assert first.load_workspace()[0] == []
+        assert second.load_workspace()[0] == []
+        first_vine = Vine(topic="first", anchor=np.array([1.0, 0.0]))
+        second_vine = Vine(topic="second", anchor=np.array([0.0, 1.0]))
+
+        first.save_workspace([first_vine], {}, ())
+        with pytest.raises(RuntimeError, match="stale workspace generation"):
+            second.save_workspace([second_vine], {}, ())
+
+        restored, _, _ = second.load_workspace()
+        assert [vine.vine_id for vine in restored] == [first_vine.vine_id]
+    finally:
+        first.close()
+        second.close()

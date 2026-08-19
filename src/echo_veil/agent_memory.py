@@ -138,6 +138,8 @@ MMR_RELEVANCE_WEIGHT = 0.88
 RETRIEVAL_SCHEMA_VERSION = "protected-hybrid-maxsim-v1"
 MEMORY_CONTRACT_SCHEMA = "shielded-four-layer-v1"
 MEMORY_CONTRACT_METADATA_PREFIX = "memory_contract:"
+RECORD_INTEGRITY_SCHEMA = "record-integrity-hmac-v1"
+RECORD_INTEGRITY_METADATA_PREFIX = "record_integrity:"
 MEMORY_QUERY_INSTRUCTION = (
     "Given a memory recall query, retrieve the stored personal or operational "
     "memory that answers it"
@@ -1467,6 +1469,11 @@ class _LegacyEncryptedPayloadStore:
 
         return 0
 
+    def initialize_record_integrity(self) -> int:
+        """Legacy profiles cannot claim authenticated record metadata."""
+
+        return 0
+
     def get_memory_contract(self, vine_id: str) -> MemoryLayerContract:
         del vine_id
         raise RuntimeError(
@@ -1853,6 +1860,13 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             raise RuntimeError("encrypted record metadata authentication failed")
         for vine_id in metadata_failures:
             self._quarantine(vine_id, "record_metadata")
+        if self._keyring.has_feature(RECORD_INTEGRITY_SCHEMA):
+            if self.get_metadata("record_integrity_schema") != RECORD_INTEGRITY_SCHEMA:
+                raise RuntimeError("required record integrity schema is missing")
+            failures = self._verify_all_record_integrity()
+            if failures and self._read_only:
+                raise RuntimeError("authenticated record metadata verification failed")
+            self._verify_tombstones()
 
     def topic_token(self, topic: str) -> str:
         if not self._secure_schema:
@@ -1987,9 +2001,340 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         keyring.enable_feature(MEMORY_CONTRACT_SCHEMA)
         return len(missing)
 
+    def initialize_record_integrity(self) -> int:
+        """Adopt or verify authenticated lifecycle and retrieval metadata."""
+
+        if not self._secure_schema:
+            return 0
+        keyring = self._require_keyring()
+        feature_enabled = keyring.has_feature(RECORD_INTEGRITY_SCHEMA)
+        stored_schema = self.get_metadata("record_integrity_schema")
+        if stored_schema not in {None, RECORD_INTEGRITY_SCHEMA}:
+            raise RuntimeError("record integrity schema is unsupported")
+        tag_rows = self._connection.execute(
+            "SELECT key FROM adapter_metadata WHERE key LIKE ? ORDER BY key",
+            (f"{RECORD_INTEGRITY_METADATA_PREFIX}%",),
+        ).fetchall()
+        record_ids = [
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT vine_id FROM payloads ORDER BY created_at, vine_id"
+            ).fetchall()
+        ]
+        if feature_enabled:
+            if stored_schema != RECORD_INTEGRITY_SCHEMA:
+                raise RuntimeError("required record integrity schema is missing")
+            if self._verify_all_record_integrity() and self._read_only:
+                raise RuntimeError("authenticated record metadata verification failed")
+            self._verify_tombstones()
+            return 0
+        if stored_schema == RECORD_INTEGRITY_SCHEMA:
+            if len(tag_rows) != len(record_ids) or self._verify_all_record_integrity():
+                raise RuntimeError("record integrity migration is incomplete")
+            self._verify_tombstones()
+            keyring.enable_feature(RECORD_INTEGRITY_SCHEMA)
+            return 0
+        if tag_rows:
+            raise RuntimeError("record integrity migration is incomplete")
+        if self._read_only:
+            raise RuntimeError(
+                "always-available recall requires authenticated record metadata"
+            )
+
+        for vine_id in record_ids:
+            self._validate_record_before_integrity_adoption(vine_id)
+        self._verify_tombstones()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            for vine_id in record_ids:
+                self._write_record_integrity(vine_id)
+            self._connection.execute(
+                """
+                INSERT INTO adapter_metadata(key, value)
+                VALUES ('record_integrity_schema', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (RECORD_INTEGRITY_SCHEMA,),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
+        keyring.enable_feature(RECORD_INTEGRITY_SCHEMA)
+        return len(record_ids)
+
+    def _validate_record_before_integrity_adoption(self, vine_id: str) -> None:
+        record = self.get_record(vine_id)
+        if record is None:
+            raise RuntimeError("record disappeared during integrity migration")
+        self.get_memory_contract(vine_id)
+        row = self._connection.execute(
+            "SELECT content_hash, key_id FROM payloads WHERE vine_id = ?",
+            (vine_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("record disappeared during integrity migration")
+        payload_key_id = str(row[1])
+        keyring = self._require_keyring()
+        expected_content_hash = self._content_digest(
+            keyring.key(payload_key_id),
+            record[0],
+            record[1],
+        )
+        if not hmac.compare_digest(str(row[0]), expected_content_hash):
+            raise RuntimeError("record content digest is corrupt")
+        vector_rows = self._connection.execute(
+            """
+            SELECT ordinal, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   dimension, key_id, scope_id, format_version
+            FROM memory_vectors WHERE vine_id = ? ORDER BY ordinal
+            """,
+            (vine_id,),
+        ).fetchall()
+        for vector_row in vector_rows:
+            vector = self._decrypt_vector(
+                vine_id=vine_id,
+                ordinal=int(vector_row[0]),
+                nonce=bytes(vector_row[1]),
+                ciphertext=bytes(vector_row[2]),
+                dimension=int(vector_row[3]),
+                key_id=str(vector_row[4]),
+                scope_id=str(vector_row[5]),
+                format_version=int(vector_row[6]),
+            )
+            vector.fill(0.0)
+        term_rows = self._connection.execute(
+            """
+            SELECT CAST(term_hash AS BLOB), term_count, key_id
+            FROM memory_terms WHERE vine_id = ? ORDER BY term_hash
+            """,
+            (vine_id,),
+        ).fetchall()
+        term_key_ids = {str(term_row[2]) for term_row in term_rows}
+        if len(term_key_ids) > 1:
+            raise RuntimeError("record term index mixes authentication keys")
+        if term_key_ids:
+            term_key_id = next(iter(term_key_ids))
+            expected_terms = self._term_features_for_key(
+                f"{record[0]}\n{record[1]}",
+                MAX_LEXICAL_FEATURES,
+                keyring.key(term_key_id),
+            )
+            actual_terms = {
+                bytes(term_hash): int(term_count)
+                for term_hash, term_count, _key_id in term_rows
+            }
+            if actual_terms != expected_terms:
+                raise RuntimeError("record term index is corrupt")
+
+    def _record_integrity_message(self, vine_id: str) -> tuple[str, bytes]:
+        payload = self._connection.execute(
+            """
+            SELECT topic, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   key_id, scope_id, format_version, content_hash,
+                   created_at, effective_at, superseded_by, superseded_at,
+                   operation_state
+            FROM payloads WHERE vine_id = ?
+            """,
+            (vine_id,),
+        ).fetchone()
+        if payload is None:
+            raise KeyError("memory does not exist")
+        contract = self._connection.execute(
+            "SELECT value FROM adapter_metadata WHERE key = ?",
+            (_memory_contract_key(vine_id),),
+        ).fetchone()
+        if contract is None:
+            raise RuntimeError("protected memory contract is missing")
+        vectors = self._connection.execute(
+            """
+            SELECT ordinal, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
+                   dimension, key_id, scope_id, format_version
+            FROM memory_vectors WHERE vine_id = ? ORDER BY ordinal
+            """,
+            (vine_id,),
+        ).fetchall()
+        terms = self._connection.execute(
+            """
+            SELECT CAST(term_hash AS BLOB), term_count, key_id
+            FROM memory_terms WHERE vine_id = ? ORDER BY term_hash
+            """,
+            (vine_id,),
+        ).fetchall()
+        key_id = str(payload[3])
+        message = json.dumps(
+            {
+                "contract_sha256": hashlib.sha256(
+                    str(contract[0]).encode("ascii")
+                ).hexdigest(),
+                "payload": {
+                    "ciphertext_sha256": hashlib.sha256(bytes(payload[2])).hexdigest(),
+                    "content_hash": str(payload[6]),
+                    "created_at": float(payload[7]),
+                    "effective_at": float(payload[8]),
+                    "format_version": int(payload[5]),
+                    "key_id": key_id,
+                    "nonce": bytes(payload[1]).hex(),
+                    "operation_state": str(payload[11]),
+                    "scope_id": str(payload[4]),
+                    "superseded_at": (
+                        None if payload[10] is None else float(payload[10])
+                    ),
+                    "superseded_by": (None if payload[9] is None else str(payload[9])),
+                    "topic": str(payload[0]),
+                },
+                "record_id": vine_id,
+                "schema": RECORD_INTEGRITY_SCHEMA,
+                "terms": [
+                    {
+                        "count": int(term[1]),
+                        "hash": bytes(term[0]).hex(),
+                        "key_id": str(term[2]),
+                    }
+                    for term in terms
+                ],
+                "vectors": [
+                    {
+                        "ciphertext_sha256": hashlib.sha256(
+                            bytes(vector[2])
+                        ).hexdigest(),
+                        "dimension": int(vector[3]),
+                        "format_version": int(vector[6]),
+                        "key_id": str(vector[4]),
+                        "nonce": bytes(vector[1]).hex(),
+                        "ordinal": int(vector[0]),
+                        "scope_id": str(vector[5]),
+                    }
+                    for vector in vectors
+                ],
+            },
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return key_id, message
+
+    def _record_integrity_tag(self, vine_id: str) -> tuple[str, bytes]:
+        key_id, message = self._record_integrity_message(vine_id)
+        keyring = self._require_keyring()
+        derived_key = hmac.new(
+            keyring.key(key_id),
+            b"echo-veil-record-integrity-key-v1\0" + keyring.scope_id.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        return key_id, hmac.new(
+            derived_key,
+            b"echo-veil-record-integrity-v1\0" + message,
+            hashlib.sha256,
+        ).digest()
+
+    def _write_record_integrity(self, vine_id: str) -> None:
+        key_id, tag = self._record_integrity_tag(vine_id)
+        value = json.dumps(
+            {
+                "key_id": key_id,
+                "schema": RECORD_INTEGRITY_SCHEMA,
+                "tag": tag.hex(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._connection.execute(
+            """
+            INSERT INTO adapter_metadata(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (_record_integrity_key(vine_id), value),
+        )
+
+    def _refresh_record_integrity(self, vine_id: str) -> None:
+        if self._require_keyring().has_feature(RECORD_INTEGRITY_SCHEMA):
+            self._write_record_integrity(vine_id)
+
+    def _verify_record_integrity(self, vine_id: str) -> None:
+        if not self._require_keyring().has_feature(RECORD_INTEGRITY_SCHEMA):
+            return
+        row = self._connection.execute(
+            "SELECT value FROM adapter_metadata WHERE key = ?",
+            (_record_integrity_key(vine_id),),
+        ).fetchone()
+        try:
+            if row is None:
+                raise ValueError("record integrity tag is missing")
+            decoded = strict_json_loads(str(row[0]))
+            if not isinstance(decoded, dict) or set(decoded) != {
+                "key_id",
+                "schema",
+                "tag",
+            }:
+                raise ValueError("record integrity tag fields are invalid")
+            if decoded["schema"] != RECORD_INTEGRITY_SCHEMA:
+                raise ValueError("record integrity schema is invalid")
+            encoded_tag = decoded["tag"]
+            if (
+                not isinstance(encoded_tag, str)
+                or re.fullmatch(r"[0-9a-f]{64}", encoded_tag) is None
+            ):
+                raise ValueError("record integrity tag encoding is invalid")
+            expected_key_id, expected_tag = self._record_integrity_tag(vine_id)
+            if decoded["key_id"] != expected_key_id or not hmac.compare_digest(
+                bytes.fromhex(encoded_tag),
+                expected_tag,
+            ):
+                raise ValueError("record integrity authentication failed")
+        except Exception as exc:
+            self._quarantine(vine_id, "record_integrity")
+            raise QuarantinedRecordError(
+                "authenticated record metadata is quarantined"
+            ) from exc
+
+    def _verify_all_record_integrity(self) -> list[str]:
+        failures: list[str] = []
+        rows = self._connection.execute(
+            "SELECT vine_id FROM payloads ORDER BY vine_id"
+        ).fetchall()
+        for row in rows:
+            vine_id = str(row[0])
+            try:
+                self._verify_record_integrity(vine_id)
+            except QuarantinedRecordError:
+                failures.append(vine_id)
+        return failures
+
+    def _verify_tombstones(self) -> int:
+        if not self._secure_schema:
+            return 0
+        keyring = self._require_keyring()
+        rows = self._connection.execute(
+            """
+            SELECT vine_id, deleted_at, key_id, scope_id,
+                   CAST(auth_tag AS BLOB)
+            FROM deletion_tombstones ORDER BY vine_id
+            """
+        ).fetchall()
+        for vine_id_raw, deleted_at_raw, key_id_raw, scope_id_raw, tag_raw in rows:
+            vine_id = _validate_text(str(vine_id_raw), "tombstone vine_id", 128)
+            deleted_at = _validate_stored_timestamp(deleted_at_raw, "deleted_at")
+            key_id = str(key_id_raw)
+            scope_id = str(scope_id_raw)
+            if scope_id != keyring.scope_id:
+                raise RuntimeError("authenticated deletion scope is corrupt")
+            expected = self._tombstone_tag(
+                keyring.key(key_id),
+                vine_id,
+                deleted_at,
+                scope_id,
+                key_id,
+            )
+            if not hmac.compare_digest(expected, bytes(tag_raw)):
+                raise RuntimeError("authenticated deletion state is corrupt")
+        return len(rows)
+
     def get_memory_contract(self, vine_id: str) -> MemoryLayerContract:
         if not self._secure_schema:
             return super().get_memory_contract(vine_id)
+        self._verify_record_integrity(vine_id)
         row = self._connection.execute(
             "SELECT value FROM adapter_metadata WHERE key = ?",
             (_memory_contract_key(vine_id),),
@@ -2026,6 +2371,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 """,
                 (_memory_contract_key(vine_id), value),
             )
+            self._refresh_record_integrity(vine_id)
             self._connection.execute("COMMIT")
         except Exception:
             self._connection.execute("ROLLBACK")
@@ -2048,6 +2394,10 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             """
         ).fetchall()
         for vine_id_raw, encoded_raw in rows:
+            try:
+                self._verify_record_integrity(str(vine_id_raw))
+            except QuarantinedRecordError:
+                continue
             contract = self._decode_memory_contract(
                 str(vine_id_raw),
                 str(encoded_raw),
@@ -2139,6 +2489,9 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         key_id = keyring.active_key_id
         key = keyring.active_key()
         scope_id = keyring.scope_id
+        expected_content_hash = self._content_digest(key, topic, payload)
+        if not hmac.compare_digest(content_hash, expected_content_hash):
+            raise ValueError("content hash does not match the protected record")
         nonce = os.urandom(AES_GCM_NONCE_BYTES)
         envelope = self._encode_envelope(
             vine_id=vine_id,
@@ -2169,6 +2522,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             for prior_id in supersedes:
+                self._verify_record_integrity(prior_id)
                 row = self._connection.execute(
                     """
                     SELECT effective_at, superseded_by
@@ -2269,6 +2623,8 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                     """,
                     (vine_id, effective_at, prior_id),
                 )
+                self._refresh_record_integrity(prior_id)
+            self._refresh_record_integrity(vine_id)
             self._connection.execute("COMMIT")
         except Exception:
             self._connection.execute("ROLLBACK")
@@ -2277,16 +2633,24 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
     def mark_committed(self, vine_id: str) -> None:
         if not self._secure_schema:
             return
-        result = self._connection.execute(
-            """
-            UPDATE payloads
-            SET operation_state = 'committed'
-            WHERE vine_id = ? AND operation_state = 'pending'
-            """,
-            (vine_id,),
-        )
-        if result.rowcount != 1:
-            raise RuntimeError("pending encrypted record could not be committed")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._verify_record_integrity(vine_id)
+            result = self._connection.execute(
+                """
+                UPDATE payloads
+                SET operation_state = 'committed'
+                WHERE vine_id = ? AND operation_state = 'pending'
+                """,
+                (vine_id,),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("pending encrypted record could not be committed")
+            self._refresh_record_integrity(vine_id)
+            self._connection.execute("COMMIT")
+        except Exception:
+            self._connection.execute("ROLLBACK")
+            raise
 
     def pending_ids(self) -> list[str]:
         if not self._secure_schema:
@@ -2295,7 +2659,12 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             "SELECT vine_id FROM payloads WHERE operation_state = 'pending' "
             "ORDER BY vine_id"
         ).fetchall()
-        return [str(row[0]) for row in rows]
+        result: list[str] = []
+        for row in rows:
+            vine_id = str(row[0])
+            self._verify_record_integrity(vine_id)
+            result.append(vine_id)
+        return result
 
     def get_record(self, vine_id: str) -> tuple[str, str] | None:
         if not self._secure_schema:
@@ -2307,6 +2676,13 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             if row is None or payload is None:
                 return None
             return _validate_stored_topic(row[0]), payload
+        exists = self._connection.execute(
+            "SELECT 1 FROM payloads WHERE vine_id = ?",
+            (vine_id,),
+        ).fetchone()
+        if exists is None:
+            return None
+        self._verify_record_integrity(vine_id)
         row = self._connection.execute(
             """
             SELECT topic, CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
@@ -2376,6 +2752,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         }
 
     def _get_pending_record(self, vine_id: str) -> tuple[str, str] | None:
+        self._verify_record_integrity(vine_id)
         row = self._connection.execute(
             """
             SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
@@ -2405,6 +2782,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         keyring = self._require_keyring()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            self._verify_tombstones()
             link = self._connection.execute(
                 """
                 SELECT superseded_by, superseded_at, key_id, operation_state
@@ -2415,6 +2793,14 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             if link is None:
                 self._connection.execute("ROLLBACK")
                 return False
+            self._verify_record_integrity(vine_id)
+            affected_rows = self._connection.execute(
+                "SELECT vine_id FROM payloads WHERE superseded_by = ? ORDER BY vine_id",
+                (vine_id,),
+            ).fetchall()
+            affected_ids = [str(row[0]) for row in affected_rows]
+            for affected_id in affected_ids:
+                self._verify_record_integrity(affected_id)
             if tombstone and str(link[3]) == "committed":
                 deleted_at = time.time()
                 key_id = keyring.active_key_id
@@ -2452,6 +2838,10 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 (_memory_contract_key(vine_id),),
             )
             self._connection.execute(
+                "DELETE FROM adapter_metadata WHERE key = ?",
+                (_record_integrity_key(vine_id),),
+            )
+            self._connection.execute(
                 """
                 UPDATE payloads
                 SET superseded_by = ?, superseded_at = ?
@@ -2459,6 +2849,8 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 """,
                 (link[0], link[1], vine_id),
             )
+            for affected_id in affected_ids:
+                self._refresh_record_integrity(affected_id)
             result = self._connection.execute(
                 "DELETE FROM payloads WHERE vine_id = ?", (vine_id,)
             )
@@ -2505,6 +2897,14 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             if len(candidate_ids) >= MAX_RETRIEVAL_CANDIDATES:
                 break
             candidate_ids.add(vine_id)
+        authenticated_ids: set[str] = set()
+        for vine_id in candidate_ids:
+            try:
+                self._verify_record_integrity(vine_id)
+            except QuarantinedRecordError:
+                continue
+            authenticated_ids.add(vine_id)
+        candidate_ids = authenticated_ids
         if not candidate_ids:
             return {}
         placeholders = ",".join("?" for _ in candidate_ids)
@@ -2625,7 +3025,15 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             ORDER BY payloads.created_at, payloads.vine_id
             """
         ).fetchall()
-        return [str(row[0]) for row in rows]
+        record_ids: list[str] = []
+        for row in rows:
+            vine_id = str(row[0])
+            try:
+                self._verify_record_integrity(vine_id)
+            except QuarantinedRecordError:
+                continue
+            record_ids.append(vine_id)
+        return record_ids
 
     def record_for_reindex(self, vine_id: str) -> tuple[str, str]:
         if not self._secure_schema:
@@ -2678,6 +3086,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         terms = self._term_features_for_key(text, MAX_LEXICAL_FEATURES, key)
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            self._verify_record_integrity(vine_id)
             exists = self._connection.execute(
                 """
                 SELECT 1 FROM payloads
@@ -2738,6 +3147,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                     for term_hash, count in terms.items()
                 ],
             )
+            self._refresh_record_integrity(vine_id)
             self._connection.execute("COMMIT")
         except Exception:
             self._connection.execute("ROLLBACK")
@@ -2782,8 +3192,18 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             key_id: len(terms) for key_id, terms in query_terms_by_key.items()
         }
         candidate_key: dict[str, str] = {}
+        authenticated: dict[str, bool] = {}
         for vine_id_raw, term_hash_raw, count_raw, key_id_raw in rows:
             vine_id = str(vine_id_raw)
+            if vine_id not in authenticated:
+                try:
+                    self._verify_record_integrity(vine_id)
+                except QuarantinedRecordError:
+                    authenticated[vine_id] = False
+                else:
+                    authenticated[vine_id] = True
+            if not authenticated[vine_id]:
+                continue
             key_id = str(key_id_raw)
             term_hash = bytes(term_hash_raw)
             expected = flattened.get(term_hash)
@@ -2987,10 +3407,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
     def tombstone_count(self) -> int:
         if not self._secure_schema:
             return 0
-        row = self._connection.execute(
-            "SELECT COUNT(*) FROM deletion_tombstones"
-        ).fetchone()
-        return 0 if row is None else int(row[0])
+        return self._verify_tombstones()
 
     def key_usage(self, key_id: str) -> int:
         if not self._secure_schema:
@@ -3037,6 +3454,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             or not 1 <= limit <= 1000
         ):
             raise ValueError("rotation batch limit must be between 1 and 1000")
+        self._verify_tombstones()
         rows = self._connection.execute(
             """
             SELECT payloads.vine_id
@@ -3232,6 +3650,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
 
     def _reencrypt_record(self, vine_id: str, target_key_id: str) -> None:
         keyring = self._require_keyring()
+        self._verify_record_integrity(vine_id)
         row = self._connection.execute(
             """
             SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB),
@@ -3397,6 +3816,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                     """,
                     (contract_value, _memory_contract_key(vine_id)),
                 )
+                self._refresh_record_integrity(vine_id)
                 self._connection.execute("COMMIT")
             except Exception:
                 self._connection.execute("ROLLBACK")
@@ -3576,6 +3996,7 @@ class AgentMemory:
         self._closed = False
         self._recovered_lifecycle_orphans = 0
         self._migrated_memory_contracts = 0
+        self._authenticated_record_migrations = 0
         self._expired_live_pruned = 0
         self._restored_on_startup = False
         self._store: SQLiteStore | None = None
@@ -3617,6 +4038,15 @@ class AgentMemory:
             self._migrated_memory_contracts = (
                 self._payloads.initialize_memory_contracts()
             )
+            self._authenticated_record_migrations = (
+                self._payloads.initialize_record_integrity()
+            )
+            if self._payloads.metadata_protected:
+                # Provision the per-profile turn-receipt key during adapter
+                # startup so every later preflight remains read-only.
+                from .preflight_receipt import PreflightReceiptAuthority
+
+                PreflightReceiptAuthority(self.profile_dir, create=True)
             self._expired_live_pruned = self._prune_expired_live_memory()
             self._restored_on_startup = True
         except Exception:
@@ -3632,6 +4062,14 @@ class AgentMemory:
                     self._lease.close()
                     self._closed = True
             raise
+
+    @property
+    def scope(self) -> str:
+        """Return the authenticated logical authorization scope."""
+
+        if self._keyring is None:
+            raise RuntimeError("legacy profiles do not expose a protected scope")
+        return self._keyring.scope
 
     def remember(
         self,
@@ -3664,6 +4102,7 @@ class AgentMemory:
             logic_kind=logic_kind,
             related_ids=related_ids,
         )
+
         _validate_memory_content_policy(
             contract.layer,
             clean_payload,
@@ -3846,6 +4285,52 @@ class AgentMemory:
         allow_inferential: bool = False,
         as_of: float | None = None,
         layers: list[str] | tuple[str, ...] | None = None,
+        mutate_lifecycle: bool = False,
+    ) -> dict[str, Any]:
+        """Return semantic recall. Ordinary calls are lifecycle-neutral."""
+
+        return self._recall(
+            query,
+            top_k=top_k,
+            min_score=min_score,
+            allow_inferential=allow_inferential,
+            as_of=as_of,
+            layers=layers,
+            mutate_lifecycle=mutate_lifecycle,
+        )
+
+    def preview_recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        layers: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Return semantic recall without pruning, observation, or reinforcement."""
+
+        return self._recall(
+            query,
+            top_k=top_k,
+            min_score=min_score,
+            allow_inferential=allow_inferential,
+            as_of=as_of,
+            layers=layers,
+            mutate_lifecycle=False,
+        )
+
+    def _recall(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        min_score: float | None,
+        allow_inferential: bool,
+        as_of: float | None,
+        layers: list[str] | tuple[str, ...] | None,
+        mutate_lifecycle: bool,
     ) -> dict[str, Any]:
         if not self._payloads.metadata_protected:
             raise RuntimeError(
@@ -3853,7 +4338,9 @@ class AgentMemory:
                 "requires a scoped-v2 profile"
             )
         clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
-        expired_live_pruned = self._prune_expired_live_memory()
+        expired_live_pruned = (
+            self._prune_expired_live_memory() if mutate_lifecycle else 0
+        )
         if isinstance(top_k, bool) or not isinstance(top_k, int):
             raise TypeError("top_k must be an integer")
         if not 1 <= top_k <= MAX_RECALL_RESULTS:
@@ -3887,7 +4374,11 @@ class AgentMemory:
             if answerability_intent is not None
             else None
         )
-        lifecycle = self.oracle.observe(intent)
+        lifecycle = (
+            self.oracle.observe(intent)
+            if mutate_lifecycle
+            else {"mode": "read-only-preview", "mutated": False}
+        )
         active = {vine.vine_id: vine for vine in self.oracle.workspace.active()}
         cold_limit = min(MAX_RECALL_RESULTS * 3, max(top_k * 3, 10))
         cold_scores = dict(self.oracle.search_index(intent, top_k=cold_limit))
@@ -4040,7 +4531,7 @@ class AgentMemory:
                 )
             else:
                 topic, payload = record
-                if candidate.source == "active":
+                if mutate_lifecycle and candidate.source == "active":
                     self.oracle.reinforce(vine_id)
                 results.append(
                     {
@@ -4138,6 +4629,7 @@ class AgentMemory:
                 else [layer.value for layer in requested_layers]
             ),
             "expired_live_pruned": expired_live_pruned,
+            "lifecycle_mutated": mutate_lifecycle,
             "memory_contract": {
                 "minimal_ranked_context": True,
                 "provenance_included": True,
@@ -4157,7 +4649,31 @@ class AgentMemory:
         max_depth: int = 1,
         max_records: int = 8,
     ) -> dict[str, Any]:
-        """Recall protected logic roots, then traverse only authenticated links."""
+        """Recall protected logic roots, then traverse only authenticated links.
+
+        Ordinary context traces are lifecycle-neutral.
+        """
+
+        return self.preview_context(
+            query,
+            min_score=min_score,
+            allow_inferential=allow_inferential,
+            as_of=as_of,
+            max_depth=max_depth,
+            max_records=max_records,
+        )
+
+    def preview_context(
+        self,
+        query: str,
+        *,
+        min_score: float | None = None,
+        allow_inferential: bool = False,
+        as_of: float | None = None,
+        max_depth: int = 1,
+        max_records: int = 8,
+    ) -> dict[str, Any]:
+        """Trace protected context without changing any lifecycle state."""
 
         depth = _validate_context_bound(max_depth, "max_depth", MAX_CONTEXT_DEPTH)
         record_limit = _validate_context_bound(
@@ -4165,7 +4681,7 @@ class AgentMemory:
             "max_records",
             MAX_CONTEXT_RECORDS,
         )
-        root_recall = self.recall(
+        root_recall = self.preview_recall(
             query,
             top_k=2,
             min_score=min_score,
@@ -4173,12 +4689,14 @@ class AgentMemory:
             as_of=as_of,
             layers=[MemoryLayer.CONTEXTUAL_LOGIC.value],
         )
-        return _build_context_response(
+        response = _build_context_response(
             self._payloads,
             root_recall,
             max_depth=depth,
             max_records=record_limit,
         )
+        response["lifecycle_mutated"] = False
+        return response
 
     def forget(self, vine_id: str) -> dict[str, Any]:
         clean_id = _validate_text(vine_id, "vine_id", 128)
@@ -4532,6 +5050,13 @@ class AgentMemory:
             or callable(getattr(self._embedder, "embed_answerability_query", None))
         )
         scoped = self._payloads.metadata_protected
+        preflight_authority_id: str | None = None
+        if scoped:
+            from .preflight_receipt import PreflightReceiptAuthority
+
+            preflight_authority_id = PreflightReceiptAuthority(
+                self.profile_dir
+            ).authority_id
         key_id = self._keyring.active_key_id if self._keyring is not None else "legacy"
         rotation_state = (
             self._keyring.rotation_state if self._keyring is not None else None
@@ -4577,6 +5102,8 @@ class AgentMemory:
             "protection_policy": "required",
             "security_schema": self._payloads.security_schema,
             "scope_bound": scoped,
+            "preflight_receipt_schema": "echo-veil-preflight-v2",
+            "preflight_authority_id": preflight_authority_id,
             "key_id": key_id,
             "payload_count": len(self._payloads),
             "active_count": len(self.oracle.workspace.vines),
@@ -4601,6 +5128,7 @@ class AgentMemory:
                 "competing_memory_wired": all_layers_shielded,
                 "content_policy_wired": all_layers_shielded,
                 "live_refresh_wired": all_layers_shielded,
+                "preflight_receipt_wired": preflight_authority_id is not None,
                 "rotation_ready": rotation_ready,
                 "healthy": healthy,
             },
@@ -4610,6 +5138,7 @@ class AgentMemory:
             },
             "reconciliation_backlog": len(self._payloads.pending_ids()),
             "migrated_memory_contracts": self._migrated_memory_contracts,
+            "authenticated_record_migrations": (self._authenticated_record_migrations),
             "expired_live_pruned": self._expired_live_pruned,
             "quarantined_records": quarantine_count,
             "failed_decryptions": quarantine_count,
@@ -4880,6 +5409,13 @@ class AlwaysAvailableMemory:
                 read_only=True,
             )
             self._payloads.initialize_memory_contracts()
+            self._payloads.initialize_record_integrity()
+
+    @property
+    def scope(self) -> str:
+        """Return the authenticated logical authorization scope."""
+
+        return self._keyring.scope
 
     def remember(
         self,
@@ -6001,6 +6537,14 @@ def _memory_contract_key(vine_id: str) -> str:
     key = f"{MEMORY_CONTRACT_METADATA_PREFIX}{clean_id}"
     if len(key) > 64:
         raise ValueError("vine_id is too long for protected contract metadata")
+    return key
+
+
+def _record_integrity_key(vine_id: str) -> str:
+    clean_id = _validate_text(vine_id, "vine_id", 128)
+    key = f"{RECORD_INTEGRITY_METADATA_PREFIX}{clean_id}"
+    if len(key) > 64:
+        raise ValueError("vine_id is too long for protected integrity metadata")
     return key
 
 

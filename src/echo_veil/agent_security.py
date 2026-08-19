@@ -51,7 +51,12 @@ MAX_SCOPED_BLOB_PLAINTEXT_BYTES = 1024
 MAX_SCOPED_BLOB_JSON_BYTES = 2048
 MAX_SCOPE_CHARS = 256
 MAX_PROFILE_FEATURES = 16
-SUPPORTED_PROFILE_FEATURES = frozenset({"shielded-four-layer-v1"})
+SUPPORTED_PROFILE_FEATURES = frozenset(
+    {
+        "record-integrity-hmac-v1",
+        "shielded-four-layer-v1",
+    }
+)
 KEY_ID_PREFIX = "ev-"
 _KEY_ID_RE = re.compile(r"ev-[0-9a-f]{16}\Z")
 _RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")

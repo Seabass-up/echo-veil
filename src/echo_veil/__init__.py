@@ -10,8 +10,8 @@ __version__ = "0.7.0"
 
 from .capability import CapabilityCheck, CapabilityReport, CapabilityStatus
 from .agent_memory import AgentMemory, HashingTextEmbedder, OllamaTextEmbedder
-from .azure_attestation import AzureMaaJwtVerifier
 from .cloudflare_provider import CloudflareEnclaveProvider, CloudflareGatewayError
+from .azure_attestation import AzureMaaJwtVerifier
 from .confidence import ConfidenceBand, classify
 from .conflict import (
     ConflictVine,
@@ -39,6 +39,10 @@ from .deployment import build_production_enclave_shield_from_env
 from .memory_layers import LogicKind, MemoryLayer, MemoryLayerContract
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteColdArchive, SQLiteMetadataIndex, SQLiteStore
+from .preflight_receipt import (
+    PreflightReceiptAuthority,
+    PreflightReceiptVerifier,
+)
 from .proximity import ProximityConfig, proximity_score, time_decay
 from .vectors import cosine_similarity, normalize
 from .vine import Vine, VineState
@@ -58,6 +62,8 @@ __all__ = [
     "SQLiteStore",
     "SQLiteMetadataIndex",
     "SQLiteColdArchive",
+    "PreflightReceiptAuthority",
+    "PreflightReceiptVerifier",
     "CapabilityCheck",
     "CapabilityReport",
     "CapabilityStatus",
