@@ -81,17 +81,19 @@
       "adapter": "Exclusive native memory plugin and nine tools",
       "evidence_state": "qualified",
       "qualified_boundary": "Models pinned to the OpenClaw runtime with all required Echo hooks",
-      "tested_on": "2026-07-25",
+      "tested_on": "2026-08-11",
       "tested_version": "2026.7.1-2",
       "source_artifacts": [
         "integrations/openclaw/deployment-lock.json",
         "integrations/openclaw/openclaw.plugin.json",
+        "integrations/openclaw/package.json",
+        "integrations/openclaw/package-lock.json",
         "integrations/openclaw/src/index.ts",
         "integrations/openclaw/dist/index.js",
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:b02545e49f50257549375341637f6316d9edf93ebd60d70082a84ebd1471e6bc",
+      "source_digest": "sha256:a8f868baabf34af985c2c089d13ecbae73989fc59daae2dc368f2f4ee9e1a3da",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
