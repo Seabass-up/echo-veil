@@ -69,8 +69,8 @@ the answerability gate. The committed hard negatives include unknown passport,
 medication-allergy, shoe-size, and sports-team attributes for a person who does
 have other stored records.
 
-The optional supporting-evidence mode retains the same broad candidate gate but
-uses a separately calibrated `0.25` answerability floor and bounded 65/35
+The optional supporting-evidence mode uses separately calibrated `0.25` broad
+relevance and answerability floors plus bounded 65/35
 broad-relevance/answerability ranking. Direct remains the default and is not
 weakened. On a digest-pinned 50-question slice of LoCoMo sample `conv-26`, using
 184 upstream-generated observation records rather than raw transcripts, the
@@ -81,6 +81,37 @@ retrieval across all 48 scored questions reached 64.58% top-one and 82.95%
 mean recall@5. This is a retrieval-only pilot, not an official end-to-end LoCoMo
 answer score or a universal product comparison. Its 1.82-second p95 also keeps
 supporting mode outside the ordinary preflight path pending broader QoS work.
+
+The query-blind LongMemEval pilot adds a separate capture boundary instead of
+feeding benchmark questions, answers, gold-session IDs, gold-turn markers, or
+raw transcripts into Echo Veil. A digest-pinned local capture model extracts at
+most four bounded seed crystals from each contiguous four-message capture unit;
+long sessions therefore do not lose every fact after an arbitrary four-record
+session-wide cutoff. The benchmark then measures protected restart persistence,
+supporting retrieval, and an optional explicitly authorized local reader. The
+default query-blind sampler deterministically round-robins all six question
+types instead of taking the dataset's grouped prefix. Its owner-only cache is
+bound to the dataset, model, model digest, capture prompt, partition contract,
+and bounded structured-output recovery policy. It atomically checkpoints every
+completed capture batch, so an interrupted pilot can resume without re-running
+the completed windows of a large question. Malformed structured output is
+bisected to single capture units with one bounded retry; transport or model
+identity failures are not recursively retried. That
+optional cache contains plaintext extracted seed crystals, must stay outside the
+repository, and is suitable only for reviewed public benchmark data. Its
+checksum detects corruption but is not a signature or adversarial authenticity
+proof. Interactive runs emit only opaque-ID/count progress on stderr while
+stdout remains a single machine-readable report. Gold-session top-one, recall,
+and precision measure recorded provenance ranking; capture can still
+misattribute a fact among units in the same bounded batch, so they do not prove
+ground-truth attribution or answer completeness;
+they do not prove that capture retained the answer-bearing fact. The report
+therefore keeps capture coverage, gold-session retrieval, and local-reader
+support/exact/F1 separate, and marks the local reader as not comparable to
+LongMemEval's official model judge. Exact seed-crystal deduplication retains the
+first record's protected source provenance: later matching sessions count
+toward capture coverage but receive no retrieval-provenance credit. A bounded
+pilot is not a universal quality claim.
 
 An additional 24-record host-profile pilot retained 8/8 keyword top-1 results,
 improved exact-label paraphrase recall from 10/14 to 12/14, and improved
@@ -502,6 +533,15 @@ the committed record survived an integrity-checked reopen. SQLite uses
 of physical power removal, controller-cache durability, distributed storage,
 or semantic quality at 100K. The semantic Qwen3 gate above remains separate.
 
+The same qualification command now also advances an unlocked stale record over
+six deterministic checkpoints spanning 365 simulated days: it demotes and then
+evicts, while an Amber-locked record remains active and its score is not
+silently rewritten. A separate 48-record profile performs 96 scheduled reads
+from four workers while bounded record-envelope migration advances from v2 to
+verified v3, then reconciles all records after restart. This is simulated time
+and concurrent scheduled load, not a year-long soak or physical power-cut test;
+the harness-facing protocol remains `preflight_v2` throughout.
+
 ## Reproduce
 
 ```bash
@@ -510,6 +550,9 @@ ollama stop qwen3-embedding:latest
 uv run --locked python scripts/quality_benchmark.py
 uv run --locked python scripts/qualification_benchmark.py
 uv run --locked python scripts/memory_core_benchmark.py
+uv run --locked python scripts/longmemeval_benchmark.py \
+  --dataset ./benchmarks/longmemeval_s_cleaned.json \
+  --capture-cache /tmp/echo-veil-longmemeval-capture-cache.json
 ```
 
 The OpenClaw comparison creates an isolated temporary agent, indexes the same

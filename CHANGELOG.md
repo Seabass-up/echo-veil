@@ -7,6 +7,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Added a digest-pinned, query-blind LongMemEval-S pilot that partitions long
+  sessions into bounded contiguous capture units before storing seed crystals.
+  It keeps gold-session provenance retrieval separate from answer support and
+  optional non-official reader exact/F1, rejects raw-transcript persistence,
+  and uses an owner-only public-benchmark cache bound to the dataset, model,
+  prompt, and partition contract.
 - Expanded the bounded local qualification gate with six lifecycle checkpoints
   spanning 365 simulated days and a 48-record v2-to-v3 migration under 96
   scheduled reads from four workers. The stale record demotes and evicts, the
@@ -55,6 +61,10 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- CI now rejects any runtime or harness-facing preflight-v3 identifier, runs the
+  complete 1K/10K/100K local qualification in one dedicated job, and requires a
+  successful full CI run for the exact annotated-tag commit before the release
+  workflow will build artifacts.
 - Serialized every same-profile AgentMemory operation so the two writer-locked
   SQLite snapshots cannot straddle a concurrent in-process mutation. Portable
   restore now requires both recovery-key authentication and an independent
@@ -168,7 +178,7 @@ All notable changes to Echo Veil are documented here. The project follows
   It enforces bounded frames, same-user/socket permissions, sequential dispatch,
   generic errors, payload-free transport telemetry, and fail-closed brokered
   MCP startup.
-- Added receipt-bound Pi `0.84.1` and Codex `0.146.0` isolated boundaries. Pi
+- Added receipt-bound Pi `0.84.2` and Codex `0.147.0` isolated boundaries. Pi
   verifies the receipt at its provider boundary with sequential tools and
   one-use consent; Codex binds its executable, wheel, entry points,
   plugin/hooks/MCP, model, configuration, and optional broker authority.
