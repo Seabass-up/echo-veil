@@ -322,10 +322,11 @@ Harness and storage versions are independent. The signed RPC remains
 evidence-budget, and telemetry contracts retain their existing v1 identifiers.
 The older unsigned `preflight` RPC remains a registered compatibility bridge
 for installed harnesses that still consume it. Record-envelope v3 is an
-internal, dual-read storage format: no harness may parse it, infer it from
-preflight, or require it for turn authorization. A profile may contain v2 and
-v3 records while an unchanged v2 harness continues to consume exactly the
-same preflight-v2 response and receipt.
+internal, dual-read storage format: bounded operator diagnostics may report
+migration progress, but no harness may parse it, infer it from preflight, or
+require it for turn authorization. A profile may contain v2 and v3 records
+while an unchanged v2 harness continues to consume exactly the same
+preflight-v2 response and receipt.
 
 The authoritative field inventory is `protocol/registry-v1.json`; every
 language adapter is checked against `protocol/fixtures/compatibility-v1.json`.
@@ -333,6 +334,15 @@ Signed objects use exact fields and reject unknown versions. New readiness data
 belongs to the separate optional `capabilities_v1` surface, never to an
 existing signed receipt. Capabilities can inform diagnostics but cannot
 authorize a model turn.
+
+Release CI also checks the exact pinned v0.7 consumer artifacts listed in
+`protocol/n-minus-one-v0.7.0.json`. It creates real mixed-v2/v3 and fully-v3
+profiles with the current core, passes their current preflight/doctor/recall
+responses through the actual prior OpenClaw, OpenCode, Pi, Hermes, and shared
+Python consumers, and rehashes those consumers after execution. The old core
+is separately required to reject a v3-activated profile. Algo CLI and AIP must
+run equivalent tests in their own repositories because Echo Veil does not own
+their implementation source.
 
 ### Internal record-envelope migration
 

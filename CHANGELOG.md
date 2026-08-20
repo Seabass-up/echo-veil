@@ -7,6 +7,13 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Added a pinned N-1 compatibility gate for the exact v0.7 consumer bytes.
+  CI now generates responses from real mixed-v2/v3 and fully-v3 profiles,
+  executes the prior OpenClaw, OpenCode, Pi, Hermes, and shared Python
+  consumers against them, rehashes the legacy artifacts after execution, and
+  separately proves that the old core rejects a v3-activated profile. Storage
+  v3 remains invisible to harnesses; `preflight_v2`, its v2 receipt, and the v1
+  runtime/evidence/telemetry contracts retain their identifiers.
 - Ordinary `echo_veil_recall` and `echo_veil_context` are lifecycle-neutral.
   Asking a question no longer advances decay, reinforcement, or twilight
   eviction. Mutation remains available only through an explicit

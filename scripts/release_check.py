@@ -33,6 +33,10 @@ PROHIBITED_SUFFIXES = {
     ".tfstate",
 }
 REQUIRED_SDIST_FILES = {
+    "compatibility/probes/openclaw-v0.7.0.test.ts",
+    "compatibility/probes/opencode-v0.7.0.test.mjs",
+    "compatibility/probes/pi-v0.7.0.test.ts",
+    "compatibility/probes/python-v0.7.0.py",
     ".agents/plugins/marketplace.json",
     ".claude-plugin/marketplace.json",
     ".factory-plugin/marketplace.json",
@@ -72,6 +76,7 @@ REQUIRED_SDIST_FILES = {
     "integrations/pi/skills/echo-veil-memory/SKILL.md",
     "protocol/README.md",
     "protocol/fixtures/compatibility-v1.json",
+    "protocol/n-minus-one-v0.7.0.json",
     "protocol/registry-v1.json",
     "scripts/memory_core_benchmark.py",
     "scripts/build_openclaw_archive.py",
@@ -79,6 +84,7 @@ REQUIRED_SDIST_FILES = {
     "scripts/migrate_host_memory.py",
     "scripts/verify_agent_profile_migration.py",
     "scripts/verify_host_authority.py",
+    "scripts/verify_n_minus_one_consumers.py",
     "scripts/privacy_scan.py",
     "scripts/quality_benchmark.py",
     "scripts/release_check.py",

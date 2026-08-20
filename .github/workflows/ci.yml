@@ -57,7 +57,7 @@ jobs:
         run: uv run --locked pytest -q
 
   record-envelope-compatibility:
-    name: Record-envelope downgrade barrier
+    name: N-1 harness and record-envelope compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -80,8 +80,56 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: Install locked Python environment
-        run: uv sync --locked --extra dev --extra enclave-origin
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            integrations/openclaw/package-lock.json
+            integrations/pi/package-lock.json
+
+      - name: Install locked compatibility runtimes
+        run: |
+          uv sync --locked --extra dev --extra enclave-origin
+          npm --prefix integrations/openclaw ci --ignore-scripts
+          npm --prefix integrations/pi ci --ignore-scripts
+
+      - name: Verify pinned v0.7 consumers and generate current responses
+        run: >-
+          uv run --locked python scripts/verify_n_minus_one_consumers.py
+          --legacy-source compatibility/v0.7.0
+          --output /tmp/echo-veil-n-minus-one.json
+
+      - name: Exercise actual v0.7 consumers against mixed and v3 profiles
+        env:
+          ECHO_VEIL_N_MINUS_ONE_BUNDLE: /tmp/echo-veil-n-minus-one.json
+        run: |
+          cp compatibility/probes/openclaw-v0.7.0.test.ts \
+            compatibility/v0.7.0/integrations/openclaw/src/n-minus-one.test.ts
+          cp compatibility/probes/pi-v0.7.0.test.ts \
+            compatibility/v0.7.0/integrations/pi/tests/n-minus-one.test.ts
+          cp compatibility/probes/opencode-v0.7.0.test.mjs \
+            compatibility/v0.7.0/integrations/opencode/tests/n-minus-one.test.mjs
+          ln -s "$GITHUB_WORKSPACE/integrations/openclaw/node_modules" \
+            compatibility/v0.7.0/integrations/openclaw/node_modules
+          ln -s "$GITHUB_WORKSPACE/integrations/pi/node_modules" \
+            compatibility/v0.7.0/integrations/pi/node_modules
+          npm --prefix compatibility/v0.7.0/integrations/openclaw test -- \
+            --run src/n-minus-one.test.ts
+          npm --prefix compatibility/v0.7.0/integrations/pi test -- \
+            --run tests/n-minus-one.test.ts
+          node --test \
+            compatibility/v0.7.0/integrations/opencode/tests/n-minus-one.test.mjs
+          PYTHONPATH="$GITHUB_WORKSPACE/compatibility/v0.7.0:$GITHUB_WORKSPACE/compatibility/v0.7.0/src" \
+            python compatibility/probes/python-v0.7.0.py \
+              /tmp/echo-veil-n-minus-one.json
+
+      - name: Reverify pinned consumer bytes after execution
+        run: >-
+          uv run --locked python scripts/verify_n_minus_one_consumers.py
+          --legacy-source compatibility/v0.7.0
+          --verify-only
 
       - name: Verify v0.7 fails closed on a v3 profile
         run: >-
