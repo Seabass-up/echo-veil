@@ -160,3 +160,24 @@ def test_backup_restore_operator_commands_round_trip(
         assert recalled["results"][0]["payload"] == (
             "The operator marker is willow nine."
         )
+
+
+def test_storage_maintenance_requires_confirmation_and_is_payload_free(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    _v3_profile(state)
+    common = ["--state-dir", str(state), "--embedder", "hashing"]
+
+    assert agent_cli.main([*common, "maintain", "checkpoint"]) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"] == "ValueError"
+
+    assert agent_cli.main([*common, "--confirm", "maintain", "checkpoint"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["schema"] == "echo-veil-storage-maintenance-v1"
+    assert result["operation"] == "checkpoint"
+    assert result["payload_included"] is False
+    assert result["outcomes"]["payloads"]["busy"] == 0
+    assert result["outcomes"]["lifecycle"]["busy"] == 0

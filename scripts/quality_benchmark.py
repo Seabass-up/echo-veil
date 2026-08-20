@@ -77,8 +77,6 @@ def _start_broker(
     memory: AgentMemory | AlwaysAvailableMemory,
     socket_path: Path,
 ) -> tuple[threading.Event, threading.Thread]:
-    stop = threading.Event()
-    ready = threading.Event()
     server = BrokerServer(
         socket_path,
         lambda action, arguments, caller: dispatch(
@@ -88,6 +86,14 @@ def _start_broker(
             caller=caller,
         ),
     )
+    return _start_broker_server(server)
+
+
+def _start_broker_server(
+    server: BrokerServer,
+) -> tuple[threading.Event, threading.Thread]:
+    stop = threading.Event()
+    ready = threading.Event()
     thread = threading.Thread(
         target=server.serve_forever,
         kwargs={"stop_event": stop, "ready_event": ready},
@@ -338,6 +344,108 @@ def _run_forced_outage_gate(
     }
 
 
+def _run_broker_saturation_gate() -> dict[str, Any]:
+    """Prove backpressure rejects work before the dispatcher boundary."""
+
+    dispatched: list[str] = []
+    results: list[str] = []
+    errors: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+    with _broker_directory() as directory:
+        broker_root = Path(directory).resolve(strict=True)
+        broker_root.chmod(0o700)
+        socket_path = broker_root / "echo.sock"
+
+        def dispatcher(
+            _action: str,
+            arguments: Any,
+            _caller: str,
+        ) -> dict[str, Any]:
+            marker = str(arguments["marker"])
+            dispatched.append(marker)
+            if marker == "active":
+                entered.set()
+                if not release.wait(5.0):
+                    raise RuntimeError("quality saturation gate timed out")
+            return {"marker": marker}
+
+        server = BrokerServer(
+            socket_path,
+            dispatcher,
+            queue_depth=1,
+            per_caller_quota=1,
+        )
+        stop, thread = _start_broker_server(server)
+
+        def invoke(caller: str, marker: str) -> None:
+            try:
+                response = BrokerClient(
+                    socket_path,
+                    caller=caller,
+                    timeout_seconds=5.0,
+                ).call("quality", {"marker": marker})
+                results.append(str(response["marker"]))
+            except BrokerError as exc:
+                errors.append(str(exc))
+
+        active = threading.Thread(target=invoke, args=("pi", "active"))
+        queued = threading.Thread(target=invoke, args=("pi", "queued"))
+        try:
+            active.start()
+            if not entered.wait(2.0):
+                raise RuntimeError("quality saturation dispatcher did not start")
+            queued.start()
+            deadline = time.monotonic() + 2.0
+            while server.metrics()["queued"] != 1 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            try:
+                BrokerClient(
+                    socket_path,
+                    caller="codex",
+                    timeout_seconds=5.0,
+                ).call("quality", {"marker": "rejected"})
+            except BrokerError as exc:
+                errors.append(str(exc))
+            release.set()
+            active.join(5.0)
+            queued.join(5.0)
+            if active.is_alive() or queued.is_alive():
+                raise RuntimeError("quality saturation clients did not stop")
+        finally:
+            release.set()
+            _stop_broker(stop, thread)
+        metrics = server.metrics()
+
+    rejected_before_dispatch = "rejected" not in dispatched
+    payload_free = (
+        metrics.get("payload_included") is False
+        and metrics.get("schema") == "echo-veil-broker-qos-v1"
+    )
+    rejected_value = metrics.get("rejected")
+    rejected_requests = (
+        rejected_value
+        if isinstance(rejected_value, int) and not isinstance(rejected_value, bool)
+        else -1
+    )
+    passed = (
+        dispatched == ["active", "queued"]
+        and sorted(results) == ["active", "queued"]
+        and any("saturated" in error for error in errors)
+        and rejected_before_dispatch
+        and payload_free
+        and rejected_requests >= 1
+    )
+    return {
+        "passed": passed,
+        "dispatcher_calls": len(dispatched),
+        "payload_free_metrics": payload_free,
+        "queue_wait_p95_ms": metrics["queue_wait_p95_ms"],
+        "rejected_before_dispatch": rejected_before_dispatch,
+        "rejected_requests": rejected_requests,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cases = _load_cases(args.cases)
@@ -367,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     live_refresh_ms = 0.0
     harness_preflight_report: dict[str, Any] = {"passed": False}
     forced_outage_report: dict[str, Any] = {"passed": False}
+    broker_saturation_report = _run_broker_saturation_gate()
 
     with tempfile.TemporaryDirectory(prefix="echo-veil-quality-") as directory:
         # macOS exposes /var through a system symlink. Resolve the fresh,
@@ -672,6 +781,7 @@ def main(argv: list[str] | None = None) -> int:
                 and live_refresh_semantic_passed
                 and harness_preflight_report["passed"] is True
                 and forced_outage_report["passed"] is True
+                and broker_saturation_report["passed"] is True
             )
             else "fail"
         ),
@@ -728,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
             "changed_refresh_elapsed_ms": round(live_refresh_ms, 2),
         },
         "harness_preflight": harness_preflight_report,
+        "broker_saturation": broker_saturation_report,
         "forced_outage_gate": forced_outage_report,
         "model_resolution_ms": round(model_resolution_ms, 2),
         "first_remember_ms": round(remember_ms[0], 2),

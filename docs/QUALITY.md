@@ -446,7 +446,10 @@ owner-only serialized broker. It passed:
   `trust=untrusted_memory_evidence`, with no mutation capability in the signed
   receipt;
 - payload-free preflight/broker telemetry and compact runtime ritual status;
-- 483.64 ms concurrent warm preflight p95, below the 500 ms target; and
+- 476.55 ms concurrent warm preflight p95, below the 500 ms target;
+- a bounded one-slot saturation gate that rejected the third request before
+  dispatcher, provider, model, agent, or tool execution, with payload-free
+  queue telemetry and a 7.27 ms queue-wait p95; and
 - forced Pi/Codex semantic-gate failure with zero provider calls, zero agent
   starts, zero tool executions, a blocked write, and a still-manual degraded
   read-only availability query.
@@ -454,6 +457,15 @@ owner-only serialized broker. It passed:
 That p95 is a same-machine local measurement, not a universal latency promise.
 The broker serializes callers deliberately; deployments must repeat the gate on
 their own model, corpus, hardware, and concurrency level.
+
+Queued broker work can be cancelled when its queue deadline expires. Once a
+dispatch has started, the broker waits for its bounded result instead of
+reporting a timeout while a mutation may still commit invisibly. Local Qwen3
+transport reuses one bounded loopback connection, retains per-request model
+identity verification, and opens a fail-closed circuit after repeated
+availability failures. SQLite capacity, WAL, analyze, checkpoint, and vacuum
+controls are exposed through payload-free status and explicit maintenance;
+read-only diagnostics do not run those operations.
 
 ## Reproduce
 

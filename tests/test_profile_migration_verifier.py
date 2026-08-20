@@ -192,8 +192,9 @@ def test_windows_read_only_store_holds_ancestry_pin_through_close(
         assert state["pinned"] is True
         events.append("leaf-verify")
 
-    def payload_version(path: Path) -> int:
+    def payload_version(path: Path, *, observational: bool = False) -> int:
         assert path == profile_dir.absolute() / "payloads.db"
+        assert observational is True
         assert state["pinned"] is True
         events.append("payload-version")
         return PAYLOAD_SCHEMA_VERSION

@@ -23,10 +23,12 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -117,6 +119,13 @@ DEFAULT_OLLAMA_KEEP_ALIVE_SECONDS = 300
 MAX_OLLAMA_KEEP_ALIVE_SECONDS = 3_600
 MAX_OLLAMA_CONTEXT_LENGTH = 262_144
 MAX_OLLAMA_GPU_LAYERS = 2_048
+OLLAMA_CIRCUIT_FAILURE_THRESHOLD = 3
+OLLAMA_CIRCUIT_COOLDOWN_SECONDS = 2.0
+MIN_PROFILE_FREE_BYTES = 512 * 1024 * 1024
+MAX_PROFILE_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
+WARN_PROFILE_DATABASE_BYTES = 12 * 1024 * 1024 * 1024
+MAX_PROFILE_WAL_BYTES = 256 * 1024 * 1024
+VACUUM_RECOMMENDATION_RATIO = 0.20
 DEFAULT_SEMANTIC_MIN_SCORE = 0.44
 DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
 DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
@@ -536,6 +545,13 @@ class OllamaTextEmbedder:
         self.dimension = dimension
         self.semantic = True
         self.default_min_score = DEFAULT_SEMANTIC_MIN_SCORE
+        self._transport_lock = threading.RLock()
+        self._connection: http.client.HTTPConnection | None = None
+        self._transport_state = "healthy"
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._request_count = 0
+        self._connection_reuse_count = 0
         digest, maximum_dimension = self._resolve_model()
         if dimension > maximum_dimension:
             raise ValueError(
@@ -695,38 +711,76 @@ class OllamaTextEmbedder:
                 separators=(",", ":"),
             ).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        connection = http.client.HTTPConnection(
-            self._host,
-            self._port,
-            timeout=self._timeout_seconds,
-        )
         status: int | None = None
-        try:
-            connection.request(method, path, body=body, headers=headers)
-            response = connection.getresponse()
-            status = response.status
-            if status == 200:
-                content_type = response.getheader("Content-Type", "") or ""
-                if content_type.split(";", 1)[0].strip().lower() != "application/json":
-                    raise RuntimeError("local Ollama returned an invalid content type")
-                declared_length = response.getheader("Content-Length")
-                if declared_length is not None and (
-                    not declared_length.isascii()
-                    or not declared_length.isdigit()
-                    or int(declared_length) > MAX_EMBEDDING_RESPONSE_BYTES
-                ):
-                    raise RuntimeError("local Ollama returned an invalid response size")
-            encoded = response.read(MAX_EMBEDDING_RESPONSE_BYTES + 1)
-        except (OSError, http.client.HTTPException) as exc:
-            raise EmbeddingUnavailable(
-                "local Ollama embedding service is unavailable"
-            ) from exc
-        finally:
-            connection.close()
+        with self._transport_lock:
+            now = time.monotonic()
+            if self._circuit_open_until > now:
+                self._transport_state = "open"
+                raise EmbeddingUnavailable(
+                    "local Ollama embedding circuit is temporarily open"
+                )
+            if self._transport_state == "open":
+                self._transport_state = "half-open"
+            attempted_reconnect = False
+            while True:
+                reused = self._connection is not None
+                connection = self._connection
+                if connection is None:
+                    connection = http.client.HTTPConnection(
+                        self._host,
+                        self._port,
+                        timeout=self._timeout_seconds,
+                    )
+                    self._connection = connection
+                else:
+                    self._connection_reuse_count += 1
+                self._request_count += 1
+                try:
+                    connection.request(method, path, body=body, headers=headers)
+                    response = connection.getresponse()
+                    status = response.status
+                    if status == 200:
+                        content_type = response.getheader("Content-Type", "") or ""
+                        if (
+                            content_type.split(";", 1)[0].strip().lower()
+                            != "application/json"
+                        ):
+                            raise RuntimeError(
+                                "local Ollama returned an invalid content type"
+                            )
+                        declared_length = response.getheader("Content-Length")
+                        if declared_length is not None and (
+                            not declared_length.isascii()
+                            or not declared_length.isdigit()
+                            or int(declared_length) > MAX_EMBEDDING_RESPONSE_BYTES
+                        ):
+                            raise RuntimeError(
+                                "local Ollama returned an invalid response size"
+                            )
+                    encoded = response.read(MAX_EMBEDDING_RESPONSE_BYTES + 1)
+                    if bool(getattr(response, "will_close", False)):
+                        self._close_transport_locked()
+                    break
+                except (OSError, http.client.HTTPException) as exc:
+                    self._close_transport_locked()
+                    if reused and not attempted_reconnect:
+                        attempted_reconnect = True
+                        continue
+                    self._record_transport_failure_locked()
+                    raise EmbeddingUnavailable(
+                        "local Ollama embedding service is unavailable"
+                    ) from exc
+                except RuntimeError:
+                    self._close_transport_locked()
+                    raise
         if status != 200:
             error_type = (
                 EmbeddingUnavailable if status in {502, 503, 504} else RuntimeError
             )
+            if error_type is EmbeddingUnavailable:
+                with self._transport_lock:
+                    self._close_transport_locked()
+                    self._record_transport_failure_locked()
             raise error_type(
                 f"local Ollama embedding request failed with HTTP {status}"
             )
@@ -743,7 +797,46 @@ class OllamaTextEmbedder:
             raise RuntimeError("local Ollama returned invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise RuntimeError("local Ollama returned an invalid JSON object")
+        with self._transport_lock:
+            self._consecutive_failures = 0
+            self._circuit_open_until = 0.0
+            self._transport_state = "healthy"
         return decoded
+
+    def _record_transport_failure_locked(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= OLLAMA_CIRCUIT_FAILURE_THRESHOLD:
+            self._circuit_open_until = (
+                time.monotonic() + OLLAMA_CIRCUIT_COOLDOWN_SECONDS
+            )
+            self._transport_state = "open"
+        else:
+            self._transport_state = "degraded"
+
+    def _close_transport_locked(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        with self._transport_lock:
+            self._close_transport_locked()
+
+    def transport_status(self) -> dict[str, object]:
+        with self._transport_lock:
+            remaining = max(0.0, self._circuit_open_until - time.monotonic())
+            return {
+                "circuit_state": self._transport_state,
+                "consecutive_failures": self._consecutive_failures,
+                "connection_reuses": self._connection_reuse_count,
+                "cooldown_remaining_ms": round(remaining * 1_000.0, 3),
+                "payload_included": False,
+                "requests": self._request_count,
+                "schema": "echo-veil-embedding-transport-v1",
+            }
 
 
 class _CallableTextEmbedder:
@@ -1540,7 +1633,14 @@ class _LegacyEncryptedPayloadStore:
         return {layer.value: 0 for layer in MemoryLayer}
 
     def close(self) -> None:
-        self._connection.close()
+        try:
+            if not self._read_only:
+                # Leave a quiescent profile as one immutable database file.
+                # Observational verifiers deliberately reject live WAL state,
+                # so a clean writer shutdown must checkpoint its own frames.
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            self._connection.close()
 
 
 class QuarantinedRecordError(RuntimeError):
@@ -4884,6 +4984,118 @@ class AgentMemory:
             raise RuntimeError("legacy profiles do not expose a protected scope")
         return self._keyring.scope
 
+    def storage_qos_status(self) -> dict[str, Any]:
+        """Return payload- and path-free capacity metrics without maintenance."""
+
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        payload = _sqlite_qos_metrics(
+            self._payloads._connection,
+            self.profile_dir / "payloads.db",
+        )
+        lifecycle = _sqlite_qos_metrics(
+            self._store._connection,
+            Path(self._store.database_path),
+        )
+        database_bytes = int(payload["database_bytes"]) + int(
+            lifecycle["database_bytes"]
+        )
+        wal_bytes = int(payload["wal_bytes"]) + int(lifecycle["wal_bytes"])
+        free_bytes = int(shutil.disk_usage(self.profile_dir).free)
+        warnings: list[str] = []
+        if free_bytes < MIN_PROFILE_FREE_BYTES:
+            warnings.append("EV-STORAGE-FREE-SPACE-LOW")
+        if database_bytes >= MAX_PROFILE_DATABASE_BYTES:
+            warnings.append("EV-STORAGE-DATABASE-LIMIT")
+        elif database_bytes >= WARN_PROFILE_DATABASE_BYTES:
+            warnings.append("EV-STORAGE-DATABASE-WARNING")
+        if wal_bytes > MAX_PROFILE_WAL_BYTES:
+            warnings.append("EV-STORAGE-WAL-LARGE")
+        vacuum_recommended = any(
+            float(item["free_page_ratio"]) >= VACUUM_RECOMMENDATION_RATIO
+            for item in (payload, lifecycle)
+        )
+        return {
+            "database_bytes": database_bytes,
+            "database_limit_bytes": MAX_PROFILE_DATABASE_BYTES,
+            "free_bytes": free_bytes,
+            "healthy": not any(
+                code
+                in {
+                    "EV-STORAGE-FREE-SPACE-LOW",
+                    "EV-STORAGE-DATABASE-LIMIT",
+                    "EV-STORAGE-WAL-LARGE",
+                }
+                for code in warnings
+            ),
+            "lifecycle": lifecycle,
+            "minimum_free_bytes": MIN_PROFILE_FREE_BYTES,
+            "payload_included": False,
+            "payloads": payload,
+            "schema": "echo-veil-storage-qos-v1",
+            "vacuum_recommended": vacuum_recommended,
+            "wal_bytes": wal_bytes,
+            "wal_limit_bytes": MAX_PROFILE_WAL_BYTES,
+            "warnings": warnings,
+        }
+
+    def _assert_storage_writable(self) -> None:
+        status = self.storage_qos_status()
+        if status["healthy"] is not True:
+            raise RuntimeError(
+                "profile storage capacity gate blocked the mutation; run doctor"
+            )
+
+    def maintain_storage(
+        self,
+        operation: str,
+        *,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Run one explicit bounded SQLite maintenance operation."""
+
+        if confirm is not True:
+            raise ValueError("storage maintenance requires confirm=true")
+        if operation not in {"analyze", "checkpoint", "vacuum"}:
+            raise ValueError("storage maintenance operation is unsupported")
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        connections = (
+            ("payloads", self._payloads._connection),
+            ("lifecycle", self._store._connection),
+        )
+        outcomes: dict[str, object] = {}
+        for name, connection in connections:
+            if operation == "checkpoint":
+                row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                outcomes[name] = {
+                    "busy": 0 if row is None else int(row[0]),
+                    "checkpointed_frames": 0 if row is None else int(row[2]),
+                    "log_frames": 0 if row is None else int(row[1]),
+                }
+            elif operation == "analyze":
+                connection.execute("ANALYZE")
+                connection.execute("PRAGMA optimize")
+                outcomes[name] = "completed"
+            else:
+                page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+                free_pages = int(
+                    connection.execute("PRAGMA freelist_count").fetchone()[0]
+                )
+                ratio = 0.0 if page_count == 0 else free_pages / page_count
+                if ratio < VACUUM_RECOMMENDATION_RATIO:
+                    outcomes[name] = "skipped-below-threshold"
+                else:
+                    connection.execute("VACUUM")
+                    outcomes[name] = "completed"
+        return {
+            "operation": operation,
+            "outcomes": outcomes,
+            "payload_included": False,
+            "schema": "echo-veil-storage-maintenance-v1",
+            "status": self.storage_qos_status(),
+        }
+
     def remember(
         self,
         topic: str,
@@ -4898,6 +5110,7 @@ class AgentMemory:
         logic_kind: LogicKind | str | None = None,
         related_ids: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        self._assert_storage_writable()
         if not self._payloads.metadata_protected:
             raise RuntimeError(
                 "legacy profiles are migration-only; fully shielded memory "
@@ -4989,6 +5202,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         """Refresh Live state, preserving changed content as supersession history."""
 
+        self._assert_storage_writable()
         if not self._payloads.metadata_protected:
             raise RuntimeError(
                 "legacy profiles are migration-only; protected Live refresh "
@@ -5060,6 +5274,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         """Deliberately promote live→short-term or short-term→long-term."""
 
+        self._assert_storage_writable()
         if not self._payloads.metadata_protected:
             raise RuntimeError(
                 "legacy profiles are migration-only; protected promotion is unavailable"
@@ -5145,6 +5360,8 @@ class AgentMemory:
         layers: list[str] | tuple[str, ...] | None,
         mutate_lifecycle: bool,
     ) -> dict[str, Any]:
+        if mutate_lifecycle:
+            self._assert_storage_writable()
         if not self._payloads.metadata_protected:
             raise RuntimeError(
                 "legacy profiles are migration-only; fully shielded recall "
@@ -5512,6 +5729,7 @@ class AgentMemory:
         return response
 
     def forget(self, vine_id: str) -> dict[str, Any]:
+        self._assert_storage_writable()
         clean_id = _validate_text(vine_id, "vine_id", 128)
         dependent_ids = self._contextual_dependents(clean_id)
         cascaded: list[str] = []
@@ -5555,7 +5773,6 @@ class AgentMemory:
         )
         if not isinstance(newest_first, bool):
             raise TypeError("newest_first must be a boolean")
-        self._prune_expired_live_memory()
         records = self._payloads.list_records(limit=1000)
         result: list[dict[str, Any]] = []
         for record in records:
@@ -5563,6 +5780,8 @@ class AgentMemory:
             try:
                 contract = self._payloads.get_memory_contract(vine_id)
             except QuarantinedRecordError:
+                continue
+            if contract.is_expired():
                 continue
             if requested_layers is not None and contract.layer not in requested_layers:
                 continue
@@ -5587,6 +5806,7 @@ class AgentMemory:
         return result[:bounded_limit]
 
     def reindex(self) -> dict[str, Any]:
+        self._assert_storage_writable()
         if not self._payloads.metadata_protected:
             raise RuntimeError(
                 "legacy profiles are migration-only; protected reindexing is unavailable"
@@ -5763,6 +5983,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         """Start or resume a bounded, multi-key-safe local key rotation."""
 
+        self._assert_storage_writable()
         if confirm is not True:
             raise ValueError("key rotation requires confirm=true")
         if self._keyring is None or self._scoped_shield is None:
@@ -5851,6 +6072,7 @@ class AgentMemory:
         boolean. File retirement remains a separate confirmed operation.
         """
 
+        self._assert_storage_writable()
         if confirm is not True:
             raise ValueError("key-custody migration requires confirm=true")
         if self._keyring is None or self._scoped_shield is None:
@@ -5991,6 +6213,7 @@ class AgentMemory:
     ) -> VerifiedBackup:
         """Create and fully verify one writer-locked encrypted backup."""
 
+        self._assert_storage_writable()
         from .backup import (
             DEVICE_BOUND_RECOVERY,
             PORTABLE_RECOVERY,
@@ -6108,6 +6331,7 @@ class AgentMemory:
         )
         self._last_verified_backup = receipt
         if record_evidence:
+            self._assert_storage_writable()
             self._record_backup_readiness(receipt)
         return receipt
 
@@ -6172,6 +6396,7 @@ class AgentMemory:
     ) -> dict[str, object]:
         """Perform an actual isolated restore, open it, reconcile, and clean it."""
 
+        self._assert_storage_writable()
         with tempfile.TemporaryDirectory(prefix="echo-veil-restore-drill-") as raw:
             target_root = Path(raw).resolve() / "state"
             receipt = self.restore(
@@ -6214,6 +6439,7 @@ class AgentMemory:
     def retire_file_key_custody(self, *, confirm: bool = False) -> dict[str, Any]:
         """Remove the raw root after a separately confirmed restart drill."""
 
+        self._assert_storage_writable()
         if confirm is not True:
             raise ValueError("file-custody retirement requires confirm=true")
         if self._keyring is None:
@@ -6236,6 +6462,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         """Activate or resume the internal dual-read v2-to-v3 migration."""
 
+        self._assert_storage_writable()
         if confirm is not True:
             raise ValueError("record-envelope v3 migration requires confirm=true")
         if self._keyring is None or self._scoped_shield is None or self._store is None:
@@ -6354,6 +6581,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         """Retire a verified old key only after storage and backups are checked."""
 
+        self._assert_storage_writable()
         if self._keyring is None or self._store is None:
             raise RuntimeError("legacy profiles do not support key retirement")
         rotation = self._keyring.rotation_state
@@ -6469,6 +6697,7 @@ class AgentMemory:
         contract_gap = max(0, len(self._payloads) - protected_contract_count)
         if self._store is None:
             raise RuntimeError("lifecycle store is unavailable")
+        storage_qos = self.storage_qos_status()
         active_ids, indexed_ids, archived_ids, metadata_ids = (
             self._store.managed_state_ids()
         )
@@ -6491,6 +6720,7 @@ class AgentMemory:
             and quarantine_count == 0
             and unindexed_count == 0
             and profile_access_verified
+            and storage_qos["healthy"] is True
         )
         effective_mode = self._deployment_mode if scoped else LEGACY_MIGRATION_MODE
         record_envelope = self._payloads.record_envelope_status()
@@ -6547,6 +6777,7 @@ class AgentMemory:
                 key_migration_complete=key_migration_complete,
                 model_available=True,
                 evidence=readiness_evidence,
+                storage_healthy=storage_qos["healthy"] is True,
             )
         )
         if self._readiness_evidence_error is not None:
@@ -6560,6 +6791,8 @@ class AgentMemory:
             effective_mode != LOCAL_PRODUCTION_MODE or local_production_ready
         )
         remediation_codes = list(capabilities_v1.get("remediation_codes", []))
+        transport_status = getattr(self._embedder, "transport_status", None)
+        embedding_transport = transport_status() if callable(transport_status) else None
         return {
             "adapter_ready": operational_healthy,
             "mode": effective_mode,
@@ -6581,6 +6814,7 @@ class AgentMemory:
             "key_owner_only": profile_access_verified,
             "store_permissions": ("valid" if profile_access_verified else "invalid"),
             "writer_serialization": "profile-sqlite-lease",
+            "storage_qos": storage_qos,
             "recovered_incomplete_lifecycle_records": (
                 self._recovered_lifecycle_orphans
             ),
@@ -6678,6 +6912,7 @@ class AgentMemory:
                 "dimension": self._embedder.dimension,
                 "semantic": self._embedder.semantic,
                 "default_min_score": self._embedder.default_min_score,
+                "transport": embedding_transport,
             },
             "capability_report": capability,
             "limitations": [
@@ -6834,7 +7069,12 @@ class AgentMemory:
                     if self._keyring is not None:
                         self._keyring.close()
                 finally:
-                    self._lease.close()
+                    try:
+                        self._lease.close()
+                    finally:
+                        close_embedder = getattr(self._embedder, "close", None)
+                        if callable(close_embedder):
+                            close_embedder()
 
     def __enter__(self) -> AgentMemory:
         return self
@@ -7277,6 +7517,7 @@ class AlwaysAvailableMemory:
             isinstance(stored_embedding_identity, str)
             and _QWEN3_EMBEDDING_IDENTITY.fullmatch(stored_embedding_identity)
         )
+        storage_qos = _offline_storage_qos(self.profile_dir)
         capabilities_v1 = build_capabilities_v1(
             LocalReadinessState(
                 configured_mode=self._configured_mode or OFFLINE_READ_ONLY_MODE,
@@ -7296,6 +7537,7 @@ class AlwaysAvailableMemory:
                 ),
                 model_available=False,
                 evidence=readiness_evidence,
+                storage_healthy=storage_qos["healthy"] is True,
             )
         )
         if evidence_error is not None:
@@ -7337,6 +7579,7 @@ class AlwaysAvailableMemory:
                 "digest_bound": embedding_identity_verified,
                 "runtime_available": False,
             },
+            "storage_qos": storage_qos,
             "semantic_available": False,
             "writes_available": False,
             "lifecycle_mutation_available": False,
@@ -8412,6 +8655,89 @@ def _immutable_sqlite_uri(path: Path, label: str) -> str:
                 f"observational {label} inspection requires a stopped writer"
             )
     return f"{path.absolute().as_uri()}?mode=ro&immutable=1"
+
+
+def _sqlite_qos_metrics(
+    connection: sqlite3.Connection,
+    path: Path,
+) -> dict[str, int | float]:
+    """Return bounded SQLite capacity metrics without mutating the database."""
+
+    page_size_row = connection.execute("PRAGMA page_size").fetchone()
+    page_count_row = connection.execute("PRAGMA page_count").fetchone()
+    free_pages_row = connection.execute("PRAGMA freelist_count").fetchone()
+    page_size = 0 if page_size_row is None else int(page_size_row[0])
+    page_count = 0 if page_count_row is None else int(page_count_row[0])
+    free_pages = 0 if free_pages_row is None else int(free_pages_row[0])
+    if page_size <= 0 or page_count < 0 or not 0 <= free_pages <= page_count:
+        raise RuntimeError("SQLite capacity metadata is invalid")
+    try:
+        database_bytes = int(path.stat(follow_symlinks=False).st_size)
+    except FileNotFoundError:
+        database_bytes = page_size * page_count
+    wal_path = Path(f"{path}-wal")
+    try:
+        wal_bytes = int(wal_path.stat(follow_symlinks=False).st_size)
+    except FileNotFoundError:
+        wal_bytes = 0
+    return {
+        "database_bytes": database_bytes,
+        "free_page_ratio": (
+            0.0 if page_count == 0 else round(free_pages / page_count, 6)
+        ),
+        "free_pages": free_pages,
+        "page_count": page_count,
+        "page_size": page_size,
+        "wal_bytes": wal_bytes,
+    }
+
+
+def _offline_storage_qos(profile_dir: Path) -> dict[str, object]:
+    """Return path-free file capacity data without opening SQLite for writes."""
+
+    database_bytes = 0
+    wal_bytes = 0
+    for name in ("payloads.db", "echo-veil.db"):
+        path = profile_dir / name
+        try:
+            database_bytes += int(path.stat(follow_symlinks=False).st_size)
+        except FileNotFoundError:
+            pass
+        try:
+            wal_bytes += int(Path(f"{path}-wal").stat(follow_symlinks=False).st_size)
+        except FileNotFoundError:
+            pass
+    free_bytes = int(shutil.disk_usage(profile_dir).free)
+    warnings: list[str] = []
+    if free_bytes < MIN_PROFILE_FREE_BYTES:
+        warnings.append("EV-STORAGE-FREE-SPACE-LOW")
+    if database_bytes >= MAX_PROFILE_DATABASE_BYTES:
+        warnings.append("EV-STORAGE-DATABASE-LIMIT")
+    elif database_bytes >= WARN_PROFILE_DATABASE_BYTES:
+        warnings.append("EV-STORAGE-DATABASE-WARNING")
+    if wal_bytes > MAX_PROFILE_WAL_BYTES:
+        warnings.append("EV-STORAGE-WAL-LARGE")
+    return {
+        "database_bytes": database_bytes,
+        "database_limit_bytes": MAX_PROFILE_DATABASE_BYTES,
+        "free_bytes": free_bytes,
+        "healthy": not any(
+            code
+            in {
+                "EV-STORAGE-FREE-SPACE-LOW",
+                "EV-STORAGE-DATABASE-LIMIT",
+                "EV-STORAGE-WAL-LARGE",
+            }
+            for code in warnings
+        ),
+        "minimum_free_bytes": MIN_PROFILE_FREE_BYTES,
+        "observational": True,
+        "payload_included": False,
+        "schema": "echo-veil-storage-qos-v1",
+        "wal_bytes": wal_bytes,
+        "wal_limit_bytes": MAX_PROFILE_WAL_BYTES,
+        "warnings": warnings,
+    }
 
 
 def _load_or_create_key(path: Path) -> bytes:

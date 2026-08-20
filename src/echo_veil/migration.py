@@ -331,7 +331,7 @@ def _read_only_store(
                 "profile directory must be current-user and owner-only"
             )
         payload_path = profile_dir / "payloads.db"
-        version = _payload_database_version(payload_path)
+        version = _payload_database_version(payload_path, observational=True)
         if version == LEGACY_PAYLOAD_SCHEMA_VERSION:
             store = _EncryptedPayloadStore(
                 payload_path,
