@@ -111,6 +111,18 @@ active and `unavailable` for hashing or custom embedders that do not implement
 it. The transform is syntax-based and contains no person names, domain-specific
 terms, or lists of sensitive attributes.
 
+Ordinary recall uses `retrieval_mode=direct` even when the argument is omitted.
+An optional `supporting` mode lowers only the independent answerability gate to
+`0.25` and ranks with a bounded 65/35 broad-relevance/answerability blend. It is
+for indirect or multi-hop evidence, not a direct answer: the response and every
+candidate set `supporting_evidence_only=true`, report whether the candidate
+would have passed the direct gate, and never claim an authoritative answer.
+Confidence gating still applies, so exposing a gated supporting payload requires
+the existing explicit inferential authorization. Supporting mode is an unsigned
+recall operation argument; it does not change `preflight_v2`, its receipt, the
+runtime-status schema, or any encrypted-record version. Older callers that omit
+the argument retain byte-for-byte direct-request behavior.
+
 ### Always-available read-only recall
 
 The executable adapter enables a conservative availability layer by default.

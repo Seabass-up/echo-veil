@@ -1,7 +1,7 @@
 {
-  "artifact_authority_id": "sha256:7bf9611067e1cdacc6d9079b8954a1cb96af1359368811df310c0526764ed6e2",
+  "artifact_authority_id": "sha256:9c834d6168c19383e8d4fd64db746427748eb679aedb198ac70232b57565728b",
   "files": {
-    "extensions/index.ts": "sha256:6398d957aace6c9d37902ac3e5fe95ca22082e0e8afaba59ee7d06ca231b0ae4",
+    "extensions/index.ts": "sha256:80948b08c03e2796259a7135670cf79b4a8e2843ccca9c9852b4e778480122bc",
     "package-lock.json": "sha256:fd7aeca704c50e2ef09aa1cb90ad29803a8514c5c2c7b0f9fe54aa61bb8964df",
     "package.json": "sha256:60298ace7843630a33625f141ef68c30c8a172e960b920035acc96c511032eb1",
     "src/artifact.ts": "sha256:8c0d5eed47bc38e858db02eeb5a265fa9aa36f08d5adf65cbe10f73936bfd738",

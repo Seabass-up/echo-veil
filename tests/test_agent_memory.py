@@ -132,6 +132,10 @@ def test_ordinary_recall_is_lifecycle_neutral(tmp_path: Path) -> None:
     recall_tool = next(tool for tool in TOOLS if tool["name"] == "echo_veil_recall")
     assert "lifecycle-neutral" in recall_tool["description"]
     assert recall_tool["annotations"]["readOnlyHint"] is True
+    assert recall_tool["inputSchema"]["properties"]["retrieval_mode"]["enum"] == [
+        "direct",
+        "supporting",
+    ]
 
 
 def test_semantic_answerability_rejects_same_subject_absent_fact(
@@ -166,6 +170,76 @@ def test_semantic_answerability_rejects_same_subject_absent_fact(
     assert absent["results"] == []
     assert absent["answerability_rejected_count"] == 1
     assert report["retrieval"]["answerability_gate"] == "semantic-predicate-v1"
+
+
+def test_supporting_retrieval_preserves_indirect_evidence_without_weakening_direct(
+    tmp_path: Path,
+) -> None:
+    class SupportingEmbedder(_SemanticTestEmbedder):
+        identity = "test:supporting-answerability:v1:dimension:32"
+
+        def embed_query(self, text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            similarity = 0.10 if "passport" in text else 0.60
+            vector = np.zeros(self.dimension)
+            vector[0] = similarity
+            vector[1] = math.sqrt(1.0 - similarity**2)
+            return vector
+
+        def embed_answerability_query(
+            self, _text: str
+        ) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[0] = 0.30
+            vector[1] = math.sqrt(1.0 - 0.30**2)
+            return vector
+
+    with AgentMemory(tmp_path, embed=SupportingEmbedder()) as memory:
+        memory.remember(
+            "Taylor relocation evidence",
+            "Taylor accepted a role in Montreal before the planned move.",
+        )
+
+        direct = memory.recall("Why might Taylor move to Canada?")
+        supporting = memory.recall(
+            "Why might Taylor move to Canada?",
+            retrieval_mode="supporting",
+        )
+        absent = memory.recall(
+            "What is Taylor's passport number?",
+            retrieval_mode="supporting",
+        )
+        rpc_supporting = dispatch(
+            memory,
+            "recall",
+            {
+                "query": "Why might Taylor move to Canada?",
+                "retrieval_mode": "supporting",
+            },
+        )
+
+    assert direct["retrieval_mode"] == "direct"
+    assert direct["results"] == []
+    assert direct["answerability_rejected_count"] == 1
+    assert supporting["retrieval_mode"] == "supporting"
+    assert supporting["answerability_min_score"] == 0.25
+    assert supporting["supporting_evidence_only"] is True
+    assert supporting["authoritative_answer_claimed"] is False
+    assert supporting["results"][0]["direct_answerability_passed"] is False
+    assert supporting["results"][0]["supporting_evidence_only"] is True
+    assert absent["results"] == []
+    assert rpc_supporting["retrieval_mode"] == "supporting"
+    assert rpc_supporting["supporting_evidence_only"] is True
+
+
+def test_recall_rejects_unknown_retrieval_mode(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
+        memory.remember("deployment", "The service deploys locally.")
+
+        with pytest.raises(ValueError, match="retrieval_mode must be one of"):
+            memory.recall("Where does it deploy?", retrieval_mode="preflight-v3")
+
+        with pytest.raises(TypeError, match="retrieval_mode must be a string"):
+            memory.recall("Where does it deploy?", retrieval_mode=True)  # type: ignore[arg-type]
 
 
 def test_close_semantic_results_are_reported_as_ranking_ambiguity(
@@ -1798,12 +1872,21 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
         embedder.available = False
 
         recalled = memory.recall("opal harbor recovery procedure", top_k=2)
+        supporting = memory.recall(
+            "opal harbor recovery procedure",
+            top_k=2,
+            retrieval_mode="supporting",
+        )
         doctor = memory.doctor()
 
         assert recalled["degraded"] is True
         assert recalled["semantic_available"] is False
         assert recalled["lifecycle_mutated"] is False
         assert recalled["results"][0]["topic"] == "opal harbor recovery procedure"
+        assert supporting["requested_retrieval_mode"] == "supporting"
+        assert supporting["retrieval_mode"] == "offline-read-only"
+        assert supporting["supporting_evidence_only"] is True
+        assert supporting["authoritative_answer_claimed"] is False
         assert doctor["runtime_failover_active"] is True
         with pytest.raises(RuntimeError, match="read-only"):
             memory.remember("blocked", "Writes stay blocked during the outage.")

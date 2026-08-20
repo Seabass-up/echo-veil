@@ -88,6 +88,7 @@ describe("echo-veil OpenClaw plugin", () => {
     const list = tools.find((tool) => tool.name === "echo_veil_list");
     expect(JSON.stringify(recall?.parameters)).toContain('"minimum":2');
     expect(JSON.stringify(recall?.parameters)).toContain('"long_term"');
+    expect(JSON.stringify(recall?.parameters)).toContain('"supporting"');
     expect(JSON.stringify(context?.parameters)).toContain('"maximum":20');
     expect(JSON.stringify(remember?.parameters)).toContain('"contextual_logic"');
     expect(JSON.stringify(remember?.parameters)).toContain('"provenance"');
@@ -100,6 +101,7 @@ describe("echo-veil OpenClaw plugin", () => {
     expect(recall?.description).toContain("not semantic or authoritative recall");
     expect(recall?.description).toContain("competing_memory_detected=true");
     expect(recall?.description).toContain("never invent a resolution");
+    expect(recall?.description).toContain("Supporting retrieval");
     expect(context?.description).toContain("not independently query-scored");
     expect(JSON.stringify(list?.parameters)).toContain('"maximum":100');
     expect(list?.description).toContain("not semantic recall");
@@ -156,6 +158,7 @@ describe("echo-veil OpenClaw plugin", () => {
     expect(prompt).toContain("echo_veil_context");
     expect(prompt).toContain("ranking_ambiguous=true");
     expect(prompt).toContain("competing_memory_detected=true");
+    expect(prompt).toContain("Use supporting only");
     expect(prompt).toContain("degraded=true");
     expect(prompt).toContain("Long-Term");
     expect(prompt).toContain("Contextual Logic");

@@ -69,6 +69,19 @@ the answerability gate. The committed hard negatives include unknown passport,
 medication-allergy, shoe-size, and sports-team attributes for a person who does
 have other stored records.
 
+The optional supporting-evidence mode retains the same broad candidate gate but
+uses a separately calibrated `0.25` answerability floor and bounded 65/35
+broad-relevance/answerability ranking. Direct remains the default and is not
+weakened. On a digest-pinned 50-question slice of LoCoMo sample `conv-26`, using
+184 upstream-generated observation records rather than raw transcripts, the
+mode reached 73.53% top-one, 90.20% mean recall@5, and 85.29% all-evidence
+retrieval on the 34 questions whose annotated evidence was fully represented by
+the observation capture; both hard negatives were rejected. Capture plus
+retrieval across all 48 scored questions reached 64.58% top-one and 82.95%
+mean recall@5. This is a retrieval-only pilot, not an official end-to-end LoCoMo
+answer score or a universal product comparison. Its 1.82-second p95 also keeps
+supporting mode outside the ordinary preflight path pending broader QoS work.
+
 An additional 24-record host-profile pilot retained 8/8 keyword top-1 results,
 improved exact-label paraphrase recall from 10/14 to 12/14, and improved
 unrelated rejection from 6/10 to 10/10. The two remaining exact-label misses

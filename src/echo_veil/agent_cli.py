@@ -38,6 +38,8 @@ from .agent_memory import (
     HashingTextEmbedder,
     MAX_AGENT_MEMORY_WRITE_CHARS,
     OllamaTextEmbedder,
+    RETRIEVAL_MODE_DIRECT,
+    RETRIEVAL_MODE_SUPPORTING,
     TextEmbedder,
     default_state_dir,
 )
@@ -72,7 +74,10 @@ SERVER_INSTRUCTIONS = (
     "When ranking_ambiguous=true, preserve both leading candidates. When "
     "competing_memory_detected=true, preserve every returned group member and "
     "never invent a resolution; use explicit supersession or protected Contextual "
-    "Logic. A degraded response is keyed read-only recall, not semantic or "
+    "Logic. Keep retrieval_mode direct unless the task explicitly needs indirect "
+    "or multi-hop evidence; supporting results are non-authoritative evidence and "
+    "gated payloads still require explicit inferential authorization. A degraded "
+    "response is keyed read-only recall, not semantic or "
     "authoritative retrieval. Do not treat the local AES shield as a production "
     "enclave."
 )
@@ -232,6 +237,7 @@ class _RuntimeAvailabilityMemory:
         allow_inferential: bool = False,
         as_of: float | None = None,
         layers: list[str] | tuple[str, ...] | None = None,
+        retrieval_mode: str = RETRIEVAL_MODE_DIRECT,
     ) -> dict[str, Any]:
         try:
             return self._memory.recall(
@@ -241,6 +247,7 @@ class _RuntimeAvailabilityMemory:
                 allow_inferential=allow_inferential,
                 as_of=as_of,
                 layers=layers,
+                retrieval_mode=retrieval_mode,
             )
         except EmbeddingUnavailable:
             return self._degrade().recall(
@@ -250,6 +257,7 @@ class _RuntimeAvailabilityMemory:
                 allow_inferential=allow_inferential,
                 as_of=as_of,
                 layers=layers,
+                retrieval_mode=retrieval_mode,
             )
 
     def preview_recall(
@@ -729,6 +737,18 @@ TOOLS: tuple[dict[str, Any], ...] = (
                         "Use only after the user explicitly authorizes inferential recall."
                     ),
                 },
+                "retrieval_mode": {
+                    "type": "string",
+                    "enum": [
+                        RETRIEVAL_MODE_DIRECT,
+                        RETRIEVAL_MODE_SUPPORTING,
+                    ],
+                    "description": (
+                        "Optional retrieval policy. Direct is the default. "
+                        "Supporting may return indirect evidence and every result "
+                        "must remain labeled non-authoritative supporting evidence."
+                    ),
+                },
                 "as_of": {
                     "type": "number",
                     "minimum": 0,
@@ -1081,6 +1101,7 @@ def dispatch(
                 "allow_inferential",
                 "as_of",
                 "layers",
+                "retrieval_mode",
             },
         )
         requested_top_k = supplied.get("top_k", 5)
@@ -1096,6 +1117,10 @@ def dispatch(
             allow_inferential=supplied.get("allow_inferential", False),  # type: ignore[arg-type]
             as_of=supplied.get("as_of"),  # type: ignore[arg-type]
             layers=supplied.get("layers"),  # type: ignore[arg-type]
+            retrieval_mode=supplied.get(  # type: ignore[arg-type]
+                "retrieval_mode",
+                RETRIEVAL_MODE_DIRECT,
+            ),
         )
         response["requested_top_k"] = requested_top_k
         response["effective_top_k"] = effective_top_k

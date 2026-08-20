@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:35d1ad82070776e9a2ad7700682946f4599a129ce8e6553c72db2c554a1af454",
+  "shared_source_digest": "sha256:75ca92f8b4fe7412bed2cce226d0db2d88c73faca16b2bbbf2cc54c1075e5901",
   "hosts": [
     {
       "id": "algo-cli",
@@ -104,7 +104,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:be20dc9be011e3d1ff3ef3090e4fef9fed412cb1a6cdb999f8691816cfab5711",
+      "source_digest": "sha256:fe4e7b494596c4e820b1cdde962fdee810eea9e7f72cd5a378c291bccd5a5d99",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -138,7 +138,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:990f5bb3b26797d215af119ee90f16c99975cba724e75ca10b46d2b9f8cb476c",
+      "source_digest": "sha256:4f7b7e063560f41f78840d7090b77118d0af5f746dcd936931575dcd1d746c66",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -175,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:b91430de3c764c31be2a37e1e737d13b69efd512888110173ed96d92127745d1",
+      "source_digest": "sha256:fe0fe1198b4709be40c5aa83f756d67c301be3fbb74c415daac356f26a7a6c64",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -211,7 +211,7 @@
         "integrations/claude-code/hooks/hooks.json",
         "integrations/claude-code/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:8c166972929652d25422c02ea2db2de0f02fa405d0cc279b3a52fd93b27cc7a8",
+      "source_digest": "sha256:72a54048b52a25807d3e099eee0d60f3a039024b86e9d62b77bcc9a158ee8237",
       "checks": [
         "Plugin MCP connected",
         "Native auto-memory disabled",
@@ -246,7 +246,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:3005900b491dfb0eb6115393e7e682d0283c92546f9965297a121c24dc7cfa08",
+      "source_digest": "sha256:04b30f9d7043d430af12183a4fc6a30a6830303b3c0ed6a95397d0d4d077f500",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -281,7 +281,7 @@
         "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
         "integrations/opencode/tests/echo-veil-shield.test.mjs"
       ],
-      "source_digest": "sha256:0f4e468d2d89d98fca00991aecd1244d8f58efe0748660e0f290c41a7e5dfbf7",
+      "source_digest": "sha256:3fccf0b3f47a03592ae06e03871de7182db90b571c324bbb16fb5923a927dcfd",
       "checks": [
         "Installed root-turn protected marker",
         "Forced-outage zero-assistant-message, zero-token, and zero-cost result",
@@ -309,7 +309,7 @@
         "integrations/droid/hooks/echo-veil-preflight.sh",
         "integrations/droid/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:ce11bc7065d0bc6b0144282d4b72ed5bbbe08ee273a625e9e8cb953d4705d607",
+      "source_digest": "sha256:8e42c9ede133e4eadace79839e7a195c70f4ac471deb3316864cddb48f657ef4",
       "checks": [
         "Installed plugin and MCP connection",
         "Healthy shield-owned headless turn",
@@ -362,7 +362,7 @@
         "integrations/grok/skills/echo-veil-memory/SKILL.md",
         "integrations/grok/README.md"
       ],
-      "source_digest": "sha256:4ad9c0d50a78cd22fd2e9c9f7d72e14627c0f2f36e02cc097449d1dc5de86aaa",
+      "source_digest": "sha256:21d4357b5689110ed0f9591836f9acd071f9c328223856e3035e599a96bca2c4",
       "checks": [
         "Plugin layout matches Grok marketplace and hook schema",
         "MCP binds echo-universal-qwen3-v1 and caller grok-build",

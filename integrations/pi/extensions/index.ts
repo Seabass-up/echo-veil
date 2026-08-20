@@ -136,12 +136,18 @@ const promote = defineTool({
 const recall = defineTool({
   name: "echo_veil_recall",
   label: "Echo Veil Recall",
-  description: "Recall relevant local memories. Preserve both leading candidates when ranking_ambiguous=true and every returned group member when competing_memory_detected=true; never invent a resolution. Responses with degraded=true are conservative lexical hints, not semantic or authoritative recall.",
+  description: "Recall relevant local memories. Direct retrieval is the default. Supporting retrieval may return indirect evidence and must remain labeled non-authoritative. Preserve both leading candidates when ranking_ambiguous=true and every returned group member when competing_memory_detected=true; never invent a resolution. Responses with degraded=true are conservative lexical hints, not semantic or authoritative recall.",
   executionMode: "sequential",
   parameters: Type.Object({
     query: Type.String({ minLength: 1, maxLength: 20_000 }),
     topK: Type.Optional(Type.Integer({ minimum: 2, maximum: 20 })),
     minScore: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    retrievalMode: Type.Optional(Type.Union([
+      Type.Literal("direct"),
+      Type.Literal("supporting"),
+    ], {
+      description: "Optional retrieval policy; omission remains direct for current and older cores.",
+    })),
     asOf: Type.Optional(Type.Number({ minimum: 0 })),
     layers: Type.Optional(Type.Array(Type.Union([
       Type.Literal("live"),
@@ -158,6 +164,9 @@ const recall = defineTool({
       query: params.query,
       top_k: params.topK ?? 5,
       ...(params.minScore === undefined ? {} : { min_score: params.minScore }),
+      ...(params.retrievalMode === undefined
+        ? {}
+        : { retrieval_mode: params.retrievalMode }),
       ...(params.asOf === undefined ? {} : { as_of: params.asOf }),
       ...(params.layers === undefined ? {} : { layers: params.layers }),
       allow_inferential: params.allowInferential ?? false,
