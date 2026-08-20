@@ -218,3 +218,16 @@ def test_privacy_scanner_allows_placeholders_and_github_noreply() -> None:
     )
 
     assert findings == []
+
+
+def test_privacy_scanner_ignores_generated_swift_build_metadata(
+    tmp_path: Path,
+) -> None:
+    generated = tmp_path / "native" / "helper" / ".build" / "release"
+    generated.mkdir(parents=True)
+    (generated / "description.json").write_text(
+        '{"source":"/Users/developer/project/main.swift"}',  # privacy-scan:allow -- ignored-build fixture
+        encoding="utf-8",
+    )
+
+    assert scan_privacy_repository(tmp_path) == []

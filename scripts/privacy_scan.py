@@ -27,6 +27,7 @@ SAFE_EMAIL_SUFFIXES = (
 )
 SAFE_EMAILS = {"noreply@github.com"}
 SKIP_PARTS = {
+    ".build",
     ".git",
     ".mypy_cache",
     ".pytest_cache",
