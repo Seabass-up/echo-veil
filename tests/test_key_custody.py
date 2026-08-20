@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from echo_veil import agent_security
+from echo_veil import agent_security, key_custody
 from echo_veil.agent_memory import AgentMemory
 from echo_veil.agent_security import KeyUnavailable, ProfileKeyring
-from echo_veil.backup import RollbackDetected
+from echo_veil.backup import BackupError, RollbackDetected
 from echo_veil.key_custody import (
     CustodyDescriptor,
     MACOS_SECURE_ENCLAVE_V1,
@@ -108,12 +108,19 @@ def fake_custody(monkeypatch: pytest.MonkeyPatch) -> type[_FakeCustodyClient]:
     _FakeCustodyClient.roots = {}
     _FakeCustodyClient.generations = {}
     monkeypatch.setattr(agent_security, "MacOSKeyCustodyClient", _FakeCustodyClient)
+    monkeypatch.setattr(key_custody, "MacOSKeyCustodyClient", _FakeCustodyClient)
     monkeypatch.setattr(
         agent_security,
         "helper_identity",
         lambda _path: ("1" * 64, "2" * 40),
     )
     monkeypatch.setattr(agent_security, "executable_cdhash", lambda: "3" * 40)
+    monkeypatch.setattr(
+        key_custody,
+        "helper_identity",
+        lambda _path: ("1" * 64, "2" * 40),
+    )
+    monkeypatch.setattr(key_custody, "executable_cdhash", lambda: "3" * 40)
     return _FakeCustodyClient
 
 
@@ -461,6 +468,68 @@ def test_agent_memory_custody_restart_recall_and_retirement(
         assert (
             final.recall("river seven")["results"][0]["vine_id"] == created["vine_id"]
         )
+
+
+def test_portable_restore_requires_profile_root_authentication(
+    tmp_path: Path,
+    fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = (tmp_path / "signed-helper").absolute()
+    helper.write_bytes(b"fixture")
+    state = tmp_path / "state"
+    recovery_key = os.urandom(32)
+    archive = tmp_path / "portable-backup"
+    replacement = tmp_path / "replacement"
+
+    with AgentMemory(state) as memory:
+        memory.remember(
+            "portable binding",
+            "The portable root-binding marker is silver harbor.",
+        )
+        pre_migration = memory.backup_create(tmp_path / "record-envelope-v2-backup")
+        while True:
+            migration = memory.migrate_record_envelope_v3(
+                confirm=True,
+                verified_backup=pre_migration,
+            )
+            pre_migration = None
+            if migration["state"] == "verified":
+                break
+        custody_backup = memory.backup_create(tmp_path / "custody-backup")
+        memory.migrate_key_custody(
+            provider=MACOS_SECURE_ENCLAVE_V1,
+            helper_path=helper,
+            verified_backup=custody_backup,
+            confirm=True,
+        )
+
+    _simulate_fresh_process(monkeypatch)
+    with AgentMemory(state) as memory:
+        memory.retire_file_key_custody(confirm=True)
+        memory.backup_create(
+            archive,
+            recovery_mode="portable",
+            recovery_key=recovery_key,
+        )
+
+        # A recovery-key holder can authenticate portable.mac, but cannot mint
+        # the independent profile-root MAC. Both the current-profile verifier
+        # and a replacement-device restore must enforce that second binding.
+        (archive / "profile.mac").write_bytes(b"0" * 64)
+        with pytest.raises(BackupError, match="profile-root authentication"):
+            memory.backup_verify(archive, recovery_key=recovery_key)
+        with pytest.raises(BackupError, match="profile-root authentication"):
+            memory.restore(
+                archive,
+                replacement,
+                recovery_key=recovery_key,
+                helper_path=helper,
+                confirm=True,
+            )
+
+    assert not (replacement / "restored").exists()
+    assert len(fake_custody.roots) == 1
 
 
 def test_local_monotonic_custody_rejects_stale_backup_after_generation_advance(

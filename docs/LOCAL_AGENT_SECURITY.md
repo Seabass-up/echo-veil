@@ -231,7 +231,19 @@ set. The operator backup command takes writer-locked SQLite snapshots, encrypts
 every bounded member, authenticates an exact manifest, and reconciles logical
 counts before returning a verifier capability. Restore always targets a new
 profile directory; dry-run and restore-drill paths never replace the active
-profile.
+profile. A profile-local reentrant operation lock covers the two SQLite
+snapshots and all same-process memory operations; the profile lease supplies
+the cross-process writer boundary, so a concurrent local write cannot land in
+only one half of a recovery set.
+
+Existing readiness receipts are archived under `recovery-evidence/` for audit
+instead of being restored into the active readiness path. Artifact and host
+authority never transfer to a replacement runtime merely because its data was
+restored. Portable archives authenticate first under the separately held
+recovery key, then authenticate the same manifest again under the imported
+profile root before publication. A recovery-key holder therefore cannot
+replace the wrapped root or manifest and mint a valid restored profile without
+also satisfying the independent profile-root binding.
 
 ## Record-envelope v3 migration
 

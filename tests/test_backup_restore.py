@@ -4,10 +4,13 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
+from echo_veil import backup as backup_module
 from echo_veil.agent_memory import AgentMemory
 from echo_veil.backup import BackupError
 from echo_veil.record_envelope import RECORD_ENVELOPE_V2, RECORD_ENVELOPE_V3
@@ -79,6 +82,68 @@ def test_device_backup_verify_dry_run_and_actual_restore(tmp_path: Path) -> None
             restored.recall("maple vector seven")["results"][0]["vine_id"]
             == first["vine_id"]
         )
+
+
+def test_backup_serializes_same_process_mutation_into_one_consistent_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "source"
+    archive = tmp_path / "backup"
+    entered_snapshot = threading.Event()
+    release_snapshot = threading.Event()
+    mutation_started = threading.Event()
+    mutation_finished = threading.Event()
+    errors: list[BaseException] = []
+    original_snapshot = backup_module.snapshot_sqlite
+    snapshot_calls = 0
+
+    def blocked_snapshot(connection: sqlite3.Connection, destination: Path) -> None:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            entered_snapshot.set()
+            assert release_snapshot.wait(5.0)
+        original_snapshot(connection, destination)
+
+    with AgentMemory(state) as memory:
+        memory.remember("before backup", "The backup boundary starts with one record.")
+        _migrate_v3(memory)
+        monkeypatch.setattr(backup_module, "snapshot_sqlite", blocked_snapshot)
+
+        def create_backup() -> None:
+            try:
+                memory.backup_create(archive)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        def mutate_profile() -> None:
+            mutation_started.set()
+            try:
+                memory.remember(
+                    "after backup",
+                    "This record must wait until both snapshots are complete.",
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                mutation_finished.set()
+
+        backup_thread = threading.Thread(target=create_backup)
+        mutation_thread = threading.Thread(target=mutate_profile)
+        backup_thread.start()
+        assert entered_snapshot.wait(5.0)
+        mutation_thread.start()
+        assert mutation_started.wait(5.0)
+        assert mutation_finished.wait(0.1) is False
+        release_snapshot.set()
+        backup_thread.join(5.0)
+        mutation_thread.join(5.0)
+        assert not backup_thread.is_alive()
+        assert not mutation_thread.is_alive()
+        assert errors == []
+        assert memory.backup_verify(archive).record_count == 1
+        assert memory.doctor()["payload_count"] == 2
 
 
 def test_v2_backup_is_required_for_migration_and_never_grants_v3_readiness(
@@ -160,6 +225,33 @@ def test_verified_backup_and_restore_evidence_survive_restart(tmp_path: Path) ->
         assert capabilities["backup_verified"] is True
         assert capabilities["restore_verified"] is True
         assert capabilities["rollback_detection"] == "none"
+
+
+def test_restored_profile_keeps_prior_receipts_auditable_but_not_authoritative(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "source"
+    first_archive = tmp_path / "first-backup"
+    recovery_archive = tmp_path / "recovery-backup"
+    target = tmp_path / "target"
+    with AgentMemory(state) as memory:
+        memory.remember(
+            "receipt audit", "Prior receipts remain recovery evidence only."
+        )
+        _migrate_v3(memory)
+        memory.backup_create(first_archive)
+        memory.restore_drill(first_archive)
+        assert memory.doctor()["capabilities_v1"]["restore_verified"] is True
+        memory.backup_create(recovery_archive)
+        memory.restore(recovery_archive, target, confirm=True)
+
+    restored_profile = target / "restored"
+    assert (restored_profile / "recovery-evidence" / "local-readiness.json").is_file()
+    with AgentMemory(target, profile="restored") as restored:
+        capabilities = restored.doctor()["capabilities_v1"]
+        assert capabilities["backup_verified"] is False
+        assert capabilities["restore_verified"] is False
+        assert capabilities["host_boundary_verified"] is False
 
 
 def test_tampered_readiness_evidence_fails_closed_without_hiding_diagnostic(

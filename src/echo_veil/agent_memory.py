@@ -35,9 +35,10 @@ from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, ParamSpec, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -117,6 +118,27 @@ from .local_authority import (
 )
 from .vectors import cosine_similarity
 from .workspace import WorkspaceConfig
+
+_OperationParameters = ParamSpec("_OperationParameters")
+_OperationResult = TypeVar("_OperationResult")
+
+
+def _serialized_operation(
+    method: Callable[_OperationParameters, _OperationResult],
+) -> Callable[_OperationParameters, _OperationResult]:
+    """Serialize every operation that touches one AgentMemory connection set."""
+
+    @wraps(method)
+    def guarded(
+        *args: _OperationParameters.args,
+        **kwargs: _OperationParameters.kwargs,
+    ) -> _OperationResult:
+        owner = cast(Any, args[0])
+        with owner._operation_lock:
+            return method(*args, **kwargs)
+
+    return guarded
+
 
 DEFAULT_EMBEDDING_DIMENSION = 384
 DEFAULT_OLLAMA_EMBEDDING_DIMENSION = 1024
@@ -4911,6 +4933,11 @@ class AgentMemory:
         self._embedder = _coerce_embedder(embed, embedder_id)
         self._deployment_mode = deployment_mode
         self._runtime_host = _validate_runtime_host(runtime_host)
+        # One AgentMemory owns two SQLite connections plus an in-memory Oracle.
+        # Serializing their public operations makes a backup snapshot and every
+        # multi-store mutation one coherent in-process critical section. The
+        # profile lease supplies the corresponding cross-process boundary.
+        self._operation_lock = threading.RLock()
         # Positive evidence is populated only by reviewed custody, artifact,
         # recovery, and host-boundary verifiers.  RPC input and environment
         # variables must never be able to self-assert these fields.
@@ -5032,6 +5059,7 @@ class AgentMemory:
             raise RuntimeError("legacy profiles do not expose a protected scope")
         return self._keyring.scope
 
+    @_serialized_operation
     def storage_qos_status(self) -> dict[str, Any]:
         """Return payload- and path-free capacity metrics without maintenance."""
 
@@ -5094,6 +5122,7 @@ class AgentMemory:
                 "profile storage capacity gate blocked the mutation; run doctor"
             )
 
+    @_serialized_operation
     def maintain_storage(
         self,
         operation: str,
@@ -5144,6 +5173,7 @@ class AgentMemory:
             "status": self.storage_qos_status(),
         }
 
+    @_serialized_operation
     def remember(
         self,
         topic: str,
@@ -5240,6 +5270,7 @@ class AgentMemory:
             **_public_record_contract(contract, clean_payload),
         }
 
+    @_serialized_operation
     def refresh_live(
         self,
         vine_id: str,
@@ -5312,6 +5343,7 @@ class AgentMemory:
             "content_changed": True,
         }
 
+    @_serialized_operation
     def promote(
         self,
         vine_id: str,
@@ -5352,6 +5384,7 @@ class AgentMemory:
             **_public_record_contract(promoted, record[1]),
         }
 
+    @_serialized_operation
     def recall(
         self,
         query: str,
@@ -5375,6 +5408,7 @@ class AgentMemory:
             mutate_lifecycle=mutate_lifecycle,
         )
 
+    @_serialized_operation
     def preview_recall(
         self,
         query: str,
@@ -5717,6 +5751,7 @@ class AgentMemory:
             },
         }
 
+    @_serialized_operation
     def context(
         self,
         query: str,
@@ -5741,6 +5776,7 @@ class AgentMemory:
             max_records=max_records,
         )
 
+    @_serialized_operation
     def preview_context(
         self,
         query: str,
@@ -5776,6 +5812,7 @@ class AgentMemory:
         response["lifecycle_mutated"] = False
         return response
 
+    @_serialized_operation
     def forget(self, vine_id: str) -> dict[str, Any]:
         self._assert_storage_writable()
         clean_id = _validate_text(vine_id, "vine_id", 128)
@@ -5797,6 +5834,7 @@ class AgentMemory:
             "cascade_deleted_contextual_logic": cascaded,
         }
 
+    @_serialized_operation
     def list_memories(
         self,
         *,
@@ -5853,6 +5891,7 @@ class AgentMemory:
             )
         return result[:bounded_limit]
 
+    @_serialized_operation
     def reindex(self) -> dict[str, Any]:
         self._assert_storage_writable()
         if not self._payloads.metadata_protected:
@@ -5881,6 +5920,7 @@ class AgentMemory:
             "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
         }
 
+    @_serialized_operation
     def migrate_to(
         self, target: AgentMemory, *, confirm: bool = False
     ) -> dict[str, Any]:
@@ -6023,6 +6063,7 @@ class AgentMemory:
             "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
         }
 
+    @_serialized_operation
     def rotate_key(
         self,
         *,
@@ -6106,6 +6147,7 @@ class AgentMemory:
             "lsh_index_rekeyed": bool(lsh_rotation["changed"]),
         }
 
+    @_serialized_operation
     def migrate_key_custody(
         self,
         *,
@@ -6242,6 +6284,7 @@ class AgentMemory:
         self._ensure_readiness_store().record_restore(receipt)
         self._refresh_readiness_evidence()
 
+    @_serialized_operation
     def qualify_installed_artifact(
         self,
         *,
@@ -6257,6 +6300,7 @@ class AgentMemory:
         self._refresh_readiness_evidence()
         return receipt
 
+    @_serialized_operation
     def qualify_host_boundary(
         self,
         evidence: HostQualificationEvidence,
@@ -6322,6 +6366,7 @@ class AgentMemory:
             ),
         }
 
+    @_serialized_operation
     def backup_create(
         self,
         destination: Path,
@@ -6411,6 +6456,13 @@ class AgentMemory:
                 "payloads.db": payload_snapshot,
                 "preflight-ed25519.key": self.profile_dir / "preflight-ed25519.key",
             }
+            readiness_evidence = self.profile_dir / "local-readiness.json"
+            if readiness_evidence.is_file():
+                # Preserve the prior artifact/host/recovery receipts for audit,
+                # but restore them outside the active readiness location. A
+                # replacement runtime must qualify its own artifact and host
+                # boundary instead of inheriting authority from the source.
+                sources["recovery-evidence/local-readiness.json"] = readiness_evidence
             for directory, suffix in (("keys", "*.key"), ("custody", "*.json")):
                 root = self.profile_dir / directory
                 if root.is_dir():
@@ -6449,6 +6501,7 @@ class AgentMemory:
             self._record_backup_readiness(receipt)
         return receipt
 
+    @_serialized_operation
     def backup_verify(
         self,
         archive: Path,
@@ -6479,12 +6532,18 @@ class AgentMemory:
             ),
             minimum_generation=minimum,
         )
+        if recovery_key is not None:
+            BackupArchive.verify_profile_binding(
+                archive,
+                profile_key=backup_key,
+            )
         self._last_verified_backup = receipt
         if record_evidence and envelope_version == RECORD_ENVELOPE_V3:
             self._assert_storage_writable()
             self._record_backup_readiness(receipt)
         return receipt
 
+    @_serialized_operation
     def restore_dry_run(
         self,
         archive: Path,
@@ -6498,6 +6557,7 @@ class AgentMemory:
         )
         return {**receipt.as_dict(), "dry_run": True, "profile_mutated": False}
 
+    @_serialized_operation
     def restore(
         self,
         archive: Path,
@@ -6543,6 +6603,7 @@ class AgentMemory:
             minimum_generation=minimum,
         )
 
+    @_serialized_operation
     def restore_drill(
         self,
         archive: Path,
@@ -6594,6 +6655,7 @@ class AgentMemory:
             self._record_restore_readiness(receipt)
         return result
 
+    @_serialized_operation
     def retire_file_key_custody(self, *, confirm: bool = False) -> dict[str, Any]:
         """Remove the raw root after a separately confirmed restart drill."""
 
@@ -6612,6 +6674,7 @@ class AgentMemory:
             "physical_erasure_guaranteed": False,
         }
 
+    @_serialized_operation
     def migrate_record_envelope_v3(
         self,
         *,
@@ -6759,6 +6822,7 @@ class AgentMemory:
             "preflight_protocol": "preflight_v2",
         }
 
+    @_serialized_operation
     def retire_previous_key(
         self,
         *,
@@ -6792,6 +6856,7 @@ class AgentMemory:
 
         return self._deployment_mode
 
+    @_serialized_operation
     def capabilities_v1(
         self,
         *,
@@ -6804,6 +6869,7 @@ class AgentMemory:
             raise RuntimeError("capabilities_v1 report is unavailable")
         return dict(capabilities)
 
+    @_serialized_operation
     def preflight_receipt_authority(self) -> Any:
         """Open the profile-bound receipt authority without exposing its key."""
 
@@ -6816,6 +6882,7 @@ class AgentMemory:
             keyring=self._keyring,
         )
 
+    @_serialized_operation
     def assert_operational_mode(self, *, runtime_host: str | None = None) -> None:
         """Block an explicitly requested but unqualified production boundary."""
 
@@ -6844,6 +6911,7 @@ class AgentMemory:
             and _QWEN3_EMBEDDING_IDENTITY.fullmatch(self._embedder.identity)
         )
 
+    @_serialized_operation
     def doctor(self, *, runtime_host: str | None = None) -> dict[str, Any]:
         self._refresh_readiness_evidence(runtime_host)
         capability = self.oracle.capability_report().as_dict()
@@ -7025,6 +7093,7 @@ class AgentMemory:
             "key_owner_only": profile_access_verified,
             "store_permissions": ("valid" if profile_access_verified else "invalid"),
             "writer_serialization": "profile-sqlite-lease",
+            "in_process_operation_serialization": "one-profile-rlock",
             "storage_qos": storage_qos,
             "recovered_incomplete_lifecycle_records": (
                 self._recovered_lifecycle_orphans
@@ -7265,6 +7334,7 @@ class AgentMemory:
                 "or perform an explicit re-embedding migration"
             )
 
+    @_serialized_operation
     def close(self) -> None:
         if self._closed:
             return

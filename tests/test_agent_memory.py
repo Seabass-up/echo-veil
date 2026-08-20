@@ -1214,7 +1214,9 @@ def test_profile_writer_lease_serializes_fresh_process_snapshots(
             AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01)
 
     with AgentMemory(tmp_path, profile_lock_timeout_seconds=0.01) as reopened:
-        assert reopened.doctor()["writer_serialization"] == "profile-sqlite-lease"
+        report = reopened.doctor()
+        assert report["writer_serialization"] == "profile-sqlite-lease"
+        assert report["in_process_operation_serialization"] == "one-profile-rlock"
 
 
 def test_sqlite_lock_detection_supports_legacy_and_extended_errors() -> None:

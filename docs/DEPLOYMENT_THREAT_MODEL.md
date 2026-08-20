@@ -146,6 +146,15 @@ checkpoint with a stale snapshot. These controls detect row-level tampering and
 stale writers; they do not prevent rollback of the entire database and keyring
 to a mutually consistent older backup. Deployments that require anti-rollback
 must add an external monotonic/version authority.
+
+Backup creation serializes same-process operations and holds the profile's
+cross-process writer lease while snapshotting both databases. Portable recovery
+uses two independent authentication domains: the recovery key authenticates
+and decrypts the archive, and the imported profile root must then authenticate
+the profile MAC and full profile hash before the staged directory is published.
+Archived readiness receipts are retained only as inactive recovery evidence;
+the restored runtime must independently requalify its artifact and host
+boundary.
 Keyed lexical tokens and opaque identifiers minimize the index but still expose
 row counts, timestamps, vector dimensions, access patterns, and relationship
 shape. Plaintext is present in the authorized Python and local embedding
