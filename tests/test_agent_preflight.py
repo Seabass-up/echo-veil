@@ -355,6 +355,7 @@ def test_preflight_v2_omits_context_payloads_before_recall_payload(
     assert contextual["evidence"][0]["payload_omitted_reason"] == (
         "host_preflight_token_budget"
     )
+    assert [result["vine_id"] for result in evidence["recall"]["results"]] == ["vine-1"]
     assert evidence["recall"]["results"][0]["payload"] is not None
     assert evidence["runtime_status"]["contextual_logic_required"] is True
     assert response["telemetry"]["contextual_logic_used"] is True

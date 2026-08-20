@@ -14,6 +14,7 @@ recursive-include docs *.md
 recursive-include examples *.py
 recursive-include scripts *.py
 recursive-include skills *.md *.yaml
+recursive-include protocol *.json *.md
 include integrations/openclaw/README.md
 include integrations/openclaw/deployment-lock.json
 include integrations/openclaw/openclaw.plugin.json

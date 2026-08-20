@@ -315,6 +315,23 @@ inferential access, collaboration, or reuse on another turn. Missing or
 inconsistent status falls back to the explicit tool ritual; degraded status
 never satisfies it.
 
+## Protocol compatibility boundary
+
+Harness and storage versions are independent. The signed RPC remains
+`preflight_v2`, its receipt remains `echo-veil-preflight-v2`, and the runtime,
+evidence-budget, and telemetry contracts retain their existing v1 identifiers.
+The older unsigned `preflight` RPC remains a registered compatibility bridge
+for installed harnesses that still consume it. A future record-envelope v3 is
+internal to Echo Veil: no harness may parse it, infer it from preflight, or
+require it for turn authorization.
+
+The authoritative field inventory is `protocol/registry-v1.json`; every
+language adapter is checked against `protocol/fixtures/compatibility-v1.json`.
+Signed objects use exact fields and reject unknown versions. New readiness data
+belongs to the separate optional `capabilities_v1` surface, never to an
+existing signed receipt. Capabilities can inform diagnostics but cannot
+authorize a model turn.
+
 Goose's recipe prompt explicitly calls doctor and a two-slot minimal recall
 before waiting for a separate mutation request. Do not launch the recipe with
 `--no-profile`: Goose 1.41.0 suppresses recipe-defined extensions under that

@@ -1,11 +1,11 @@
 {
-  "artifact_authority_id": "sha256:7c8c246e29b6ed4ea4d895dfceeb170b7e5509c7cb93c99ac46550cd66a4f85c",
+  "artifact_authority_id": "sha256:3d1bc8be7bdef9177fc2541f29a0d5e13ebb12a36a7964fb0d42a751ab84ac55",
   "files": {
     "extensions/index.ts": "sha256:6398d957aace6c9d37902ac3e5fe95ca22082e0e8afaba59ee7d06ca231b0ae4",
     "package-lock.json": "sha256:fd7aeca704c50e2ef09aa1cb90ad29803a8514c5c2c7b0f9fe54aa61bb8964df",
     "package.json": "sha256:60298ace7843630a33625f141ef68c30c8a172e960b920035acc96c511032eb1",
     "src/artifact.ts": "sha256:8c0d5eed47bc38e858db02eeb5a265fa9aa36f08d5adf65cbe10f73936bfd738",
-    "src/preflight.ts": "sha256:7c528fbd5084fd3bbfc26f40d4cacb44058d8330d74f6dca57b5c3f2fafb3fd9",
+    "src/preflight.ts": "sha256:5b87ea6ac12d1744a180ab27ded316e8f1d1543b0db2d1d06ad3f4be32ecfcb9",
     "src/runner.ts": "sha256:286d448f5233d4ab94a3c2adcf436f5d4a4e4f5dd384c3bd1957fae192bb984e"
   },
   "host": "pi",

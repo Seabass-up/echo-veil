@@ -13,6 +13,7 @@ const RECEIPT_SCHEMA = "echo-veil-preflight-v2";
 const RUNTIME_STATUS_SCHEMA = "echo-veil-runtime-status-v1";
 const EVIDENCE_BUDGET_SCHEMA = "echo-veil-evidence-budget-v1";
 const PREFLIGHT_TELEMETRY_SCHEMA = "echo-veil-preflight-telemetry-v1";
+const CAPABILITIES_SCHEMA = "echo-veil-capabilities-v1";
 const AUTHORITY_DOMAIN = Buffer.from(
   "echo-veil-preflight-authority-v2\0",
   "ascii",
@@ -183,7 +184,7 @@ function estimatedTokens(value: string): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(value, "utf8") / 3));
 }
 
-function validateEvidence(value: unknown): JsonObject {
+export function validatePreflightEvidence(value: unknown): JsonObject {
   const evidence = objectValue(value, "preflight evidence");
   exactKeys(
     evidence,
@@ -297,6 +298,99 @@ function validateEvidence(value: unknown): JsonObject {
   return evidence;
 }
 
+const CAPABILITY_REQUIRED_FIELDS = [
+  "artifact_verified",
+  "at_rest_encrypted",
+  "backup_verified",
+  "embedding_identity_verified",
+  "hardware_isolated",
+  "host_boundary_verified",
+  "host_compromise_protected",
+  "implementation_healthy",
+  "key_custody",
+  "local_production_ready",
+  "production_ready",
+  "protection_tier",
+  "remotely_attested",
+  "restore_verified",
+  "rollback_detection",
+  "runtime_plaintext_exposure",
+  "schema",
+] as const;
+const CAPABILITY_OPTIONAL_FIELDS = [
+  "generated_at_ms",
+  "limitations",
+  "remediation_codes",
+] as const;
+const CAPABILITY_BOOLEAN_FIELDS = [
+  "artifact_verified",
+  "at_rest_encrypted",
+  "backup_verified",
+  "embedding_identity_verified",
+  "hardware_isolated",
+  "host_boundary_verified",
+  "host_compromise_protected",
+  "implementation_healthy",
+  "local_production_ready",
+  "production_ready",
+  "remotely_attested",
+  "restore_verified",
+] as const;
+
+function boundedStringList(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 64 ||
+    value.some((item) =>
+      typeof item !== "string" || item.length === 0 || item.length > 256
+    )
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value as string[];
+}
+
+export function parseCapabilitiesV1(value: unknown): JsonObject | null {
+  if (value === null || value === undefined) return null;
+  const capabilities = objectValue(value, "capabilities_v1 response");
+  const fields = new Set(Object.keys(capabilities));
+  const allowed = new Set<string>([
+    ...CAPABILITY_REQUIRED_FIELDS,
+    ...CAPABILITY_OPTIONAL_FIELDS,
+  ]);
+  if (
+    CAPABILITY_REQUIRED_FIELDS.some((field) => !fields.has(field)) ||
+    [...fields].some((field) => !allowed.has(field)) ||
+    capabilities.schema !== CAPABILITIES_SCHEMA ||
+    CAPABILITY_BOOLEAN_FIELDS.some(
+      (field) => typeof capabilities[field] !== "boolean",
+    )
+  ) {
+    throw new Error("capabilities_v1 response is invalid");
+  }
+  for (const field of [
+    "key_custody",
+    "protection_tier",
+    "rollback_detection",
+    "runtime_plaintext_exposure",
+  ] as const) {
+    boundedId(capabilities[field], `capabilities_v1 ${field}`);
+  }
+  if (
+    Object.hasOwn(capabilities, "generated_at_ms") &&
+    (!Number.isSafeInteger(capabilities.generated_at_ms) ||
+      Number(capabilities.generated_at_ms) < 0)
+  ) {
+    throw new Error("capabilities_v1 generated_at_ms is invalid");
+  }
+  for (const field of ["limitations", "remediation_codes"] as const) {
+    if (Object.hasOwn(capabilities, field)) {
+      boundedStringList(capabilities[field], `capabilities_v1 ${field}`);
+    }
+  }
+  return capabilities;
+}
+
 function validateTelemetry(value: unknown, evidence: JsonObject): JsonObject {
   const telemetry = objectValue(value, "preflight telemetry");
   exactKeys(
@@ -403,7 +497,7 @@ export function verifyPreflightResponse(
     response.embedding_model_digest,
     "embedding model digest",
   );
-  const evidence = validateEvidence(response.evidence);
+  const evidence = validatePreflightEvidence(response.evidence);
   assertEqual(evidence.query_source, bindings.querySource, "query source");
   const context = requiredString(
     response.context,
@@ -536,8 +630,12 @@ export class EchoVeilPreflight {
     bindings: PreflightBindings,
     signal?: AbortSignal,
   ): Promise<VerifiedPreflight> {
+    const query = bindings.query.trim();
+    if (!query || query.length > 20_000) {
+      throw new Error("memory query is invalid");
+    }
     const response = await this.rpc("preflight_v2", {
-      query: bindings.query.trim(),
+      query,
       expected_profile: bindings.profile,
       expected_scope: bindings.scope,
       query_source: bindings.querySource,

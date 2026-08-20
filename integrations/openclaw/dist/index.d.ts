@@ -60,6 +60,7 @@ type PromptBuildResult = {
 export declare function parsePreflightContext(value: unknown, { expectedProfile }: {
     expectedProfile: string;
 }): string;
+export declare function parseCapabilitiesV1(value: unknown): Record<string, unknown> | null;
 export declare function hasRequiredOpenClawHookPolicy(value: unknown): boolean;
 export declare function createOpenClawPreflightHandlers(config: EchoVeilConfig, { rpc, now, token, hookPolicyReady, }?: {
     rpc?: PreflightRpc;
