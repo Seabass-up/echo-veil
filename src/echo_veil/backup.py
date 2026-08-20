@@ -42,6 +42,7 @@ MAX_BACKUP_FILES = 64
 MAX_BACKUP_FILE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_BACKUP_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
 MAX_MANIFEST_BYTES = 512 * 1024
+MAX_MODEL_IDENTITY_BYTES = 2 * 1024
 
 _BACKUP_ID = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -49,6 +50,10 @@ _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 _LOGICAL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 _KEY_ID = re.compile(r"ev-[0-9a-f]{16}\Z")
 _SCOPE_ID = re.compile(r"scope-[0-9a-f]{32}\Z")
+_EXPECTED_COUNTS = frozenset(
+    {"conflicts", "contracts", "records", "terms", "tombstones", "vectors"}
+)
+_ROLLBACK_TIERS = frozenset({"none", "local-best-effort", "external-monotonic"})
 
 
 class BackupError(RuntimeError):
@@ -83,6 +88,30 @@ def _canonical(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _optional_digest(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        raise BackupError(f"{label} is invalid")
+    return value
+
+
+def _model_identity(value: object) -> str:
+    if not isinstance(value, str):
+        raise BackupError("backup model identity is invalid")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BackupError("backup model identity is invalid") from exc
+    if (
+        not encoded
+        or len(encoded) > MAX_MODEL_IDENTITY_BYTES
+        or any(character < " " or character == "\x7f" for character in value)
+    ):
+        raise BackupError("backup model identity is invalid")
+    return value
 
 
 def _write_private(path: Path, payload: bytes) -> None:
@@ -256,6 +285,8 @@ class VerifiedBackup:
     recovery_mode: str
     rollback_detection: str
     record_count: int
+    artifact_digest: str | None
+    host_authority_digest: str | None
     verified_at: int
 
     def __post_init__(self) -> None:
@@ -269,20 +300,26 @@ class VerifiedBackup:
             raise ValueError("verified backup key ID is invalid")
         if self.recovery_mode not in {DEVICE_BOUND_RECOVERY, PORTABLE_RECOVERY}:
             raise ValueError("verified recovery mode is invalid")
-        if self.rollback_detection not in {
-            "none",
-            "local-best-effort",
-            "external-monotonic",
-        }:
+        if self.rollback_detection not in _ROLLBACK_TIERS:
             raise ValueError("verified rollback-detection tier is invalid")
-        for value in (self.generation, self.record_count, self.verified_at):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        for digest_value, label in (
+            (self.artifact_digest, "verified artifact digest"),
+            (self.host_authority_digest, "verified host-authority digest"),
+        ):
+            if digest_value is not None and _DIGEST.fullmatch(digest_value) is None:
+                raise ValueError(f"{label} is invalid")
+        if self.host_authority_digest is not None and self.artifact_digest is None:
+            raise ValueError("verified host authority requires an artifact binding")
+        for count in (self.generation, self.record_count, self.verified_at):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise ValueError("verified backup count is invalid")
 
     def as_dict(self) -> dict[str, object]:
         return {
             "backup_id": self.backup_id,
+            "artifact_digest": self.artifact_digest,
             "generation": self.generation,
+            "host_authority_digest": self.host_authority_digest,
             "key_id": self.key_id,
             "manifest_sha256": self.manifest_sha256,
             "profile_hash": self.profile_hash,
@@ -345,12 +382,32 @@ class BackupArchive:
             or generation <= 0
         ):
             raise ValueError("backup generation must be positive")
-        if rollback_detection not in {
-            "none",
-            "local-best-effort",
-            "external-monotonic",
-        }:
+        if rollback_detection not in _ROLLBACK_TIERS:
             raise ValueError("rollback-detection tier is invalid")
+        if (
+            isinstance(key_epoch, bool)
+            or not isinstance(key_epoch, int)
+            or key_epoch <= 0
+        ):
+            raise ValueError("backup key epoch must be positive")
+        if record_envelope_version != 3:
+            raise ValueError("backup record-envelope version is invalid")
+        if security_contract != "scoped-v2":
+            raise ValueError("backup security contract is invalid")
+        try:
+            _model_identity(model_identity)
+            artifact_digest = _optional_digest(
+                artifact_digest,
+                label="backup artifact digest",
+            )
+            host_authority_digest = _optional_digest(
+                host_authority_digest,
+                label="backup host-authority digest",
+            )
+        except BackupError as exc:
+            raise ValueError(str(exc)) from exc
+        if host_authority_digest is not None and artifact_digest is None:
+            raise ValueError("backup host authority requires an artifact binding")
         recovery_mode = (
             PORTABLE_RECOVERY
             if portable_recovery_key is not None
@@ -361,6 +418,8 @@ class BackupArchive:
                 raise ValueError("portable recovery material is incomplete")
         elif portable_root_envelope is not None:
             raise ValueError("portable root envelope requires a recovery key")
+        if set(counts) != _EXPECTED_COUNTS:
+            raise ValueError("backup logical count fields are invalid")
         for name, value in counts.items():
             if (
                 not isinstance(name, str)
@@ -582,6 +641,69 @@ class BackupArchive:
             or _BACKUP_ID.fullmatch(str(decoded["backup_id"])) is None
         ):
             raise BackupError("backup manifest schema or ID is invalid")
+        for name in ("created_at", "generation", "key_epoch"):
+            value = decoded[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < (1 if name in {"generation", "key_epoch"} else 0)
+            ):
+                raise BackupError(f"backup {name.replace('_', ' ')} is invalid")
+        if (
+            not isinstance(decoded["key_id"], str)
+            or _KEY_ID.fullmatch(decoded["key_id"]) is None
+            or not isinstance(decoded["scope_id"], str)
+            or _SCOPE_ID.fullmatch(decoded["scope_id"]) is None
+            or not isinstance(decoded["profile_hash"], str)
+            or _DIGEST.fullmatch(decoded["profile_hash"]) is None
+        ):
+            raise BackupError("backup key or profile binding is invalid")
+        if decoded["recovery_mode"] not in {
+            DEVICE_BOUND_RECOVERY,
+            PORTABLE_RECOVERY,
+        }:
+            raise BackupError("backup recovery mode is invalid")
+        if decoded["rollback_detection"] not in _ROLLBACK_TIERS:
+            raise BackupError("backup rollback-detection tier is invalid")
+        if (
+            decoded["security_contract"] != "scoped-v2"
+            or decoded["record_envelope_version"] != 3
+            or decoded["wal_state"] != "captured-in-consistent-sqlite-snapshots"
+        ):
+            raise BackupError("backup security contract is invalid")
+        _model_identity(decoded["model_identity"])
+        artifact_digest = _optional_digest(
+            decoded["artifact_digest"],
+            label="backup artifact digest",
+        )
+        host_authority_digest = _optional_digest(
+            decoded["host_authority_digest"],
+            label="backup host-authority digest",
+        )
+        if host_authority_digest is not None and artifact_digest is None:
+            raise BackupError("backup host authority requires an artifact binding")
+        counts = decoded["counts"]
+        if not isinstance(counts, dict) or set(counts) != _EXPECTED_COUNTS:
+            raise BackupError("backup logical count fields are invalid")
+        for name, value in counts.items():
+            if (
+                not isinstance(name, str)
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise BackupError("backup logical counts are invalid")
+        portable_envelope = decoded["portable_root_envelope_b64"]
+        if decoded["recovery_mode"] == DEVICE_BOUND_RECOVERY:
+            if portable_envelope is not None:
+                raise BackupError("device-bound backup has portable recovery data")
+        else:
+            envelope = _decode_b64(
+                portable_envelope,
+                label="portable root envelope",
+            )
+            if not 48 <= len(envelope) <= 256:
+                raise BackupError("portable root envelope is invalid")
         if _canonical(decoded) != raw:
             raise BackupError("backup manifest is not canonical")
         return decoded, raw
@@ -612,6 +734,15 @@ class BackupArchive:
             domain = "portable"
         else:
             raise BackupError("backup recovery mode is invalid")
+        expected_root_members = {"files", "manifest.json", "profile.mac"}
+        if recovery_mode == PORTABLE_RECOVERY:
+            expected_root_members.add("portable.mac")
+        try:
+            observed_root_members = {entry.name for entry in root.iterdir()}
+        except OSError as exc:
+            raise BackupError("backup archive inventory is unavailable") from exc
+        if observed_root_members != expected_root_members:
+            raise BackupError("backup archive contains unmanifested members")
         encryption_key, manifest_mac_key = _derive_keys(
             encryption_base,
             backup_id,
@@ -645,6 +776,7 @@ class BackupArchive:
         if not isinstance(files, list) or not files or len(files) > MAX_BACKUP_FILES:
             raise BackupError("backup file manifest is invalid")
         logical_names: set[str] = set()
+        ciphertext_names: set[str] = set()
         total = 0
         cleanup_output = output_dir is None
         if output_dir is not None:
@@ -676,6 +808,9 @@ class BackupArchive:
                     ciphertext_file,
                 ):
                     raise BackupError("backup ciphertext reference is invalid")
+                if ciphertext_file in ciphertext_names:
+                    raise BackupError("backup ciphertext references are not unique")
+                ciphertext_names.add(ciphertext_file)
                 ciphertext_path = root / ciphertext_file
                 chunks = entry["chunks"]
                 if not isinstance(chunks, list) or len(chunks) > (
@@ -780,6 +915,14 @@ class BackupArchive:
                         writer.flush()
                         os.fsync(writer.fileno())
                         writer.close()
+            try:
+                observed_ciphertext_names = {
+                    f"files/{entry.name}" for entry in (root / "files").iterdir()
+                }
+            except OSError as exc:
+                raise BackupError("backup file inventory is unavailable") from exc
+            if observed_ciphertext_names != ciphertext_names:
+                raise BackupError("backup files contain unmanifested members")
             BackupArchive._verify_sqlite_snapshots(output_root, manifest)
             counts = manifest["counts"]
             if not isinstance(counts, dict) or any(
@@ -800,6 +943,14 @@ class BackupArchive:
                 recovery_mode=recovery_mode,
                 rollback_detection=str(manifest["rollback_detection"]),
                 record_count=record_count,
+                artifact_digest=_optional_digest(
+                    manifest["artifact_digest"],
+                    label="backup artifact digest",
+                ),
+                host_authority_digest=_optional_digest(
+                    manifest["host_authority_digest"],
+                    label="backup host-authority digest",
+                ),
                 verified_at=int(time.time()),
             )
         except Exception:

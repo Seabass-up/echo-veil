@@ -22,6 +22,20 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Added path-free installed-artifact and short-lived host-boundary authority
+  receipts for host-trusted local production. Artifact status is re-derived
+  from a retained wheel, PEP 610 hash, installed package bytes, and all Echo
+  entry points; any drift invalidates the artifact, host, and authority-bound
+  backup evidence. Host qualification requires a verified preflight-v2 healthy
+  run, a blocked forced outage with zero provider/model/agent/tool execution,
+  no competing mutable memory, and exact profile, scope, preflight, Echo, and
+  host-artifact bindings. Neither receipt changes or authorizes preflight.
+- Bound authenticated backup receipts to the current installed-artifact and
+  qualified-host authority IDs. Manifest verification now validates the key
+  epoch, model identity, scoped-v2 contract, record-envelope version, recovery
+  mode, rollback tier, logical-count inventory, and optional authority digests
+  before a backup can satisfy local readiness.
+
 - Added internal record-envelope v3 with HKDF-SHA256 purpose separation across
   payload, vector, semantic-contract, token, digest, integrity, tombstone,
   index, preflight-key, and backup-manifest domains. Activation is explicit,

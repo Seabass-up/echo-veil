@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from echo_veil import agent_cli
+from echo_veil import agent_memory as agent_memory_module
+from echo_veil import local_authority
 from echo_veil.agent_memory import AgentMemory, HashingTextEmbedder
 
 
@@ -30,6 +33,44 @@ def _v3_profile(state: Path) -> None:
             != "verified"
         ):
             pass
+
+
+def _artifact_receipt() -> local_authority.VerifiedInstalledArtifact:
+    claims = {
+        "agent_console_body_sha256": "sha256:" + "1" * 64,
+        "distribution": "echo-veil",
+        "hook_console_body_sha256": "sha256:" + "2" * 64,
+        "installed_files_verified": 42,
+        "installed_source_sha256": "sha256:" + "3" * 64,
+        "runner_console_body_sha256": "sha256:" + "4" * 64,
+        "schema": local_authority.INSTALLED_ARTIFACT_SCHEMA,
+        "version": "0.8.0",
+        "wheel_sha256": "sha256:" + "5" * 64,
+    }
+    authority_id = (
+        "sha256:"
+        + hashlib.sha256(
+            local_authority.INSTALLED_ARTIFACT_DOMAIN
+            + json.dumps(
+                claims,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()
+    )
+    return local_authority.VerifiedInstalledArtifact(
+        authority_id=authority_id,
+        wheel_sha256=str(claims["wheel_sha256"]),
+        installed_source_sha256=str(claims["installed_source_sha256"]),
+        version="0.8.0",
+        installed_files_verified=42,
+        agent_console_body_sha256=str(claims["agent_console_body_sha256"]),
+        hook_console_body_sha256=str(claims["hook_console_body_sha256"]),
+        runner_console_body_sha256=str(claims["runner_console_body_sha256"]),
+        verified_at=1_000,
+    )
 
 
 def test_doctor_is_observational_and_uses_offline_read_only_name(
@@ -160,6 +201,37 @@ def test_backup_restore_operator_commands_round_trip(
         assert recalled["results"][0]["payload"] == (
             "The operator marker is willow nine."
         )
+
+
+def test_artifact_qualification_is_confirmed_path_free_and_reverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    _v3_profile(state)
+    receipt = _artifact_receipt()
+    monkeypatch.setattr(
+        local_authority,
+        "verify_current_echo_artifact",
+        lambda: receipt,
+    )
+    monkeypatch.setattr(
+        agent_memory_module,
+        "verify_current_echo_artifact",
+        lambda: receipt,
+    )
+    common = ["--state-dir", str(state), "--embedder", "hashing"]
+
+    assert agent_cli.main([*common, "qualify", "artifact"]) == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "ValueError"
+
+    assert agent_cli.main([*common, "--confirm", "qualify", "artifact"]) == 0
+    output = capsys.readouterr().out
+    qualified = json.loads(output)
+    assert qualified["schema"] == local_authority.INSTALLED_ARTIFACT_SCHEMA
+    assert qualified["authority_id"] == receipt.authority_id
+    assert str(tmp_path) not in output
 
 
 def test_storage_maintenance_requires_confirmation_and_is_payload_free(

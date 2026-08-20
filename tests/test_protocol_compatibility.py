@@ -16,7 +16,12 @@ from echo_veil.agent_preflight import (
     RUNTIME_STATUS_SCHEMA,
     render_preflight_evidence,
 )
+from echo_veil.backup import BACKUP_RECEIPT_SCHEMA, BACKUP_SCHEMA
 from echo_veil.codex_artifact import CODEX_ARTIFACT_SCHEMA
+from echo_veil.local_authority import (
+    HOST_BOUNDARY_SCHEMA,
+    INSTALLED_ARTIFACT_SCHEMA,
+)
 from echo_veil.preflight_receipt import (
     PREFLIGHT_RECEIPT_SCHEMA,
     PreflightReceiptVerifier,
@@ -143,13 +148,17 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     contracts = registry["contracts"]
     assert {
         "artifact_codex_v1",
+        "artifact_installed_echo_v1",
         "artifact_pi_v1",
+        "backup_manifest_v1",
+        "backup_receipt_v1",
         "broker_latency_v1",
         "broker_v1_request",
         "broker_v1_response",
         "capabilities_v1",
         "doctor_current",
         "evidence_budget_v1",
+        "host_boundary_v1",
         "preflight_evidence_v1",
         "preflight_legacy_response",
         "preflight_receipt_v2",
@@ -168,6 +177,13 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert contracts["broker_v1_request"]["wire_schema"] == BROKER_SCHEMA
     assert contracts["broker_latency_v1"]["wire_schema"] == BROKER_TELEMETRY_SCHEMA
     assert contracts["artifact_codex_v1"]["wire_schema"] == CODEX_ARTIFACT_SCHEMA
+    assert (
+        contracts["artifact_installed_echo_v1"]["wire_schema"]
+        == INSTALLED_ARTIFACT_SCHEMA
+    )
+    assert contracts["host_boundary_v1"]["wire_schema"] == HOST_BOUNDARY_SCHEMA
+    assert contracts["backup_manifest_v1"]["wire_schema"] == BACKUP_SCHEMA
+    assert contracts["backup_receipt_v1"]["wire_schema"] == BACKUP_RECEIPT_SCHEMA
     assert contracts["capabilities_v1"]["wire_schema"] == CAPABILITIES_SCHEMA
     assert contracts["record_envelope_v3"]["status"] == ("dual-read-explicit-write")
     assert contracts["capabilities_v1"]["status"] == "emitted-rpc-only"

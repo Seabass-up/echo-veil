@@ -108,6 +108,13 @@ from .local_readiness import (
     build_capabilities_v1,
     remediation_messages,
 )
+from .local_authority import (
+    HostQualificationEvidence,
+    VerifiedHostBoundary,
+    VerifiedInstalledArtifact,
+    verify_current_echo_artifact,
+    verify_host_qualification,
+)
 from .vectors import cosine_similarity
 from .workspace import WorkspaceConfig
 
@@ -6156,22 +6163,73 @@ class AgentMemory:
         else:
             self._readiness_evidence_error = None
 
-    def _record_backup_readiness(self, receipt: VerifiedBackup) -> None:
+    def _ensure_readiness_store(self) -> ReadinessEvidenceStore:
+        """Open readiness evidence after the v3 downgrade barrier is active."""
+
         if self._readiness_store is None:
-            if self._keyring is None:
-                raise RuntimeError("readiness evidence requires a scoped profile")
+            if self._keyring is None or not self._keyring.has_feature(
+                RECORD_ENVELOPE_V3_FEATURE
+            ):
+                raise RuntimeError("readiness evidence requires record-envelope v3")
             self._readiness_store = ReadinessEvidenceStore(
                 self.profile_dir,
                 self._keyring,
             )
-        self._readiness_store.record_backup(receipt)
+        return self._readiness_store
+
+    def _record_backup_readiness(self, receipt: VerifiedBackup) -> None:
+        self._ensure_readiness_store().record_backup(receipt)
         self._refresh_readiness_evidence()
 
     def _record_restore_readiness(self, receipt: VerifiedBackup) -> None:
-        if self._readiness_store is None:
-            raise RuntimeError("readiness evidence requires record-envelope v3")
-        self._readiness_store.record_restore(receipt)
+        self._ensure_readiness_store().record_restore(receipt)
         self._refresh_readiness_evidence()
+
+    def qualify_installed_artifact(
+        self,
+        *,
+        confirm: bool = False,
+    ) -> VerifiedInstalledArtifact:
+        """Verify and persist the exact non-editable Echo wheel installation."""
+
+        self._assert_storage_writable()
+        if confirm is not True:
+            raise ValueError("artifact qualification requires confirm=true")
+        receipt = verify_current_echo_artifact()
+        self._ensure_readiness_store().record_artifact(receipt)
+        self._refresh_readiness_evidence()
+        return receipt
+
+    def qualify_host_boundary(
+        self,
+        evidence: HostQualificationEvidence,
+        *,
+        confirm: bool = False,
+        lifetime_seconds: int = 24 * 60 * 60,
+    ) -> VerifiedHostBoundary:
+        """Persist one fixed-verifier healthy/outage host qualification."""
+
+        self._assert_storage_writable()
+        if confirm is not True:
+            raise ValueError("host qualification requires confirm=true")
+        if self._keyring is None:
+            raise RuntimeError("host evidence requires record-envelope v3")
+        readiness_store = self._ensure_readiness_store()
+        artifact_id, _host_id = readiness_store.authority_digests()
+        if artifact_id is None:
+            raise RuntimeError("host qualification requires current artifact evidence")
+        bindings = readiness_store.current_host_bindings()
+        receipt = verify_host_qualification(
+            evidence,
+            echo_artifact_authority_id=artifact_id,
+            preflight_authority_id=bindings["preflight_authority_id"],
+            profile_hash=bindings["profile_hash"],
+            scope_id=bindings["scope_id"],
+            lifetime_seconds=lifetime_seconds,
+        )
+        readiness_store.record_host_boundary(receipt)
+        self._refresh_readiness_evidence()
+        return receipt
 
     def _backup_counts(self) -> dict[str, int]:
         connection = self._payloads._connection
@@ -6259,6 +6317,12 @@ class AgentMemory:
             self._payloads.set_metadata("backup_generation", str(generation))
         else:
             raise ValueError("rollback-detection tier is invalid")
+        artifact_digest: str | None = None
+        host_authority_digest: str | None = None
+        if self._readiness_store is not None:
+            artifact_digest, host_authority_digest = (
+                self._readiness_store.authority_digests()
+            )
         with tempfile.TemporaryDirectory(prefix="echo-veil-backup-snapshot-") as raw:
             snapshot_root = Path(raw).resolve()
             payload_snapshot = snapshot_root / "payloads.db"
@@ -6289,8 +6353,8 @@ class AgentMemory:
                 model_identity=self._embedder.identity,
                 security_contract=self._payloads.security_schema,
                 record_envelope_version=RECORD_ENVELOPE_V3,
-                artifact_digest=None,
-                host_authority_digest=None,
+                artifact_digest=artifact_digest,
+                host_authority_digest=host_authority_digest,
                 portable_recovery_key=recovery_key,
                 portable_root_envelope=portable_envelope,
                 backup_id=backup_id,
@@ -6485,6 +6549,7 @@ class AgentMemory:
 
         self._payloads.prepare_record_envelope_v3()
         keyring.enable_record_envelope_v3()
+        self._ensure_readiness_store()
         from .preflight_receipt import protect_preflight_signing_key
 
         protect_preflight_signing_key(self.profile_dir, keyring)

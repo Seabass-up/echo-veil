@@ -32,6 +32,33 @@ Even after local qualification, the report remains explicit:
 `host_compromise_protected=false`. Only the separately verified enclave class
 may set `production_ready=true`.
 
+Installed-artifact evidence is operator-confirmed and path-free. The verifier
+requires a retained local wheel with a matching PEP 610 SHA-256 receipt,
+compares the installed Echo package bytes with that wheel, verifies the three
+declared console entry points, and binds their current bodies into one content
+authority ID. `echo-veil-agent qualify artifact --confirm` records that result
+inside the profile-bound encrypted readiness store. Doctor rehashes the active
+installation instead of trusting the stored boolean, so an editable checkout,
+missing wheel, changed package, or entry-point drift makes both artifact and
+dependent host evidence false.
+
+Host-boundary evidence is accepted only from a fixed in-process verifier; there
+is no generic agent RPC, environment switch, or unsigned capability input for
+it. Qualification requires a healthy signed preflight-v2 run, a forced-outage
+run that blocks before any provider, model, agent, or tool activity, and no
+competing mutable memory. Its short-lived receipt binds the exact host artifact,
+Echo artifact, preflight authority, profile hash, scope ID, and boundary kind.
+The receipt remains diagnostic evidence only and never satisfies or modifies a
+turn receipt. Direct Codex collaboration and other documented soft boundaries
+remain excluded.
+
+New backups bind the current artifact and host authority IDs when those gates
+are active. Recording a different artifact, allowing host evidence to expire,
+or detecting installed-byte drift prevents the older backup from satisfying
+local readiness; the authenticated archive remains available for an explicit
+recovery operation. A fresh backup and restore drill are required after the new
+authority is qualified.
+
 ## Protected path
 
 For a scoped-v2 profile, one ordinary remember operation follows this sequence:

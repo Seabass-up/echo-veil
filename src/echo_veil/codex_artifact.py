@@ -218,6 +218,7 @@ def _verify_echo_wheel(
 
     installed_files = 0
     installed_bytes = 0
+    installed_source_digest = hashlib.sha256()
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_payload)) as bundle:
             infos = bundle.infolist()
@@ -243,7 +244,7 @@ def _verify_echo_wheel(
                     raise CodexArtifactError(
                         "Echo wheel console entry point is invalid"
                     )
-            for info in infos:
+            for info in sorted(infos, key=lambda item: item.filename):
                 pure = PurePosixPath(info.filename)
                 if pure.is_absolute() or ".." in pure.parts:
                     raise CodexArtifactError("Echo wheel path is unsafe")
@@ -261,6 +262,10 @@ def _verify_echo_wheel(
                 if installed_bytes > MAX_INSTALLED_SOURCE_BYTES:
                     raise CodexArtifactError("Echo installed source exceeds its limit")
                 payload = bundle.read(info)
+                installed_source_digest.update(info.filename.encode("utf-8"))
+                installed_source_digest.update(b"\0")
+                installed_source_digest.update(payload)
+                installed_source_digest.update(b"\0")
                 installed = site_packages.joinpath(*pure.parts)
                 if (
                     installed.is_symlink()
@@ -284,6 +289,7 @@ def _verify_echo_wheel(
         ),
         "hook_console_body_sha256": (f"sha256:{hashlib.sha256(hook_body).hexdigest()}"),
         "installed_files_verified": installed_files,
+        "installed_source_sha256": (f"sha256:{installed_source_digest.hexdigest()}"),
         "version": version,
         "wheel_sha256": f"sha256:{wheel_digest}",
     }

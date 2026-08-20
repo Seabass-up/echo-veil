@@ -24,10 +24,23 @@ JavaScript adapter tests load it directly. Fixture data is synthetic and
 contains no user memory, credential, private key, personal path, or production
 authority.
 
-The v3 rows currently prove only that consumers do not read a storage-version
-field. They are not evidence that a v3 core exists. Phase 3 must replace those
-boundary simulations with real dual-reader, mixed-profile, migration, restart,
-and rollback tests before v3 writes can be enabled.
+The v3 rows are backed by real dual-reader, mixed-profile, bounded migration,
+restart, key-rotation, and downgrade-barrier tests. They still do not authorize
+a harness to inspect the storage version: unchanged v2 consumers must produce
+the same result for v2, mixed, and fully migrated profiles.
+
+Installed-artifact and host-boundary receipts are independently versioned exact
+contracts in the same registry. They are encrypted readiness evidence, not
+preflight extensions. A current artifact is rehashed from its retained wheel
+and installed bytes; a host receipt is short-lived and bound to that artifact,
+the preflight authority, profile, and scope. Neither contract authorizes a model
+turn.
+
+The authenticated backup manifest and its verified operator receipt are also
+exact v1 contracts. Their authority bindings are optional only as values—the
+fields are always present—so a backup made before or after host qualification
+has one stable shape. Changing either field inventory requires a parallel
+successor schema rather than an in-place parser change.
 
 ## Readiness surface
 

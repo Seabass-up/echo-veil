@@ -9,14 +9,21 @@
     "src/echo_veil/agent_cli.py",
     "src/echo_veil/agent_memory.py",
     "src/echo_veil/agent_preflight.py",
+    "src/echo_veil/agent_security.py",
+    "src/echo_veil/backup.py",
     "src/echo_veil/codex_artifact.py",
     "src/echo_veil/guarded_runner.py",
+    "src/echo_veil/key_custody.py",
+    "src/echo_veil/local_authority.py",
     "src/echo_veil/local_readiness.py",
     "src/echo_veil/memory_layers.py",
+    "src/echo_veil/persistence.py",
     "src/echo_veil/preflight_receipt.py",
-    "src/echo_veil/protocol_compat.py"
+    "src/echo_veil/protocol_compat.py",
+    "src/echo_veil/readiness_store.py",
+    "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:ca774dcc5e3939b5de3d030f7259ddfbbf258cf92ee57f2783a332b09ba640b3",
+  "shared_source_digest": "sha256:3bdce6918789facaf9c2f2a67a1d0338f66a8caff8b09c9653943604f5080955",
   "hosts": [
     {
       "id": "algo-cli",
@@ -168,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:587ae8ee485d3a141bbb61328fbbd3c50ec83a1873f92799d063e99f88ca2422",
+      "source_digest": "sha256:e4df416747bdf1427cbb1f471482037af72253d22da8a22ad46088c607af8822",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
