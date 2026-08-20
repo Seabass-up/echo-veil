@@ -54,6 +54,128 @@
       "surface": "artifact-receipt",
       "wire_schema": "echo-veil-pi-artifact-v1"
     },
+    "artifact_installed_echo_v1": {
+      "compatibility": "exact",
+      "consumers": [
+        "echo_veil.readiness_store",
+        "local-production-operators"
+      ],
+      "earliest_retirement_version": "none-before-explicit-successor",
+      "introduced_version": "0.8.0",
+      "maximum_bytes": 8192,
+      "optional_fields": [],
+      "producer": "echo_veil.local_authority",
+      "required_fields": [
+        "agent_console_body_sha256",
+        "authority_id",
+        "distribution",
+        "hook_console_body_sha256",
+        "installed_files_verified",
+        "installed_source_sha256",
+        "runner_console_body_sha256",
+        "schema",
+        "verified_at",
+        "version",
+        "wheel_sha256"
+      ],
+      "signed": false,
+      "surface": "installed-artifact-receipt",
+      "wire_schema": "echo-veil-installed-artifact-v1"
+    },
+    "host_boundary_v1": {
+      "compatibility": "exact",
+      "consumers": [
+        "echo_veil.readiness_store",
+        "local-production-operators"
+      ],
+      "earliest_retirement_version": "none-before-explicit-successor",
+      "introduced_version": "0.8.0",
+      "maximum_bytes": 8192,
+      "optional_fields": [],
+      "producer": "echo_veil.local_authority",
+      "required_fields": [
+        "authority_id",
+        "boundary",
+        "echo_artifact_authority_id",
+        "expires_at",
+        "host_artifact_authority_id",
+        "host_id",
+        "preflight_authority_id",
+        "profile_hash",
+        "qualification_digest",
+        "schema",
+        "scope_id",
+        "verified_at"
+      ],
+      "signed": false,
+      "surface": "host-boundary-receipt",
+      "wire_schema": "echo-veil-host-boundary-v1"
+    },
+    "backup_manifest_v1": {
+      "compatibility": "exact-authenticated",
+      "consumers": [
+        "echo_veil.backup.BackupArchive",
+        "restore-operators"
+      ],
+      "earliest_retirement_version": "none-before-explicit-successor",
+      "introduced_version": "0.8.0",
+      "maximum_bytes": 524288,
+      "optional_fields": [],
+      "producer": "echo_veil.backup.BackupArchive",
+      "required_fields": [
+        "artifact_digest",
+        "backup_id",
+        "counts",
+        "created_at",
+        "files",
+        "generation",
+        "host_authority_digest",
+        "key_epoch",
+        "key_id",
+        "model_identity",
+        "portable_root_envelope_b64",
+        "profile_hash",
+        "record_envelope_version",
+        "recovery_mode",
+        "rollback_detection",
+        "schema",
+        "scope_id",
+        "security_contract",
+        "wal_state"
+      ],
+      "signed": false,
+      "surface": "authenticated-backup-manifest",
+      "wire_schema": "echo-veil-backup-v1"
+    },
+    "backup_receipt_v1": {
+      "compatibility": "exact",
+      "consumers": [
+        "echo_veil.readiness_store",
+        "local-production-operators"
+      ],
+      "earliest_retirement_version": "none-before-explicit-successor",
+      "introduced_version": "0.8.0",
+      "maximum_bytes": 8192,
+      "optional_fields": [],
+      "producer": "echo_veil.backup.BackupArchive",
+      "required_fields": [
+        "artifact_digest",
+        "backup_id",
+        "generation",
+        "host_authority_digest",
+        "key_id",
+        "manifest_sha256",
+        "profile_hash",
+        "record_count",
+        "recovery_mode",
+        "rollback_detection",
+        "schema",
+        "verified_at"
+      ],
+      "signed": false,
+      "surface": "verified-backup-receipt",
+      "wire_schema": "echo-veil-backup-receipt-v1"
+    },
     "broker_latency_v1": {
       "compatibility": "exact",
       "consumers": [

@@ -41,6 +41,10 @@ def _wheel_fixture(tmp_path: Path) -> tuple[Path, Path]:
         environment / "bin" / "echo-veil-preflight-hook",
         f"#!{interpreter}\nhook-body\n".encode(),
     )
+    _executable(
+        environment / "bin" / "echo-veil-shielded-run",
+        f"#!{interpreter}\nrunner-body\n".encode(),
+    )
     site = environment / "lib" / "python3.10" / "site-packages"
     dist_info = site / "echo_veil-0.7.0.dist-info"
     dist_info.mkdir(parents=True)
@@ -91,6 +95,7 @@ def test_echo_console_scripts_are_verified_against_retained_wheel(
     result = codex_artifact._verify_echo_wheel(agent, hook)
 
     assert result["wheel_sha256"].startswith("sha256:")
+    assert result["installed_source_sha256"].startswith("sha256:")
     assert result["installed_files_verified"] == 2
     assert result["version"] == "0.7.0"
 

@@ -142,7 +142,10 @@ def test_tampered_readiness_evidence_fails_closed_without_hiding_diagnostic(
         )
 
 
-@pytest.mark.parametrize("mutation", ["manifest", "ciphertext", "partial"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["manifest", "ciphertext", "partial", "extra-root", "extra-file"],
+)
 def test_corrupt_or_partial_backup_is_rejected(
     tmp_path: Path,
     mutation: str,
@@ -172,8 +175,16 @@ def test_corrupt_or_partial_backup_is_rejected(
             payload[len(payload) // 2] ^= 0x01
             member.write_bytes(payload)
             member.chmod(0o600)
-        else:
+        elif mutation == "partial":
             next((archive / "files").glob("*.bin")).unlink()
+        elif mutation == "extra-root":
+            extra = archive / "unmanifested.bin"
+            extra.write_bytes(b"untrusted")
+            extra.chmod(0o600)
+        else:
+            extra = archive / "files" / "unmanifested.bin"
+            extra.write_bytes(b"untrusted")
+            extra.chmod(0o600)
 
         with pytest.raises((BackupError, FileNotFoundError)):
             memory.backup_verify(archive)

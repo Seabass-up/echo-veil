@@ -43,6 +43,7 @@ from .agent_memory import (
 )
 from .memory_layers import LogicKind, MemoryLayer
 from .local_readiness import LOCAL_PRODUCTION_MODE, LOCAL_STAGING_MODE
+from .local_authority import LocalAuthorityError, verify_current_echo_artifact
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MAX_REQUEST_BYTES = 1_048_576
@@ -1734,6 +1735,7 @@ def build_parser() -> argparse.ArgumentParser:
             "restore-drill",
             "key-custody",
             "init",
+            "qualify",
             "repair",
             "maintain",
         ),
@@ -1752,6 +1754,7 @@ def main(argv: list[str] | None = None) -> int:
             "restore-drill",
             "key-custody",
             "init",
+            "qualify",
             "repair",
             "maintain",
         }:
@@ -1872,22 +1875,28 @@ def _run_operator_command(args: argparse.Namespace) -> int:
     with _open_memory(args) as memory:
         if not isinstance(memory, AgentMemory):
             raise RuntimeError("operator command requires the semantic profile")
+        if args.mode == "qualify":
+            if args.command != "artifact":
+                raise ValueError("qualify requires the artifact command")
+            artifact_receipt = memory.qualify_installed_artifact(confirm=args.confirm)
+            print(_json(artifact_receipt.as_record()))
+            return 0
         if args.mode == "backup":
             if args.command == "create":
-                receipt = memory.backup_create(
+                backup_receipt = memory.backup_create(
                     _required_path(args.destination, "--destination"),
                     recovery_mode=args.recovery_mode,
                     recovery_key=recovery_key,
                     rollback_detection=args.rollback_detection,
                 )
-                print(_json(receipt.as_dict()))
+                print(_json(backup_receipt.as_dict()))
                 return 0
             if args.command == "verify":
-                receipt = memory.backup_verify(
+                backup_receipt = memory.backup_verify(
                     _required_path(args.archive, "--archive"),
                     recovery_key=recovery_key,
                 )
-                print(_json(receipt.as_dict()))
+                print(_json(backup_receipt.as_dict()))
                 return 0
             raise ValueError("backup requires create or verify")
         if args.mode == "restore-drill":
@@ -1906,7 +1915,7 @@ def _run_operator_command(args: argparse.Namespace) -> int:
             if args.dry_run:
                 print(_json(memory.restore_dry_run(archive, recovery_key=recovery_key)))
                 return 0
-            receipt = memory.restore(
+            restore_receipt = memory.restore(
                 archive,
                 _required_path(args.target_state_dir, "--target-state-dir"),
                 target_profile=args.target_profile,
@@ -1915,7 +1924,7 @@ def _run_operator_command(args: argparse.Namespace) -> int:
                 custody_provider=args.custody_provider,
                 confirm=args.confirm,
             )
-            print(_json(receipt.as_dict()))
+            print(_json(restore_receipt.as_dict()))
             return 0
         if args.mode == "key-custody":
             if args.command == "migrate":
@@ -1963,8 +1972,15 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             backup_destination = "available"
         else:
             backup_destination = "parent-missing"
+    try:
+        verify_current_echo_artifact()
+    except LocalAuthorityError:
+        artifact_identity = "unverified"
+    else:
+        artifact_identity = "verified-current"
     checks: dict[str, object] = {
-        "artifact_identity": "unverified",
+        "artifact_identity": artifact_identity,
+        "artifact_evidence": "unverified",
         "backup_destination": backup_destination,
         "filevault": filevault,
         "host_compatibility": "unverified",
@@ -2036,10 +2052,23 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             and configured_identity == requested_embedding_identity
             else "mismatched"
         )
+        capabilities = report.get("capabilities_v1")
+        if isinstance(capabilities, dict):
+            checks["artifact_evidence"] = (
+                "recorded-current"
+                if capabilities.get("artifact_verified") is True
+                else "unverified"
+            )
+            checks["host_compatibility"] = (
+                "verified"
+                if capabilities.get("host_boundary_verified") is True
+                else "unverified"
+            )
     else:
         checks["profile_permissions"] = "profile-missing"
         checks["key_custody"] = "unconfigured"
         checks["record_envelope"] = "unconfigured"
+        checks["artifact_evidence"] = "unconfigured"
     blocking = sorted(
         name
         for name, value in checks.items()

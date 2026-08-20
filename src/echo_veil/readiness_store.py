@@ -24,6 +24,7 @@ from .agent_security import (
     _read_private_file_bytes,
 )
 from .backup import VerifiedBackup, profile_hash_for
+from . import local_authority
 from .local_readiness import LocalReadinessEvidence
 from .record_envelope import (
     KEY_PURPOSE_BACKUP_MANIFEST,
@@ -91,8 +92,10 @@ def _receipt_record(
     if rollback_detection not in _ROLLBACK_TIERS:
         raise ValueError("rollback-detection tier is invalid")
     return {
+        "artifact_digest": receipt.artifact_digest,
         "backup_id": receipt.backup_id,
         "generation": receipt.generation,
+        "host_authority_digest": receipt.host_authority_digest,
         "key_id": receipt.key_id,
         "manifest_sha256": receipt.manifest_sha256,
         "profile_hash": receipt.profile_hash,
@@ -104,8 +107,10 @@ def _receipt_record(
 
 def _validate_receipt_record(value: object, *, label: str) -> dict[str, object]:
     expected = {
+        "artifact_digest",
         "backup_id",
         "generation",
+        "host_authority_digest",
         "key_id",
         "manifest_sha256",
         "profile_hash",
@@ -131,6 +136,16 @@ def _validate_receipt_record(value: object, *, label: str) -> dict[str, object]:
         item = value[name]
         if isinstance(item, bool) or not isinstance(item, int) or item < 0:
             raise ReadinessEvidenceError(f"{label} evidence count is invalid")
+    for name in ("artifact_digest", "host_authority_digest"):
+        item = value[name]
+        if item is not None and (
+            not isinstance(item, str) or _DIGEST.fullmatch(item) is None
+        ):
+            raise ReadinessEvidenceError(f"{label} authority binding is invalid")
+    if value["host_authority_digest"] is not None and value["artifact_digest"] is None:
+        raise ReadinessEvidenceError(
+            f"{label} host authority requires an artifact binding"
+        )
     return dict(value)
 
 
@@ -237,10 +252,30 @@ class ReadinessEvidenceStore:
             not isinstance(record, dict)
             or set(record) != expected_record
             or record["schema"] != READINESS_EVIDENCE_SCHEMA
-            or record["artifact"] is not None
-            or record["host_boundary"] is not None
         ):
             raise ReadinessEvidenceError("local-readiness evidence record is invalid")
+        try:
+            if record["artifact"] is not None:
+                record["artifact"] = local_authority.parse_artifact_record(
+                    record["artifact"]
+                ).as_record()
+            if record["host_boundary"] is not None:
+                host = local_authority.parse_host_boundary_record(
+                    record["host_boundary"]
+                )
+                artifact = record["artifact"]
+                if (
+                    not isinstance(artifact, dict)
+                    or artifact.get("authority_id") != host.echo_artifact_authority_id
+                ):
+                    raise local_authority.LocalAuthorityError(
+                        "host boundary does not match artifact evidence"
+                    )
+                record["host_boundary"] = host.as_record()
+        except local_authority.LocalAuthorityError as exc:
+            raise ReadinessEvidenceError(
+                "local-readiness authority evidence is invalid"
+            ) from exc
         if record["backup"] is not None:
             record["backup"] = _validate_receipt_record(
                 record["backup"], label="backup"
@@ -306,6 +341,59 @@ class ReadinessEvidenceStore:
         )
         self._write_record(record)
 
+    def record_artifact(
+        self,
+        receipt: local_authority.VerifiedInstalledArtifact,
+    ) -> None:
+        """Persist only a currently reverified non-editable wheel receipt."""
+
+        if not isinstance(receipt, local_authority.VerifiedInstalledArtifact):
+            raise TypeError("verified installed-artifact receipt is required")
+        artifact = receipt.as_record()
+        if not local_authority.artifact_record_is_current(artifact):
+            raise ReadinessEvidenceError(
+                "installed artifact no longer matches its verified receipt"
+            )
+        record = self.load_record()
+        previous = record.get("artifact")
+        record["artifact"] = artifact
+        if (
+            not isinstance(previous, dict)
+            or previous.get("authority_id") != receipt.authority_id
+        ):
+            record["host_boundary"] = None
+        self._write_record(record)
+
+    def record_host_boundary(
+        self,
+        receipt: local_authority.VerifiedHostBoundary,
+    ) -> None:
+        """Persist one short-lived hard-boundary qualification receipt."""
+
+        if not isinstance(receipt, local_authority.VerifiedHostBoundary):
+            raise TypeError("verified host-boundary receipt is required")
+        record = self.load_record()
+        artifact = record.get("artifact")
+        if not isinstance(artifact, dict) or not (
+            local_authority.artifact_record_is_current(artifact)
+        ):
+            raise ReadinessEvidenceError(
+                "host qualification requires current artifact evidence"
+            )
+        bindings = self.current_host_bindings()
+        if not local_authority.host_boundary_record_is_current(
+            receipt.as_record(),
+            echo_artifact_authority_id=str(artifact["authority_id"]),
+            preflight_authority_id=bindings["preflight_authority_id"],
+            profile_hash=bindings["profile_hash"],
+            scope_id=bindings["scope_id"],
+        ):
+            raise ReadinessEvidenceError(
+                "host qualification does not match the active profile"
+            )
+        record["host_boundary"] = receipt.as_record()
+        self._write_record(record)
+
     def invalidate_recovery(self) -> None:
         if not self._path.exists():
             return
@@ -316,8 +404,47 @@ class ReadinessEvidenceStore:
 
     def evidence(self) -> LocalReadinessEvidence:
         record = self.load_record()
+        artifact = record.get("artifact")
+        host_boundary = record.get("host_boundary")
         backup = record.get("backup")
         restore = record.get("restore")
+        artifact_valid = bool(
+            isinstance(artifact, dict)
+            and local_authority.artifact_record_is_current(artifact)
+        )
+        host_valid = False
+        if (
+            artifact_valid
+            and isinstance(artifact, dict)
+            and isinstance(host_boundary, dict)
+        ):
+            artifact_authority_id = artifact.get("authority_id")
+            if not isinstance(artifact_authority_id, str):
+                raise ReadinessEvidenceError(
+                    "installed artifact authority ID is invalid"
+                )
+            try:
+                bindings = self.current_host_bindings()
+            except (OSError, RuntimeError, ValueError):
+                host_valid = False
+            else:
+                host_valid = local_authority.host_boundary_record_is_current(
+                    host_boundary,
+                    echo_artifact_authority_id=artifact_authority_id,
+                    preflight_authority_id=bindings["preflight_authority_id"],
+                    profile_hash=bindings["profile_hash"],
+                    scope_id=bindings["scope_id"],
+                )
+        current_artifact_id = (
+            artifact.get("authority_id")
+            if artifact_valid and isinstance(artifact, dict)
+            else None
+        )
+        current_host_id = (
+            host_boundary.get("authority_id")
+            if host_valid and isinstance(host_boundary, dict)
+            else None
+        )
         current_key = self._keyring.active_key_id
         expected_hash = profile_hash_for(self._key(current_key), self._keyring.scope_id)
         backup_manifest = (
@@ -328,12 +455,16 @@ class ReadinessEvidenceStore:
             and backup.get("key_id") == current_key
             and isinstance(backup.get("profile_hash"), str)
             and hmac.compare_digest(str(backup["profile_hash"]), expected_hash)
+            and backup.get("artifact_digest") == current_artifact_id
+            and backup.get("host_authority_digest") == current_host_id
         )
         restore_valid = bool(
             backup_valid
             and isinstance(restore, dict)
             and restore.get("key_id") == current_key
             and restore.get("manifest_sha256") == backup_manifest
+            and restore.get("artifact_digest") == current_artifact_id
+            and restore.get("host_authority_digest") == current_host_id
         )
         rollback_detection = (
             str(backup["rollback_detection"])
@@ -341,13 +472,51 @@ class ReadinessEvidenceStore:
             else "none"
         )
         return LocalReadinessEvidence(
-            artifact_verified=False,
+            artifact_verified=artifact_valid,
             backup_verified=backup_valid,
             restore_verified=restore_valid,
-            host_boundary_verified=False,
+            host_boundary_verified=host_valid,
             key_custody=self._keyring.custody_provider,
             rollback_detection=rollback_detection,
         )
+
+    def authority_digests(self) -> tuple[str | None, str | None]:
+        """Return current path-free artifact/host IDs for backup binding."""
+
+        record = self.load_record()
+        evidence = self.evidence()
+        artifact = record.get("artifact")
+        host = record.get("host_boundary")
+        artifact_id = (
+            str(artifact["authority_id"])
+            if evidence.artifact_verified and isinstance(artifact, dict)
+            else None
+        )
+        host_id = (
+            str(host["authority_id"])
+            if evidence.host_boundary_verified and isinstance(host, dict)
+            else None
+        )
+        return artifact_id, host_id
+
+    def current_host_bindings(self) -> dict[str, str]:
+        """Return profile-bound inputs consumed only by fixed host verifiers."""
+        current_key = self._keyring.active_key_id
+        profile_hash = profile_hash_for(
+            self._key(current_key),
+            self._keyring.scope_id,
+        )
+        from .preflight_receipt import PreflightReceiptAuthority
+
+        preflight_authority_id = PreflightReceiptAuthority(
+            self._profile_dir,
+            keyring=self._keyring,
+        ).authority_id
+        return {
+            "preflight_authority_id": preflight_authority_id,
+            "profile_hash": profile_hash,
+            "scope_id": self._keyring.scope_id,
+        }
 
     def _validate_current_receipt(self, receipt: VerifiedBackup) -> None:
         if not isinstance(receipt, VerifiedBackup):
@@ -360,6 +529,14 @@ class ReadinessEvidenceStore:
         ):
             raise ReadinessEvidenceError(
                 "verified backup does not match the active profile key"
+            )
+        artifact_id, host_id = self.authority_digests()
+        if (
+            receipt.artifact_digest != artifact_id
+            or receipt.host_authority_digest != host_id
+        ):
+            raise ReadinessEvidenceError(
+                "verified backup does not match current artifact and host authority"
             )
 
 
