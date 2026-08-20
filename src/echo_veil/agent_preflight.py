@@ -643,7 +643,10 @@ def _payload_omission_order(evidence: Mapping[str, Any]) -> list[dict[str, Any]]
 
 def _all_evidence_records(evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
     recall = _object(evidence.get("recall"), "preflight recall evidence")
-    records = _record_list(recall.get("results"))
+    # Work on a copy. Extending the recall-owned list with Contextual Logic
+    # records would silently change signed recall evidence and can make an
+    # otherwise valid one-result preflight fail an exact harness parser.
+    records = list(_record_list(recall.get("results")))
     context = evidence.get("contextual_logic")
     if isinstance(context, Mapping):
         compact_context = dict(context)

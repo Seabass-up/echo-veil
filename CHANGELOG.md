@@ -53,6 +53,10 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Added
 
+- Added an authoritative protocol registry and shared Python/TypeScript/
+  JavaScript fixtures that freeze signed preflight v2, retain the unsigned
+  preflight bridge, reserve `capabilities_v1`, and keep record-envelope v3
+  invisible to harness consumers.
 - Added signed lifecycle-neutral `preflight_v2` receipts with exact
   query/session/turn/model/tool/artifact bindings, one-use replay defense,
   adaptive one-or-two-result evidence, compact ritual status, multilingual
@@ -69,6 +73,8 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Fixed Contextual Logic evidence budgeting so linked records no longer mutate
+  or enlarge the signed recall candidate list.
 - Kept degraded Always-Available retrieval manual, read-only, visibly
   non-semantic, mutation-disabled, and incapable of authorizing a required
   model turn.

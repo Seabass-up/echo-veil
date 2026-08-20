@@ -1,7 +1,17 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import test from "node:test"
 
-import { EchoVeilShield } from "../.opencode/plugins/echo-veil-shield.js"
+import {
+  EchoVeilShield,
+  parseCapabilitiesV1,
+  validateLegacyPreflight,
+} from "../.opencode/plugins/echo-veil-shield.js"
+
+const protocolFixture = JSON.parse(readFileSync(
+  new URL("../../../protocol/fixtures/compatibility-v1.json", import.meta.url),
+  "utf8",
+))
 
 const FAILURE =
   "Echo Veil required preflight is unavailable. The OpenCode model turn was blocked; no host memory fallback was used."
@@ -33,6 +43,28 @@ function messageOutput(text = "Recall the current protected state.") {
     ],
   }
 }
+
+test("consumes the shared legacy and capabilities compatibility fixtures", () => {
+  const legacy = protocolFixture.legacy_preflight_cases.opencode.response
+  assert.match(
+    validateLegacyPreflight(legacy, "current_user_prompt"),
+    /MEMORY_EVIDENCE_JSON=/,
+  )
+  assert.equal(parseCapabilitiesV1(
+    protocolFixture.capabilities_cases.absent.value,
+  ), null)
+  assert.equal(parseCapabilitiesV1(
+    protocolFixture.capabilities_cases.valid.value,
+  ).schema, "echo-veil-capabilities-v1")
+  assert.deepEqual(parseCapabilitiesV1(
+    protocolFixture.capabilities_cases.valid_documented_additions.value,
+  ).remediation_codes, ["EV-BACKUP-UNVERIFIED"])
+  const unknown = structuredClone(
+    protocolFixture.capabilities_cases.unknown_schema.value,
+  )
+  unknown.schema = "echo-veil-capabilities-v2"
+  assert.throws(() => parseCapabilitiesV1(unknown), /capabilities_v1/)
+})
 
 test("root turns receive protected context before chat parameters are built", async () => {
   const requests = []

@@ -58,6 +58,39 @@ _REQUEST_BINDING_CHAR_LIMIT = "message_scan_character_limit"
 _PREFLIGHT_QUERY_OMISSION = (
     "\n\n[ECHO_VEIL_HERMES_PREFLIGHT_QUERY_MIDDLE_OMITTED]\n\n"
 )
+CAPABILITIES_SCHEMA = "echo-veil-capabilities-v1"
+_CAPABILITY_REQUIRED_FIELDS = frozenset(
+    {
+        "artifact_verified",
+        "at_rest_encrypted",
+        "backup_verified",
+        "embedding_identity_verified",
+        "hardware_isolated",
+        "host_boundary_verified",
+        "host_compromise_protected",
+        "implementation_healthy",
+        "key_custody",
+        "local_production_ready",
+        "production_ready",
+        "protection_tier",
+        "remotely_attested",
+        "restore_verified",
+        "rollback_detection",
+        "runtime_plaintext_exposure",
+        "schema",
+    }
+)
+_CAPABILITY_OPTIONAL_FIELDS = frozenset(
+    {"generated_at_ms", "limitations", "remediation_codes"}
+)
+_CAPABILITY_TEXT_FIELDS = frozenset(
+    {
+        "key_custody",
+        "protection_tier",
+        "rollback_detection",
+        "runtime_plaintext_exposure",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +276,52 @@ def _validate_preflight(value: object) -> str:
     ):
         raise ValueError("preflight context is invalid")
     return context
+
+
+def parse_capabilities_v1(value: object | None) -> dict[str, Any] | None:
+    """Parse optional readiness information without authorizing a model turn."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("capabilities_v1 response is invalid")
+    capabilities = dict(value)
+    fields = set(capabilities)
+    if (
+        not _CAPABILITY_REQUIRED_FIELDS.issubset(fields)
+        or fields - _CAPABILITY_REQUIRED_FIELDS - _CAPABILITY_OPTIONAL_FIELDS
+        or capabilities.get("schema") != CAPABILITIES_SCHEMA
+    ):
+        raise ValueError("capabilities_v1 response is invalid")
+    for field in _CAPABILITY_REQUIRED_FIELDS - _CAPABILITY_TEXT_FIELDS - {"schema"}:
+        if not isinstance(capabilities.get(field), bool):
+            raise ValueError("capabilities_v1 response is invalid")
+    for field in _CAPABILITY_TEXT_FIELDS:
+        item = capabilities.get(field)
+        if not isinstance(item, str) or not item or len(item) > 256:
+            raise ValueError("capabilities_v1 response is invalid")
+    if "generated_at_ms" in capabilities:
+        generated = capabilities["generated_at_ms"]
+        if (
+            isinstance(generated, bool)
+            or not isinstance(generated, int)
+            or generated < 0
+        ):
+            raise ValueError("capabilities_v1 response is invalid")
+    for field in ("limitations", "remediation_codes"):
+        if field not in capabilities:
+            continue
+        items = capabilities[field]
+        if (
+            not isinstance(items, list)
+            or len(items) > 64
+            or any(
+                not isinstance(item, str) or not item or len(item) > 256
+                for item in items
+            )
+        ):
+            raise ValueError("capabilities_v1 response is invalid")
+    return capabilities
 
 
 def _protected_context(context: str, nonce: str) -> str:

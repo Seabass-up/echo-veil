@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import entry, {
   addRpcTelemetry,
@@ -9,10 +11,49 @@ import entry, {
   createOpenClawPreflightHandlers,
   hasRequiredOpenClawHookPolicy,
   parsePreflightContext,
+  parseCapabilitiesV1,
   registerEchoVeil,
 } from "./index.js";
 
+function protocolFixture(): Record<string, unknown> {
+  return JSON.parse(readFileSync(
+    fileURLToPath(new URL(
+      "../../../protocol/fixtures/compatibility-v1.json",
+      import.meta.url,
+    )),
+    "utf8",
+  )) as Record<string, unknown>;
+}
+
 describe("echo-veil OpenClaw plugin", () => {
+  it("consumes the shared legacy bridge and optional capabilities fixtures", () => {
+    const fixture = protocolFixture();
+    const legacy = fixture.legacy_preflight_cases as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const openclaw = legacy.openclaw?.response;
+    expect(parsePreflightContext(openclaw, {
+      expectedProfile: "echo-universal-qwen3-v1",
+    })).toContain("MEMORY_EVIDENCE_JSON=");
+
+    const cases = fixture.capabilities_cases as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(parseCapabilitiesV1(cases.absent?.value)).toBeNull();
+    expect(parseCapabilitiesV1(cases.valid?.value)?.schema)
+      .toBe("echo-veil-capabilities-v1");
+    expect(parseCapabilitiesV1(cases.valid_documented_additions?.value)
+      ?.remediation_codes).toEqual(["EV-BACKUP-UNVERIFIED"]);
+    const unknown = structuredClone(
+      cases.unknown_schema?.value,
+    ) as Record<string, unknown>;
+    unknown.schema = "echo-veil-capabilities-v2";
+    expect(() => parseCapabilitiesV1(unknown)).toThrow(
+      "capabilities_v1",
+    );
+  });
   it("declares the native tool contract", () => {
     const tools = buildEchoVeilTools({});
     expect(tools.map((tool) => tool.name)).toEqual([

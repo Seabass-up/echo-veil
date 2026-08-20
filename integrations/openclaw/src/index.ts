@@ -92,6 +92,7 @@ const MAX_PENDING_PREFLIGHTS = 256;
 const PREFLIGHT_ATTESTATION_TTL_MS = 300_000;
 const PREFLIGHT_ATTESTATION_PREFIX = "ECHO_VEIL_TURN_ATTESTATION=";
 const PREFLIGHT_CONTEXT_PREFIX = "ECHO VEIL REQUIRED MEMORY PREFLIGHT";
+const CAPABILITIES_SCHEMA = "echo-veil-capabilities-v1";
 const PREFLIGHT_BLOCK_MESSAGE =
   "Echo Veil required preflight is unavailable. The model turn was blocked; no host memory fallback was used.";
 const DEFAULT_PROFILE = "echo-universal-qwen3-v1";
@@ -375,6 +376,92 @@ export function parsePreflightContext(
     throw new Error("Echo Veil preflight context is invalid");
   }
   return context;
+}
+
+const CAPABILITY_REQUIRED_FIELDS = [
+  "artifact_verified",
+  "at_rest_encrypted",
+  "backup_verified",
+  "embedding_identity_verified",
+  "hardware_isolated",
+  "host_boundary_verified",
+  "host_compromise_protected",
+  "implementation_healthy",
+  "key_custody",
+  "local_production_ready",
+  "production_ready",
+  "protection_tier",
+  "remotely_attested",
+  "restore_verified",
+  "rollback_detection",
+  "runtime_plaintext_exposure",
+  "schema",
+] as const;
+const CAPABILITY_OPTIONAL_FIELDS = new Set([
+  "generated_at_ms",
+  "limitations",
+  "remediation_codes",
+]);
+const CAPABILITY_TEXT_FIELDS = [
+  "key_custody",
+  "protection_tier",
+  "rollback_detection",
+  "runtime_plaintext_exposure",
+] as const;
+
+export function parseCapabilitiesV1(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value) || typeof value !== "object") {
+    throw new Error("Echo Veil capabilities_v1 response is invalid");
+  }
+  const capabilities = value as Record<string, unknown>;
+  const required = new Set<string>(CAPABILITY_REQUIRED_FIELDS);
+  const fields = Object.keys(capabilities);
+  if (
+    CAPABILITY_REQUIRED_FIELDS.some((field) => !Object.hasOwn(capabilities, field)) ||
+    fields.some((field) => !required.has(field) && !CAPABILITY_OPTIONAL_FIELDS.has(field)) ||
+    capabilities.schema !== CAPABILITIES_SCHEMA
+  ) {
+    throw new Error("Echo Veil capabilities_v1 response is invalid");
+  }
+  for (const field of CAPABILITY_REQUIRED_FIELDS) {
+    if (
+      field !== "schema" &&
+      !CAPABILITY_TEXT_FIELDS.includes(field as typeof CAPABILITY_TEXT_FIELDS[number]) &&
+      typeof capabilities[field] !== "boolean"
+    ) {
+      throw new Error("Echo Veil capabilities_v1 response is invalid");
+    }
+  }
+  for (const field of CAPABILITY_TEXT_FIELDS) {
+    const item = capabilities[field];
+    if (typeof item !== "string" || !item || item.length > 256) {
+      throw new Error("Echo Veil capabilities_v1 response is invalid");
+    }
+  }
+  if (
+    Object.hasOwn(capabilities, "generated_at_ms") &&
+    (!Number.isSafeInteger(capabilities.generated_at_ms) ||
+      Number(capabilities.generated_at_ms) < 0)
+  ) {
+    throw new Error("Echo Veil capabilities_v1 response is invalid");
+  }
+  for (const field of ["limitations", "remediation_codes"]) {
+    const item = capabilities[field];
+    if (
+      item !== undefined &&
+      (!Array.isArray(item) ||
+        item.length > 64 ||
+        item.some((entry) =>
+          typeof entry !== "string" || !entry || entry.length > 256
+        ))
+    ) {
+      throw new Error("Echo Veil capabilities_v1 response is invalid");
+    }
+  }
+  return capabilities;
 }
 
 function turnIdentityKeys(context: OpenClawAgentHookContext): string[] {

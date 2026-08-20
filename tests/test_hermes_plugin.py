@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 from io import BytesIO
+from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
 from typing import Any
@@ -9,6 +11,15 @@ from typing import Any
 import pytest
 
 from integrations.hermes import plugin
+
+_PROTOCOL_FIXTURE = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "protocol"
+        / "fixtures"
+        / "compatibility-v1.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 def _preflight(
@@ -23,6 +34,26 @@ def _preflight(
         "semantic": True,
         "context": context,
     }
+
+
+def test_hermes_consumes_shared_legacy_and_capabilities_fixtures() -> None:
+    legacy = _PROTOCOL_FIXTURE["legacy_preflight_cases"]["hermes"]["response"]
+    assert plugin._validate_preflight(legacy).startswith(
+        "ECHO VEIL REQUIRED MEMORY PREFLIGHT"
+    )
+    cases = _PROTOCOL_FIXTURE["capabilities_cases"]
+    assert plugin.parse_capabilities_v1(cases["absent"]["value"]) is None
+    assert (
+        plugin.parse_capabilities_v1(cases["valid"]["value"])["schema"]
+        == plugin.CAPABILITIES_SCHEMA
+    )
+    assert plugin.parse_capabilities_v1(cases["valid_documented_additions"]["value"])[
+        "remediation_codes"
+    ] == ["EV-BACKUP-UNVERIFIED"]
+    unknown = dict(cases["unknown_schema"]["value"])
+    unknown["schema"] = "echo-veil-capabilities-v2"
+    with pytest.raises(ValueError, match="capabilities_v1"):
+        plugin.parse_capabilities_v1(unknown)
 
 
 @pytest.fixture(autouse=True)

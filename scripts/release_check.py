@@ -70,6 +70,9 @@ REQUIRED_SDIST_FILES = {
     "integrations/pi/src/preflight.ts",
     "integrations/pi/src/runner.ts",
     "integrations/pi/skills/echo-veil-memory/SKILL.md",
+    "protocol/README.md",
+    "protocol/fixtures/compatibility-v1.json",
+    "protocol/registry-v1.json",
     "scripts/memory_core_benchmark.py",
     "scripts/build_openclaw_archive.py",
     "scripts/migrate_agent_profile.py",
@@ -85,6 +88,7 @@ REQUIRED_SDIST_FILES = {
     "src/echo_veil/agent_broker.py",
     "src/echo_veil/codex_artifact.py",
     "src/echo_veil/preflight_receipt.py",
+    "src/echo_veil/protocol_compat.py",
     "skills/echo-veil-memory/SKILL.md",
     "skills/echo-veil-memory/agents/openai.yaml",
 }

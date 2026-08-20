@@ -13,6 +13,37 @@ const REQUIRED_PREFLIGHT_FAILURE =
   "Echo Veil required preflight is unavailable. The OpenCode model turn was blocked; no host memory fallback was used."
 const CONTEXT_BEGIN = "ECHO_VEIL_PROTECTED_OPENCODE_CONTEXT_BEGIN"
 const CONTEXT_END = "ECHO_VEIL_PROTECTED_OPENCODE_CONTEXT_END"
+const CAPABILITIES_SCHEMA = "echo-veil-capabilities-v1"
+const CAPABILITY_REQUIRED_FIELDS = [
+  "artifact_verified",
+  "at_rest_encrypted",
+  "backup_verified",
+  "embedding_identity_verified",
+  "hardware_isolated",
+  "host_boundary_verified",
+  "host_compromise_protected",
+  "implementation_healthy",
+  "key_custody",
+  "local_production_ready",
+  "production_ready",
+  "protection_tier",
+  "remotely_attested",
+  "restore_verified",
+  "rollback_detection",
+  "runtime_plaintext_exposure",
+  "schema",
+]
+const CAPABILITY_OPTIONAL_FIELDS = new Set([
+  "generated_at_ms",
+  "limitations",
+  "remediation_codes",
+])
+const CAPABILITY_TEXT_FIELDS = new Set([
+  "key_custody",
+  "protection_tier",
+  "rollback_detection",
+  "runtime_plaintext_exposure",
+])
 
 const CHILD_ENV_NAMES = [
   "HOME",
@@ -176,7 +207,7 @@ function boundedQuery(parts) {
   return query
 }
 
-function validatePreflight(value, querySource) {
+export function validateLegacyPreflight(value, querySource) {
   if (
     value === null ||
     typeof value !== "object" ||
@@ -195,6 +226,56 @@ function validatePreflight(value, querySource) {
     throw new Error(REQUIRED_PREFLIGHT_FAILURE)
   }
   return value.context
+}
+
+export function parseCapabilitiesV1(value) {
+  if (value === null || value === undefined) return null
+  if (Array.isArray(value) || typeof value !== "object") {
+    throw new Error("Echo Veil capabilities_v1 response is invalid")
+  }
+  const required = new Set(CAPABILITY_REQUIRED_FIELDS)
+  if (
+    CAPABILITY_REQUIRED_FIELDS.some((field) => !Object.hasOwn(value, field)) ||
+    Object.keys(value).some(
+      (field) => !required.has(field) && !CAPABILITY_OPTIONAL_FIELDS.has(field),
+    ) ||
+    value.schema !== CAPABILITIES_SCHEMA
+  ) {
+    throw new Error("Echo Veil capabilities_v1 response is invalid")
+  }
+  for (const field of CAPABILITY_REQUIRED_FIELDS) {
+    if (field === "schema") continue
+    if (CAPABILITY_TEXT_FIELDS.has(field)) {
+      if (
+        typeof value[field] !== "string" ||
+        !value[field] ||
+        value[field].length > 256
+      ) {
+        throw new Error("Echo Veil capabilities_v1 response is invalid")
+      }
+    } else if (typeof value[field] !== "boolean") {
+      throw new Error("Echo Veil capabilities_v1 response is invalid")
+    }
+  }
+  if (
+    Object.hasOwn(value, "generated_at_ms") &&
+    (!Number.isSafeInteger(value.generated_at_ms) || value.generated_at_ms < 0)
+  ) {
+    throw new Error("Echo Veil capabilities_v1 response is invalid")
+  }
+  for (const field of ["limitations", "remediation_codes"]) {
+    if (
+      Object.hasOwn(value, field) &&
+      (!Array.isArray(value[field]) ||
+        value[field].length > 64 ||
+        value[field].some(
+          (item) => typeof item !== "string" || !item || item.length > 256,
+        ))
+    ) {
+      throw new Error("Echo Veil capabilities_v1 response is invalid")
+    }
+  }
+  return value
 }
 
 function protectedPrompt(context, prompt) {
@@ -248,7 +329,7 @@ export const EchoVeilShield = async (input) => {
       ) {
         throw new Error(REQUIRED_PREFLIGHT_FAILURE)
       }
-      return validatePreflight(
+      return validateLegacyPreflight(
         await rpc("preflight", {
           query,
           expected_profile: CANONICAL_PROFILE,

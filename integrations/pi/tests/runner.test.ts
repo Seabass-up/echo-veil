@@ -24,11 +24,13 @@ import {
   digestModel,
   digestToolManifest,
   EchoVeilPreflight,
+  parseCapabilitiesV1,
   payloadContainsContext,
   type PreflightBindings,
   renderPreflightEvidence,
   REQUIRED_PREFLIGHT_FAILURE,
   sha256Digest,
+  validatePreflightEvidence,
   verifyPreflightResponse,
 } from "../src/preflight.js";
 import {
@@ -56,6 +58,43 @@ const MODEL = {
 
 type JsonObject = Record<string, unknown>;
 type Handler = (...args: any[]) => any;
+
+function protocolFixture(): JsonObject {
+  return JSON.parse(readFileSync(
+    fileURLToPath(new URL(
+      "../../../protocol/fixtures/compatibility-v1.json",
+      import.meta.url,
+    )),
+    "utf8",
+  )) as JsonObject;
+}
+
+function fixtureBindings(fixture: JsonObject): PreflightBindings {
+  const signed = fixture.signed_preflight as JsonObject;
+  const value = signed.bindings as JsonObject;
+  return {
+    artifactAuthorityId: String(value.artifact_authority_id),
+    modelDigest: String(value.model_digest),
+    profile: String(value.profile),
+    query: String(value.query),
+    querySource: String(value.query_source) as PreflightBindings["querySource"],
+    scope: String(value.scope),
+    sessionId: String(value.session_id),
+    toolManifestDigest: String(value.tool_manifest_digest),
+    turnId: String(value.turn_id),
+  };
+}
+
+function setFixturePath(value: unknown, path: string, replacement: unknown): void {
+  const parts = path.split(".");
+  let current = value as JsonObject;
+  for (const part of parts.slice(0, -1)) {
+    current = current[part] as JsonObject;
+  }
+  const final = parts.at(-1);
+  if (!final) throw new Error("fixture path is invalid");
+  current[final] = replacement;
+}
 
 function memoryResult(vineId = "memory-1"): JsonObject {
   return {
@@ -354,6 +393,153 @@ function bindings(overrides: Partial<PreflightBindings> = {}): PreflightBindings
     ...overrides,
   };
 }
+
+describe("shared protocol compatibility fixtures", () => {
+  it("consumes every language-neutral evidence shape", () => {
+    const cases = protocolFixture().evidence_cases as JsonObject;
+    for (const rawCase of Object.values(cases)) {
+      const fixtureCase = rawCase as JsonObject;
+      const protectedEvidence = validatePreflightEvidence(fixtureCase.evidence);
+      expect(renderPreflightEvidence(protectedEvidence)).toBe(fixtureCase.context);
+    }
+    const poisoned = cases.poisoned_untrusted_memory as JsonObject;
+    expect(String(poisoned.context)).not.toContain("<script>");
+    expect(String(poisoned.context)).toContain("\\u003cscript\\u003e");
+  });
+
+  it("accepts optional capabilities_v1 and only documented additions", () => {
+    const cases = protocolFixture().capabilities_cases as JsonObject;
+    expect(parseCapabilitiesV1((cases.absent as JsonObject).value)).toBeNull();
+    expect(parseCapabilitiesV1((cases.valid as JsonObject).value)?.schema)
+      .toBe("echo-veil-capabilities-v1");
+    expect(
+      parseCapabilitiesV1(
+        (cases.valid_documented_additions as JsonObject).value,
+      )?.remediation_codes,
+    ).toEqual(["EV-BACKUP-UNVERIFIED"]);
+
+    const missing = structuredClone(
+      (cases.missing_required as JsonObject).value,
+    ) as JsonObject;
+    delete missing.key_custody;
+    expect(() => parseCapabilitiesV1(missing)).toThrow("capabilities_v1");
+    const unknown = structuredClone(
+      (cases.unknown_schema as JsonObject).value,
+    ) as JsonObject;
+    unknown.schema = "echo-veil-capabilities-v2";
+    expect(() => parseCapabilitiesV1(unknown)).toThrow("capabilities_v1");
+  });
+
+  it("verifies the shared v2 receipt without inspecting record envelopes", () => {
+    const fixture = protocolFixture();
+    const signed = fixture.signed_preflight as JsonObject;
+    const expected = fixtureBindings(fixture);
+    const authorityId = String(signed.authority_id);
+    const nowMs = Number(signed.now_ms);
+    const response = signed.response;
+
+    const verified = verifyPreflightResponse(
+      response,
+      expected,
+      authorityId,
+      nowMs,
+    );
+    expect(verified.preflightId).toBe("0123456789abcdef0123456789abcdef");
+    expect(verified.raw).not.toHaveProperty("record_envelope");
+    expect((verified.raw.receipt as JsonObject).claims)
+      .not.toHaveProperty("record_envelope");
+
+    const matrix = fixture.compatibility_matrix as JsonObject[];
+    for (const row of matrix.filter((item) => item.expected === "accept")) {
+      expect(["v2", "v3", "mixed-v2-v3"]).toContain(row.record_envelope);
+      expect(() => verifyPreflightResponse(
+        response,
+        expected,
+        authorityId,
+        nowMs,
+      )).not.toThrow();
+    }
+  });
+
+  it("fails closed for every shared signed-response rejection case", () => {
+    const fixture = protocolFixture();
+    const signed = fixture.signed_preflight as JsonObject;
+    const expected = fixtureBindings(fixture);
+    const authorityId = String(signed.authority_id);
+    const cases = fixture.preflight_cases as JsonObject;
+    for (const name of [
+      "downgraded_signed_schema",
+      "expired_receipt",
+      "extra_signed_claim",
+      "invalid_signature",
+      "malformed_response",
+      "unknown_response_schema",
+      "unknown_signed_schema",
+      "wrong_host",
+      "wrong_profile",
+      "wrong_scope",
+    ]) {
+      const fixtureCase = cases[name] as JsonObject;
+      const response = Object.hasOwn(fixtureCase, "response")
+        ? structuredClone(fixtureCase.response)
+        : structuredClone(signed.response);
+      const mutation = (fixtureCase.set_path ?? fixtureCase.add_path) as
+        | JsonObject
+        | undefined;
+      if (mutation) {
+        setFixturePath(response, String(mutation.path), mutation.value);
+      }
+      if (fixtureCase.signature_b64 !== undefined) {
+        setFixturePath(
+          response,
+          "receipt.signature_b64",
+          fixtureCase.signature_b64,
+        );
+      }
+      expect(() => verifyPreflightResponse(
+        response,
+        expected,
+        authorityId,
+        Number(fixtureCase.now_ms ?? signed.now_ms),
+      ), name).toThrow();
+    }
+  });
+
+  it("rejects the shared receipt replay on second consumption", () => {
+    const fixture = protocolFixture();
+    const signed = fixture.signed_preflight as JsonObject;
+    const expected = fixtureBindings(fixture);
+    const authorityId = String(signed.authority_id);
+    const nowMs = Number(signed.now_ms);
+    const prepared = verifyPreflightResponse(
+      signed.response,
+      expected,
+      authorityId,
+      nowMs,
+    );
+    const preflight = new EchoVeilPreflight(async () => signed.response, authorityId);
+    expect(() => preflight.consume(prepared, expected, nowMs)).not.toThrow();
+    expect(() => preflight.consume(prepared, expected, nowMs))
+      .toThrow("already consumed");
+  });
+
+  it("blocks the shared oversized prompt before an RPC call", async () => {
+    const fixture = protocolFixture();
+    const fixtureCase = (fixture.preflight_cases as JsonObject)
+      .oversized_prompt as JsonObject;
+    const construction = fixtureCase.query_construction as JsonObject;
+    const query = String(construction.character).repeat(Number(construction.length));
+    const rpc = vi.fn(async () => (fixture.signed_preflight as JsonObject).response);
+    const preflight = new EchoVeilPreflight(
+      rpc,
+      String((fixture.signed_preflight as JsonObject).authority_id),
+    );
+
+    await expect(preflight.prepare({ ...fixtureBindings(fixture), query }))
+      .rejects.toThrow("memory query is invalid");
+    expect(rpc).not.toHaveBeenCalled();
+  });
+});
 
 beforeEach(() => {
   process.env.ECHO_VEIL_PREFLIGHT_AUTHORITY_ID = AUTHORITY_ID;
