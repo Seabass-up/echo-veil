@@ -29,6 +29,16 @@ degraded/open embedding circuit produces `EV-MODEL-UNAVAILABLE` and blocks the
 requested local-production operation. Stable remediation codes map each failed
 gate to payload-free operator guidance.
 
+The guided `echo-veil-agent init local-production` command is observational and
+non-mutating. It probes the selected embedding identity, closes that transport,
+and reports the actual artifact, custody, profile, backup, restore, rollback,
+and host evidence already present. Its output contains stable `EV-*` codes and
+path-free remediation text. A proposed backup destination is checked without
+creating it. `external-monotonic` rollback detection remains unavailable until
+an external authority is configured, so selecting it blocks readiness instead
+of manufacturing evidence; `local-best-effort` qualifies only after the
+device-bound custody and authenticated backup/restore evidence pass.
+
 Even after local qualification, the report remains explicit:
 `hardware_isolated=false`, `remotely_attested=false`, and
 `host_compromise_protected=false`. Only the separately verified enclave class

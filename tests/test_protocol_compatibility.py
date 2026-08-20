@@ -210,6 +210,7 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert set(contracts["doctor_current"]["optional_fields"]) == {
         "capabilities_v1",
         "crypto_environment",
+        "in_process_operation_serialization",
         "local_production_ready",
         "mode_alias",
         "record_envelope",

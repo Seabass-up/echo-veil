@@ -7,6 +7,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Hardened the non-mutating `init local-production` guide so it closes its
+  embedding transport, reports current backup, restore, and rollback evidence,
+  emits stable path-free remediation codes, and blocks the unconfigured
+  external-monotonic tier. The 2026-08-20 real-Qwen gate passed all 42 retrieval
+  cases and 14 hard negatives, with 223.29 ms recall p95 and 478.17 ms warm
+  concurrent Pi/Codex preflight p95.
 - Added a pinned N-1 compatibility gate for the exact v0.7 consumer bytes.
   CI now generates responses from real mixed-v2/v3 and fully-v3 profiles,
   executes the prior OpenClaw, OpenCode, Pi, Hermes, and shared Python

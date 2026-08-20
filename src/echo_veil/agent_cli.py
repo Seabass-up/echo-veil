@@ -42,7 +42,11 @@ from .agent_memory import (
     default_state_dir,
 )
 from .memory_layers import LogicKind, MemoryLayer
-from .local_readiness import LOCAL_PRODUCTION_MODE, LOCAL_STAGING_MODE
+from .local_readiness import (
+    LOCAL_PRODUCTION_MODE,
+    LOCAL_STAGING_MODE,
+    remediation_messages,
+)
 from .local_authority import LocalAuthorityError, verify_current_echo_artifact
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -74,6 +78,24 @@ SERVER_INSTRUCTIONS = (
 )
 
 BaseMemoryAdapter = AgentMemory | AlwaysAvailableMemory
+
+_LOCAL_SETUP_REMEDIATION: dict[str, str] = {
+    "artifact_evidence": "EV-ARTIFACT-UNVERIFIED",
+    "artifact_identity": "EV-ARTIFACT-UNVERIFIED",
+    "backup_destination": "EV-BACKUP-DESTINATION-UNAVAILABLE",
+    "backup_evidence": "EV-BACKUP-UNVERIFIED",
+    "embedding_profile_binding": "EV-EMBEDDING-IDENTITY-UNVERIFIED",
+    "filevault": "EV-FILEVAULT-DISABLED",
+    "host_compatibility": "EV-HOST-BOUNDARY-UNVERIFIED",
+    "key_custody": "EV-KEY-CUSTODY-UNQUALIFIED",
+    "profile_permissions": "EV-PROFILE-ACCESS-UNVERIFIED",
+    "qwen3_model": "EV-EMBEDDING-IDENTITY-UNVERIFIED",
+    "record_envelope": "EV-KEY-MIGRATION-INCOMPLETE",
+    "recovery_key": "EV-PORTABLE-RECOVERY-KEY-MISSING",
+    "restore_evidence": "EV-RESTORE-UNVERIFIED",
+    "rollback_authority": "EV-ROLLBACK-AUTHORITY-UNAVAILABLE",
+    "rollback_evidence": "EV-BACKUP-UNVERIFIED",
+}
 
 
 class _RuntimeAvailabilityMemory:
@@ -2018,8 +2040,18 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             else ("configured" if args.recovery_key_file is not None else "missing")
         ),
         "rollback_detection": args.rollback_detection,
+        "rollback_authority": (
+            "unconfigured"
+            if args.rollback_detection == "external-monotonic"
+            else (
+                "unverified"
+                if args.rollback_detection == "local-best-effort"
+                else "not-required"
+            )
+        ),
     }
     requested_embedding_identity: str | None = None
+    embedder: TextEmbedder | None = None
     try:
         embedder = _build_embedder(args)
     except Exception:
@@ -2034,6 +2066,11 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             else "unsupported"
         )
         checks["embedding_dimension"] = embedder.dimension
+    finally:
+        if embedder is not None:
+            close_embedder = getattr(embedder, "close", None)
+            if callable(close_embedder):
+                close_embedder()
     profile_exists = (
         (default_state_dir() if args.state_dir is None else args.state_dir)
         / args.profile
@@ -2058,6 +2095,11 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             and custody.get("raw_key_files_present") is False
             else "unqualified"
         )
+        if (
+            args.rollback_detection == "local-best-effort"
+            and checks["key_custody"] == "qualified"
+        ):
+            checks["rollback_authority"] = "qualified-local"
         envelope = report.get("record_envelope")
         checks["record_envelope"] = (
             "verified-v3"
@@ -2091,11 +2133,34 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
                 if capabilities.get("host_boundary_verified") is True
                 else "unverified"
             )
+            checks["backup_evidence"] = (
+                "verified"
+                if capabilities.get("backup_verified") is True
+                else "unverified"
+            )
+            checks["restore_evidence"] = (
+                "verified"
+                if capabilities.get("restore_verified") is True
+                else "unverified"
+            )
+            observed_rollback = capabilities.get("rollback_detection")
+            checks["rollback_evidence"] = (
+                "reported-none"
+                if args.rollback_detection == "none" and observed_rollback == "none"
+                else (
+                    "verified"
+                    if observed_rollback == args.rollback_detection
+                    else "unverified"
+                )
+            )
     else:
         checks["profile_permissions"] = "profile-missing"
         checks["key_custody"] = "unconfigured"
         checks["record_envelope"] = "unconfigured"
         checks["artifact_evidence"] = "unconfigured"
+        checks["backup_evidence"] = "unconfigured"
+        checks["restore_evidence"] = "unconfigured"
+        checks["rollback_evidence"] = "unconfigured"
     blocking = sorted(
         name
         for name, value in checks.items()
@@ -2116,6 +2181,17 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
             "incomplete",
         }
     )
+    remediation_codes = sorted(
+        {
+            (
+                "EV-PROFILE-MISSING"
+                if checks[name] == "profile-missing"
+                else _LOCAL_SETUP_REMEDIATION[name]
+            )
+            for name in blocking
+            if name in _LOCAL_SETUP_REMEDIATION
+        }
+    )
     print(
         _json(
             {
@@ -2123,6 +2199,8 @@ def _run_local_production_init(args: argparse.Namespace) -> int:
                 "checks": checks,
                 "ready_to_activate": not blocking,
                 "blocking_checks": blocking,
+                "remediation_codes": remediation_codes,
+                "remediations": remediation_messages(remediation_codes),
                 "mutations_performed": False,
                 "next": (
                     "Run the listed remediations, then repeat this command."
