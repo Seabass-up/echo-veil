@@ -110,8 +110,14 @@ layer, provenance, confidence, and temporal state; callers must preserve both,
 explicitly supersede obsolete data, or store a protected Contextual Logic
 `contradiction_resolution` that links the evidence.
 
-This is a local staging boundary. Plaintext is still visible to the authorized
-process and embedding service, and Echo Veil does not automatically protect
+This defaults to a local staging boundary. The separate RPC-only
+`capabilities_v1` report can qualify a host-trusted local-production deployment
+only after every cryptographic-state, Qwen3 identity, artifact, key-custody,
+backup, restore, profile-access, and host-enforcement gate passes. Current
+`file-v1` profiles do not qualify. Even a qualified local profile exposes
+plaintext to the authorized process and embedding service and does not protect
+against host compromise; hardware-isolated, remotely attested production
+remains a distinct enclave class. Echo Veil also does not automatically protect
 host logs, prompts, transcripts, wiki/graph stores, backups, swap, or physical
 media. The complete threat model and application entry-point contract are in
 [`docs/LOCAL_AGENT_SECURITY.md`](docs/LOCAL_AGENT_SECURITY.md).

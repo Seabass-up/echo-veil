@@ -120,6 +120,22 @@ def test_environment_policy_normalizes_and_rejects_ambiguous_modes() -> None:
     with pytest.raises(RuntimeError, match="LocalOpenFheCryptoShield"):
         Oracle(environment="local-private", shield=shield)
 
+    with pytest.raises(RuntimeError, match="host-trusted local CryptoShield marker"):
+        Oracle(environment="local-production", shield=shield)
+
+    class QualifiedLocalShield(_SerializableShield):
+        local_production_ready = True
+
+    local_production = Oracle(
+        environment="local-production",
+        shield=QualifiedLocalShield(),
+    )
+    assert local_production.environment == "local-production"
+    local_report = local_production.capability_report().as_dict()
+    assert local_report["crypto_readiness"]["status"] == "ready"
+    assert "host-trusted" in local_report["crypto_readiness"]["message"]
+    assert any("runtime plaintext" in warning for warning in local_report["warnings"])
+
     class UnmarkedShield(_SerializableShield):
         pass
 

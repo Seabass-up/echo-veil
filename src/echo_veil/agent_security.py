@@ -2301,6 +2301,7 @@ class ScopedAesGcmShield:
 
     algorithm = "AES-256-GCM-SCOPED"
     production_ready = False
+    local_production_ready = False
     staging_ready = True
 
     def __init__(self, keyring: ProfileKeyring) -> None:

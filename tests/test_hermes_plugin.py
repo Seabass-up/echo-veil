@@ -50,6 +50,18 @@ def test_hermes_consumes_shared_legacy_and_capabilities_fixtures() -> None:
     assert plugin.parse_capabilities_v1(cases["valid_documented_additions"]["value"])[
         "remediation_codes"
     ] == ["EV-BACKUP-UNVERIFIED"]
+    assert (
+        plugin.parse_capabilities_v1(cases["host_trusted_local_ready"]["value"])[
+            "local_production_ready"
+        ]
+        is True
+    )
+    assert (
+        plugin.parse_capabilities_v1(cases["attested_enclave_ready"]["value"])[
+            "production_ready"
+        ]
+        is True
+    )
     unknown = dict(cases["unknown_schema"]["value"])
     unknown["schema"] = "echo-veil-capabilities-v2"
     with pytest.raises(ValueError, match="capabilities_v1"):

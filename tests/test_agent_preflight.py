@@ -251,6 +251,7 @@ def test_preflight_v2_is_signed_query_bound_and_minimal(tmp_path: Path) -> None:
     assert response["preflight_ready"] is True
     assert response["schema"] == PREFLIGHT_RECEIPT_SCHEMA
     assert response["lifecycle_mutated"] is False
+    assert "capabilities_v1" not in response
     evidence = response["evidence"]
     assert isinstance(evidence, dict)
     assert len(evidence["recall"]["results"]) == 1
@@ -258,6 +259,7 @@ def test_preflight_v2_is_signed_query_bound_and_minimal(tmp_path: Path) -> None:
     assert query not in str(response["context"])
     receipt = response["receipt"]
     assert isinstance(receipt, dict)
+    assert "capabilities_v1" not in receipt
     verifier = PreflightReceiptVerifier.from_public_key_b64(
         str(receipt["public_key_b64"]),
         expected_authority_id=authority.authority_id,

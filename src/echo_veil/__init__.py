@@ -37,6 +37,11 @@ from .crypto_shield import (
 from .drift import DriftDetector
 from .deployment import build_production_enclave_shield_from_env
 from .memory_layers import LogicKind, MemoryLayer, MemoryLayerContract
+from .local_readiness import (
+    LocalReadinessEvidence,
+    LocalReadinessState,
+    build_capabilities_v1,
+)
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteColdArchive, SQLiteMetadataIndex, SQLiteStore
 from .preflight_receipt import (
@@ -57,6 +62,9 @@ __all__ = [
     "MemoryLayer",
     "MemoryLayerContract",
     "LogicKind",
+    "LocalReadinessEvidence",
+    "LocalReadinessState",
+    "build_capabilities_v1",
     "Oracle",
     "GenerationGated",
     "SQLiteStore",

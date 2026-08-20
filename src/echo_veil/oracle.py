@@ -94,12 +94,13 @@ class Oracle:
             "test",
             "testing",
             "staging",
+            "local-production",
             "production",
         }
         if normalized_environment not in allowed_environments:
             raise ValueError(
                 "environment must be one of: development, test, testing, "
-                "local-private, staging, production"
+                "local-private, staging, local-production, production"
             )
         if shield is not None and not is_crypto_shield(shield):
             raise TypeError(
@@ -123,6 +124,14 @@ class Oracle:
             raise RuntimeError(
                 "Refusing to start in local-private mode without a native "
                 "LocalOpenFheCryptoShield."
+            )
+        if normalized_environment == "local-production" and not (
+            shield is not None
+            and getattr(shield, "local_production_ready", False) is True
+        ):
+            raise RuntimeError(
+                "Refusing to start in local-production without an explicitly "
+                "reviewed host-trusted local CryptoShield marker."
             )
         if normalized_environment == "staging" and not (
             isinstance(shield, AesGcmCryptoShield)

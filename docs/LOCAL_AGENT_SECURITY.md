@@ -1,10 +1,36 @@
 # Local agent-memory security contract
 
 This document defines the security boundary of
-`echo_veil.agent_memory.AgentMemory`. The adapter is a local staging security
-subsystem. It is not the attested production enclave described in
+`echo_veil.agent_memory.AgentMemory`. The adapter defaults to a local staging
+security subsystem and may qualify for the separately defined host-trusted
+local-production class only when every `capabilities_v1` gate passes. It is not
+the attested production enclave described in
 [`DEPLOYMENT_THREAT_MODEL.md`](DEPLOYMENT_THREAT_MODEL.md), and an importable
 package or enabled feature flag is not evidence that an application uses it.
+
+## Local-production readiness
+
+`capabilities_v1` is an RPC-only diagnostic contract. It does not alter or
+satisfy preflight. A positive local-production result requires all of the
+following at once: scoped authenticated encryption, complete protected
+semantic state, digest-bound Qwen3 embeddings, verified profile ownership and
+permissions, an immutable installed artifact, authenticated backup plus an
+actual restore drill, a qualified host enforcement boundary, reviewed key
+custody, an empty reconciliation backlog and quarantine, zero plaintext
+fallback attempts, a completed key migration, an available model, and an
+explicit `local-production` selection.
+
+Current scoped profiles use `file-v1` key custody and therefore remain
+`local-staging`. `ECHO_VEIL_DEPLOYMENT_MODE=local-production` is fail-closed:
+it preserves that requested mode in diagnostics but blocks all non-diagnostic
+RPC actions until independent evidence qualifies every gate. It never silently
+downgrades to staging. Stable remediation codes map each failed gate to
+payload-free operator guidance.
+
+Even after local qualification, the report remains explicit:
+`hardware_isolated=false`, `remotely_attested=false`, and
+`host_compromise_protected=false`. Only the separately verified enclave class
+may set `production_ready=true`.
 
 ## Protected path
 

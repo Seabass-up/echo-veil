@@ -703,6 +703,7 @@ class NullCryptoShield:
     """
 
     production_ready = False
+    local_production_ready = False
 
     def __init__(self, silence_warning: bool = False) -> None:
         if not silence_warning:
@@ -740,6 +741,7 @@ class AesGcmCryptoShield:
 
     algorithm = "AES-256-GCM"
     production_ready = False
+    local_production_ready = False
 
     def __init__(self, key: bytes) -> None:
         if not isinstance(key, (bytes, bytearray, memoryview)):
@@ -896,6 +898,7 @@ class LocalOpenFheCryptoShield:
     algorithm = "CKKS"
     provider_id = "local-openfhe"
     production_ready = False
+    local_production_ready = False
     local_private_ready = True
 
     def __init__(self, engine: LocalCkksEngine) -> None:
@@ -996,6 +999,7 @@ class EnclaveCryptoShield:
 
     algorithm = "CKKS"
     production_ready = True
+    local_production_ready = False
 
     def __init__(
         self,

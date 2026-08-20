@@ -11,11 +11,12 @@
     "src/echo_veil/agent_preflight.py",
     "src/echo_veil/codex_artifact.py",
     "src/echo_veil/guarded_runner.py",
+    "src/echo_veil/local_readiness.py",
     "src/echo_veil/memory_layers.py",
     "src/echo_veil/preflight_receipt.py",
     "src/echo_veil/protocol_compat.py"
   ],
-  "shared_source_digest": "sha256:cca042b65028211906d547773e50bb68b002b8f7a90ebc330b8344f76aa81990",
+  "shared_source_digest": "sha256:c5400a814ca315a947abf88e1817a8326416c5d3658e1d1a9844ba2cfad74d70",
   "hosts": [
     {
       "id": "algo-cli",
@@ -96,7 +97,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:5e34139af74ee5a89653ec2a981d95de125bc23f34918b3cb36a6a399570e0e9",
+      "source_digest": "sha256:9096602b59b89078d67f20dc60ab47d9301f810c2f5f12f834f355b141ff9831",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -130,7 +131,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:bdcd81c219ebff914fe1879cd1dabba5762e6e65ceb254a0d9c246beddce2951",
+      "source_digest": "sha256:770dec250765514a674331bb6e168b35fca050e60049ae080af20cae3a956c7d",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -238,7 +239,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:f5d88881022afbbb49fb64f462f0c5b579ef8df04a1d9691cd60724d62d52745",
+      "source_digest": "sha256:2acb55dae510877ad21ece9fe6603242db15758f5815049e0d5ce6ca4987142b",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -273,7 +274,7 @@
         "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
         "integrations/opencode/tests/echo-veil-shield.test.mjs"
       ],
-      "source_digest": "sha256:69c86230ee6d8a3d87f24559662acba3726bcd913cf1e703e06baaf7aa1ed942",
+      "source_digest": "sha256:100fd8fac44053777a170fabbe2f99694aae8678cb214ecc9de5908b727bb688",
       "checks": [
         "Installed root-turn protected marker",
         "Forced-outage zero-assistant-message, zero-token, and zero-cost result",

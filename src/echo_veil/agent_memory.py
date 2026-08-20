@@ -75,6 +75,16 @@ from .memory_layers import (
     migrated_short_term_contract,
     new_memory_contract,
 )
+from .local_readiness import (
+    LEGACY_MIGRATION_MODE,
+    LOCAL_PRODUCTION_MODE,
+    LOCAL_STAGING_MODE,
+    OFFLINE_READ_ONLY_MODE,
+    LocalReadinessEvidence,
+    LocalReadinessState,
+    build_capabilities_v1,
+    remediation_messages,
+)
 from .vectors import cosine_similarity
 from .workspace import WorkspaceConfig
 
@@ -151,6 +161,10 @@ ANSWERABILITY_QUERY_INSTRUCTION = (
 _PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 _EMBEDDER_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
+_QWEN3_EMBEDDING_IDENTITY = re.compile(
+    r"ollama:qwen3-embedding:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}:"
+    r"dimension:[1-9][0-9]*:instruction:[0-9a-f]{64}\Z"
+)
 _TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _TRANSCRIPT_ROLE_LINE = re.compile(
     r"(?im)^[ \t]{0,8}"
@@ -3977,18 +3991,28 @@ class AgentMemory:
         embed: TextEmbedder | Callable[[str], NDArray[np.float64]] | None = None,
         embedder_id: str | None = None,
         profile_lock_timeout_seconds: float = DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS,
+        deployment_mode: str = LOCAL_STAGING_MODE,
     ) -> None:
         profile_name = _validate_profile(profile)
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError("capacity must be a positive integer")
         if capacity <= 0:
             raise ValueError("capacity must be a positive integer")
+        if deployment_mode not in {LOCAL_STAGING_MODE, LOCAL_PRODUCTION_MODE}:
+            raise ValueError(
+                "deployment_mode must be local-staging or local-production"
+            )
 
         base = (
             default_state_dir() if state_dir is None else Path(state_dir).expanduser()
         )
         self.profile_dir = _secure_directory(base / profile_name)
         self._embedder = _coerce_embedder(embed, embedder_id)
+        self._deployment_mode = deployment_mode
+        # Positive evidence is populated only by reviewed custody, artifact,
+        # recovery, and host-boundary verifiers.  RPC input and environment
+        # variables must never be able to self-assert these fields.
+        self._readiness_evidence = LocalReadinessEvidence()
         self._lease = _ProfileWriterLease(
             self.profile_dir / "profile-lock.db",
             profile_lock_timeout_seconds,
@@ -5040,6 +5064,48 @@ class AgentMemory:
             "physical_erasure_guaranteed": False,
         }
 
+    @property
+    def deployment_mode(self) -> str:
+        """Return the explicitly configured local deployment class."""
+
+        return self._deployment_mode
+
+    def capabilities_v1(self) -> dict[str, Any]:
+        """Return readiness diagnostics without changing preflight authority."""
+
+        capabilities = self.doctor().get("capabilities_v1")
+        if not isinstance(capabilities, dict):
+            raise RuntimeError("capabilities_v1 report is unavailable")
+        return dict(capabilities)
+
+    def assert_operational_mode(self) -> None:
+        """Block an explicitly requested but unqualified production boundary."""
+
+        if self._deployment_mode != LOCAL_PRODUCTION_MODE:
+            return
+        capabilities = self.capabilities_v1()
+        if capabilities.get("local_production_ready") is True:
+            return
+        codes = capabilities.get("remediation_codes", [])
+        bounded = ",".join(str(code) for code in codes[:16])
+        raise RuntimeError(
+            "local-production readiness is blocked"
+            + (f" ({bounded})" if bounded else "")
+        )
+
+    def _profile_access_verified(self) -> bool:
+        """Observe profile ownership and owner-only access without repairing it."""
+
+        return _profile_access_is_owner_only(self.profile_dir)
+
+    def _embedding_identity_verified(self) -> bool:
+        return bool(
+            self._embedder.semantic
+            and self._embedder.name == "ollama"
+            and self._embedder.model.startswith("qwen3-embedding:")
+            and _QWEN3_EMBEDDING_IDENTITY.fullmatch(self._embedder.identity)
+        )
+
     def doctor(self) -> dict[str, Any]:
         capability = self.oracle.capability_report().as_dict()
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
@@ -5086,18 +5152,47 @@ class AgentMemory:
         rotation_ready = (
             all_layers_shielded and quarantine_count == 0 and unindexed_count == 0
         )
-        healthy = (
+        profile_access_verified = self._profile_access_verified()
+        implementation_healthy = (
             scoped
             and all_layers_shielded
             and self._restored_on_startup
             and quarantine_count == 0
             and unindexed_count == 0
+            and profile_access_verified
         )
+        effective_mode = self._deployment_mode if scoped else LEGACY_MIGRATION_MODE
+        key_migration_complete = rotation_state is None or (
+            rotation_state["state"] == "verified" and rotation_remaining == 0
+        )
+        capabilities_v1 = build_capabilities_v1(
+            LocalReadinessState(
+                configured_mode=effective_mode,
+                implementation_healthy=implementation_healthy,
+                at_rest_encrypted=all_layers_shielded,
+                protected_semantic_state=(all_layers_shielded and unindexed_count == 0),
+                embedding_identity_verified=self._embedding_identity_verified(),
+                profile_access_verified=profile_access_verified,
+                reconciliation_backlog=len(self._payloads.pending_ids()),
+                quarantined_records=quarantine_count,
+                plaintext_fallback_attempts=0,
+                key_migration_complete=key_migration_complete,
+                model_available=True,
+                evidence=self._readiness_evidence,
+            )
+        )
+        local_production_ready = bool(capabilities_v1["local_production_ready"])
+        operational_healthy = implementation_healthy and (
+            effective_mode != LOCAL_PRODUCTION_MODE or local_production_ready
+        )
+        remediation_codes = list(capabilities_v1.get("remediation_codes", []))
         return {
-            "adapter_ready": healthy,
-            "mode": "local-staging" if scoped else "legacy-migration-only",
-            "local_protection_ready": healthy,
-            "production_ready": False,
+            "adapter_ready": operational_healthy,
+            "mode": effective_mode,
+            "crypto_environment": self.oracle.environment,
+            "local_protection_ready": operational_healthy,
+            "local_production_ready": local_production_ready,
+            "production_ready": capabilities_v1["production_ready"],
             "profile": self.profile_dir.name,
             "protection_policy": "required",
             "security_schema": self._payloads.security_schema,
@@ -5108,8 +5203,8 @@ class AgentMemory:
             "payload_count": len(self._payloads),
             "active_count": len(self.oracle.workspace.vines),
             "archived_count": len(self.oracle.index),
-            "key_owner_only": True,
-            "store_permissions": "valid",
+            "key_owner_only": profile_access_verified,
+            "store_permissions": ("valid" if profile_access_verified else "invalid"),
             "writer_serialization": "profile-sqlite-lease",
             "recovered_incomplete_lifecycle_records": (
                 self._recovered_lifecycle_orphans
@@ -5130,7 +5225,9 @@ class AgentMemory:
                 "live_refresh_wired": all_layers_shielded,
                 "preflight_receipt_wired": preflight_authority_id is not None,
                 "rotation_ready": rotation_ready,
-                "healthy": healthy,
+                "implementation_healthy": implementation_healthy,
+                "local_production_ready": local_production_ready,
+                "healthy": operational_healthy,
             },
             "rotation": {
                 "state": "idle" if rotation_state is None else rotation_state["state"],
@@ -5144,6 +5241,8 @@ class AgentMemory:
             "failed_decryptions": quarantine_count,
             "authenticated_deletion_records": self._payloads.tombstone_count(),
             "plaintext_fallback_attempts": 0,
+            "capabilities_v1": capabilities_v1,
+            "readiness_remediation": remediation_messages(remediation_codes),
             "memory_layers": {
                 "contract": MEMORY_CONTRACT_SCHEMA,
                 "semantic_layers": [layer.value for layer in MemoryLayer],
@@ -5221,7 +5320,12 @@ class AgentMemory:
                         "the adapter is not healthy until it is reconciled."
                     ]
                 ),
-                "AES-GCM local staging is not the production enclave profile.",
+                (
+                    "Host-trusted local production is not the attested enclave "
+                    "production profile."
+                    if local_production_ready
+                    else "AES-GCM local staging is not a qualified production profile."
+                ),
                 "Python cannot guarantee complete in-process plaintext zeroization.",
             ],
         }
@@ -5716,13 +5820,46 @@ class AlwaysAvailableMemory:
     def reindex(self) -> dict[str, Any]:
         raise RuntimeError("reindex is unavailable in read-only always-available mode")
 
+    def capabilities_v1(self) -> dict[str, Any]:
+        capabilities = self.doctor().get("capabilities_v1")
+        if not isinstance(capabilities, dict):
+            raise RuntimeError("capabilities_v1 report is unavailable")
+        return dict(capabilities)
+
     def doctor(self) -> dict[str, Any]:
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
         layer_counts = self._payloads.memory_contract_counts()
+        quarantine_count = self._payloads.quarantine_count()
+        all_records_shielded = self._payloads.metadata_protected and sum(
+            layer_counts.values()
+        ) == len(self._payloads)
+        rotation_state = self._keyring.rotation_state
+        profile_access_verified = _profile_access_is_owner_only(self.profile_dir)
+        capabilities_v1 = build_capabilities_v1(
+            LocalReadinessState(
+                configured_mode=OFFLINE_READ_ONLY_MODE,
+                implementation_healthy=(all_records_shielded and quarantine_count == 0),
+                at_rest_encrypted=all_records_shielded,
+                protected_semantic_state=(
+                    all_records_shielded and unindexed_count == 0
+                ),
+                embedding_identity_verified=False,
+                profile_access_verified=profile_access_verified,
+                reconciliation_backlog=0,
+                quarantined_records=quarantine_count,
+                plaintext_fallback_attempts=0,
+                key_migration_complete=(
+                    rotation_state is None or rotation_state["state"] == "verified"
+                ),
+                model_available=False,
+            )
+        )
         return {
             "adapter_ready": True,
             "mode": "always-available-read-only",
+            "mode_alias": OFFLINE_READ_ONLY_MODE,
             "local_protection_ready": False,
+            "local_production_ready": False,
             "production_ready": False,
             "degraded": True,
             "degraded_reason": self.reason,
@@ -5733,15 +5870,18 @@ class AlwaysAvailableMemory:
             "key_id": (
                 self._keyring.active_key_id if self._keyring is not None else "legacy"
             ),
-            "key_owner_only": True,
+            "key_owner_only": profile_access_verified,
             "semantic_available": False,
             "writes_available": False,
             "lifecycle_mutation_available": False,
+            "capabilities_v1": capabilities_v1,
+            "readiness_remediation": remediation_messages(
+                list(capabilities_v1.get("remediation_codes", []))
+            ),
             "memory_layers": {
                 "contract": MEMORY_CONTRACT_SCHEMA,
                 "semantic_layers": [layer.value for layer in MemoryLayer],
-                "all_records_shielded": sum(layer_counts.values())
-                == len(self._payloads),
+                "all_records_shielded": all_records_shielded,
                 "counts": layer_counts,
                 "lifecycle_mutation_available": False,
                 "layer_filtering": "authenticated-no-score-rewrite",
@@ -5758,7 +5898,7 @@ class AlwaysAvailableMemory:
                 "automatic_content_rewriting": False,
                 "live_refresh": "unavailable-read-only",
             },
-            "quarantined_records": self._payloads.quarantine_count(),
+            "quarantined_records": quarantine_count,
             "retrieval": {
                 "strategy": "encrypted-keyed-predicate-v1",
                 "protected_multivector_count": indexed_count,
@@ -6585,6 +6725,36 @@ def _validate_profile(value: str) -> str:
     if value in {".", ".."}:
         raise ValueError("profile must not be a relative path marker")
     return value
+
+
+def _profile_access_is_owner_only(profile_dir: Path) -> bool:
+    """Observe the current profile tree without repairing access controls."""
+
+    try:
+        _reject_symlink_components(profile_dir.absolute())
+        if os.name == "nt":
+            _windows_verify_private_directory(profile_dir)
+            return True
+        getuid = getattr(os, "getuid", None)
+        if not callable(getuid):
+            return False
+        expected_uid = int(getuid())
+        for candidate in (profile_dir, *profile_dir.rglob("*")):
+            information = candidate.lstat()
+            if (
+                stat.S_ISLNK(information.st_mode)
+                or int(information.st_uid) != expected_uid
+                or stat.S_IMODE(information.st_mode) & 0o077
+            ):
+                return False
+            if candidate.is_dir():
+                if not stat.S_ISDIR(information.st_mode):
+                    return False
+            elif not stat.S_ISREG(information.st_mode):
+                return False
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _secure_directory(path: Path) -> Path:

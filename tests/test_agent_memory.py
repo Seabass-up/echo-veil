@@ -1535,6 +1535,11 @@ def test_always_available_layer_is_read_only_explicit_and_conservative(
         assert context["evidence"][0]["vine_id"] == created["vine_id"]
         assert context["evidence"][0]["query_scored"] is False
         assert doctor["mode"] == "always-available-read-only"
+        assert doctor["mode_alias"] == "offline-read-only"
+        assert doctor["capabilities_v1"]["local_production_ready"] is False
+        assert doctor["capabilities_v1"]["production_ready"] is False
+        assert doctor["capabilities_v1"]["protection_tier"] == "offline-read-only"
+        assert "EV-MODEL-UNAVAILABLE" in doctor["capabilities_v1"]["remediation_codes"]
         assert doctor["writes_available"] is False
         assert doctor["retrieval"]["candidate_limit"] == 900
         assert doctor["retrieval"]["competing_memory"] == (
@@ -2480,6 +2485,7 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
 
     assert report["adapter_ready"] is True
     assert report["mode"] == "local-staging"
+    assert report["crypto_environment"] == "staging"
     assert report["profile"] == "default"
     assert "profile_dir" not in report
     assert report["key_owner_only"] is True
@@ -2501,10 +2507,13 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
         "live_refresh_wired": True,
         "preflight_receipt_wired": True,
         "rotation_ready": True,
+        "implementation_healthy": True,
+        "local_production_ready": False,
         "healthy": True,
     }
     assert report["quarantined_records"] == 0
     assert report["local_protection_ready"] is True
+    assert report["local_production_ready"] is False
     assert report["production_ready"] is False
     assert report["store_permissions"] == "valid"
     assert report["reconciliation_backlog"] == 0
@@ -2538,7 +2547,64 @@ def test_agent_memory_doctor_reports_local_boundary(tmp_path: Path) -> None:
         "contextual_logic",
     ]
     assert report["capability_report"]["overall_status"] == "blocked"
-    assert any("not the production enclave" in item for item in report["limitations"])
+    capabilities = report["capabilities_v1"]
+    assert capabilities["implementation_healthy"] is True
+    assert capabilities["local_production_ready"] is False
+    assert capabilities["production_ready"] is False
+    assert capabilities["protection_tier"] == "local-staging"
+    assert capabilities["key_custody"] == "file-v1"
+    assert "EV-KEY-CUSTODY-UNQUALIFIED" in capabilities["remediation_codes"]
+    assert report["readiness_remediation"]["EV-KEY-CUSTODY-UNQUALIFIED"]
+    assert report["local_production_ready"] == capabilities["local_production_ready"]
+    assert report["production_ready"] == capabilities["production_ready"]
+    assert set(report["readiness_remediation"]) == set(
+        capabilities["remediation_codes"]
+    )
+    assert any(
+        "not a qualified production profile" in item for item in report["limitations"]
+    )
+
+
+def test_explicit_local_production_never_downgrades_to_staging(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, deployment_mode="local-production") as memory:
+        report = dispatch(memory, "doctor", {})
+        capabilities = dispatch(memory, "capabilities_v1", {})
+
+        assert report["mode"] == "local-production"
+        assert report["crypto_environment"] == "staging"
+        assert report["readiness"]["implementation_healthy"] is True
+        assert report["adapter_ready"] is False
+        assert report["local_protection_ready"] is False
+        assert capabilities == report["capabilities_v1"]
+        assert capabilities["local_production_ready"] is False
+        assert capabilities["protection_tier"] == "local-production-blocked"
+        with pytest.raises(RuntimeError, match="local-production readiness is blocked"):
+            dispatch(memory, "recall", {"query": "anything"})
+
+
+def test_readiness_observes_broad_profile_permissions_without_repairing(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX mode-bit test")
+    with AgentMemory(tmp_path) as memory:
+        manifest = memory.profile_dir / "keyring.json"
+        manifest.chmod(0o644)
+        try:
+            report = memory.doctor()
+            assert report["adapter_ready"] is False
+            assert report["key_owner_only"] is False
+            assert report["store_permissions"] == "invalid"
+            assert report["capabilities_v1"]["implementation_healthy"] is False
+            assert (
+                "EV-PROFILE-ACCESS-UNVERIFIED"
+                in report["capabilities_v1"]["remediation_codes"]
+            )
+            assert stat.S_IMODE(manifest.stat().st_mode) == 0o644
+        finally:
+            manifest.chmod(0o600)
 
 
 def test_scoped_profile_encrypts_content_topics_vectors_and_scope_binding(

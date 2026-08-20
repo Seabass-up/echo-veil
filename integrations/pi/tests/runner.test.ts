@@ -417,6 +417,16 @@ describe("shared protocol compatibility fixtures", () => {
         (cases.valid_documented_additions as JsonObject).value,
       )?.remediation_codes,
     ).toEqual(["EV-BACKUP-UNVERIFIED"]);
+    expect(
+      parseCapabilitiesV1(
+        (cases.host_trusted_local_ready as JsonObject).value,
+      )?.local_production_ready,
+    ).toBe(true);
+    expect(
+      parseCapabilitiesV1(
+        (cases.attested_enclave_ready as JsonObject).value,
+      )?.production_ready,
+    ).toBe(true);
 
     const missing = structuredClone(
       (cases.missing_required as JsonObject).value,

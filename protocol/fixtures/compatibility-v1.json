@@ -75,6 +75,61 @@
         "schema": "echo-veil-capabilities-v1"
       }
     },
+    "host_trusted_local_ready": {
+      "expected": "accept",
+      "value": {
+        "artifact_verified": true,
+        "at_rest_encrypted": true,
+        "backup_verified": true,
+        "embedding_identity_verified": true,
+        "hardware_isolated": false,
+        "host_boundary_verified": true,
+        "host_compromise_protected": false,
+        "implementation_healthy": true,
+        "key_custody": "macos-secure-enclave-v1",
+        "limitations": [
+          "No hardware-isolated execution boundary is active.",
+          "No remote attestation is active.",
+          "A compromised host account or process can access runtime plaintext."
+        ],
+        "local_production_ready": true,
+        "production_ready": false,
+        "protection_tier": "host-trusted-local",
+        "remediation_codes": [],
+        "remotely_attested": false,
+        "restore_verified": true,
+        "rollback_detection": "local-best-effort",
+        "runtime_plaintext_exposure": "transient-process-memory",
+        "schema": "echo-veil-capabilities-v1"
+      }
+    },
+    "attested_enclave_ready": {
+      "expected": "accept",
+      "value": {
+        "artifact_verified": true,
+        "at_rest_encrypted": true,
+        "backup_verified": true,
+        "embedding_identity_verified": true,
+        "hardware_isolated": true,
+        "host_boundary_verified": true,
+        "host_compromise_protected": true,
+        "implementation_healthy": true,
+        "key_custody": "attested-enclave-v1",
+        "limitations": [],
+        "local_production_ready": false,
+        "production_ready": true,
+        "protection_tier": "attested-enclave",
+        "remediation_codes": [
+          "EV-LOCAL-MODE-NOT-CONFIGURED",
+          "EV-KEY-CUSTODY-UNQUALIFIED"
+        ],
+        "remotely_attested": true,
+        "restore_verified": true,
+        "rollback_detection": "external-monotonic",
+        "runtime_plaintext_exposure": "attested-enclave-boundary",
+        "schema": "echo-veil-capabilities-v1"
+      }
+    },
     "valid_documented_additions": {
       "expected": "accept",
       "value": {
