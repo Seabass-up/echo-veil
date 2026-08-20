@@ -29,6 +29,13 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Made recovery a prerequisite for the first nonempty record-envelope v3
+  activation. The exact backup-v1 manifest now authenticates either an
+  envelope-v2 device-bound recovery set or an envelope-v3 readiness set without
+  changing its field inventory; the serialized receipt-v1 shape also remains
+  unchanged. Migration accepts only a profile-bound, freshly verified v2
+  capability, rejects missing, cross-profile, and stale-count receipts, and
+  never lets pre-migration evidence satisfy v3 backup/restore readiness.
 - Made the authenticated v3 key-manifest feature a one-way write-version floor.
   Record-envelope state now rejects impossible prepared/migrating/verified
   combinations, false verification while v2 data remains, live attempts to

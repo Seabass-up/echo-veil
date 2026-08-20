@@ -59,6 +59,12 @@ exact v1 contracts. Their authority bindings are optional only as values—the
 fields are always present—so a backup made before or after host qualification
 has one stable shape. Changing either field inventory requires a parallel
 successor schema rather than an in-place parser change.
+The manifest's existing authenticated `record_envelope_version` field accepts
+2 for the compulsory device-bound pre-migration recovery set and 3 for the
+post-migration readiness backup. This is a value-level storage distinction,
+not a field or harness-protocol change. The in-process verifier retains that
+selector for authorization, while its serialized v1 receipt keeps the exact
+registered field inventory.
 
 ## Readiness surface
 

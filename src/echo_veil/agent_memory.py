@@ -6142,6 +6142,7 @@ class AgentMemory:
         )
         if (
             verified_backup.key_id != keyring.active_key_id
+            or verified_backup.record_envelope_version != RECORD_ENVELOPE_V3
             or verified_backup.profile_hash
             != profile_hash_for(backup_key, keyring.scope_id)
             or verified_backup.record_count != len(self._payloads)
@@ -6178,9 +6179,13 @@ class AgentMemory:
             "restart_verification_required": True,
         }
 
-    def _backup_key(self) -> bytes:
+    def _backup_key(self, envelope_version: int) -> bytes:
         if self._keyring is None:
             raise RuntimeError("backups require a scoped profile")
+        if envelope_version == RECORD_ENVELOPE_V2:
+            return self._keyring.pre_migration_backup_key(self._keyring.active_key_id)
+        if envelope_version != RECORD_ENVELOPE_V3:
+            raise ValueError("backup record-envelope version is invalid")
         if not self._keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
             raise RuntimeError("backups require record-envelope v3")
         return self._keyring.key_for_envelope(
@@ -6340,10 +6345,25 @@ class AgentMemory:
         if self._keyring.rotation_state is not None:
             raise RuntimeError("backups require a completed key rotation")
         envelope = self._payloads.record_envelope_status()
-        if envelope["migration_state"] != "verified":
-            raise RuntimeError("backups require a verified record-envelope v3 profile")
+        if envelope["migration_state"] == "inactive":
+            envelope_version = RECORD_ENVELOPE_V2
+        elif (
+            envelope["migration_state"] == "verified"
+            and envelope["v2_records"] == 0
+            and envelope["v2_tombstones"] == 0
+        ):
+            envelope_version = RECORD_ENVELOPE_V3
+        else:
+            raise RuntimeError(
+                "backups require an inactive v2 or fully verified v3 profile"
+            )
         if recovery_mode not in {DEVICE_BOUND_RECOVERY, PORTABLE_RECOVERY}:
             raise ValueError("backup recovery mode is invalid")
+        if (
+            envelope_version == RECORD_ENVELOPE_V2
+            and recovery_mode != DEVICE_BOUND_RECOVERY
+        ):
+            raise ValueError("pre-migration backups must be device-bound")
         if recovery_mode == DEVICE_BOUND_RECOVERY and recovery_key is not None:
             raise ValueError("device-bound backup does not accept a recovery key")
         if recovery_mode == PORTABLE_RECOVERY and (
@@ -6399,16 +6419,20 @@ class AgentMemory:
             receipt = BackupArchive.create(
                 destination,
                 sources=sources,
-                profile_key=self._backup_key(),
+                profile_key=self._backup_key(envelope_version),
                 key_id=self._keyring.active_key_id,
                 scope_id=self._keyring.scope_id,
-                key_epoch=self._keyring.key_epoch(self._keyring.active_key_id),
+                key_epoch=(
+                    1
+                    if envelope_version == RECORD_ENVELOPE_V2
+                    else self._keyring.key_epoch(self._keyring.active_key_id)
+                ),
                 generation=generation,
                 rollback_detection=rollback_detection,
                 counts=self._backup_counts(),
                 model_identity=self._embedder.identity,
                 security_contract=self._payloads.security_schema,
-                record_envelope_version=RECORD_ENVELOPE_V3,
+                record_envelope_version=envelope_version,
                 artifact_digest=artifact_digest,
                 host_authority_digest=host_authority_digest,
                 portable_recovery_key=recovery_key,
@@ -6421,7 +6445,8 @@ class AgentMemory:
                 new=generation,
             )
         self._last_verified_backup = receipt
-        self._record_backup_readiness(receipt)
+        if envelope_version == RECORD_ENVELOPE_V3:
+            self._record_backup_readiness(receipt)
         return receipt
 
     def backup_verify(
@@ -6437,8 +6462,13 @@ class AgentMemory:
 
         if self._keyring is None:
             raise RuntimeError("backup verification requires a scoped profile")
-        backup_key = self._backup_key()
-        minimum = self._keyring.monotonic_generation()
+        envelope_version = BackupArchive.inspect_record_envelope_version(archive)
+        backup_key = self._backup_key(envelope_version)
+        minimum = (
+            None
+            if envelope_version == RECORD_ENVELOPE_V2
+            else self._keyring.monotonic_generation()
+        )
         receipt = BackupArchive.verify(
             archive,
             profile_key=(backup_key if recovery_key is None else None),
@@ -6450,7 +6480,7 @@ class AgentMemory:
             minimum_generation=minimum,
         )
         self._last_verified_backup = receipt
-        if record_evidence:
+        if record_evidence and envelope_version == RECORD_ENVELOPE_V3:
             self._assert_storage_writable()
             self._record_backup_readiness(receipt)
         return receipt
@@ -6485,6 +6515,7 @@ class AgentMemory:
 
         if self._keyring is None:
             raise RuntimeError("restore requires a scoped source profile")
+        envelope_version = BackupArchive.inspect_record_envelope_version(archive)
         profile_name = _validate_profile(target_profile)
         target_root = Path(target_state_dir).expanduser().absolute()
         target_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -6493,13 +6524,19 @@ class AgentMemory:
             raise ValueError(
                 "restore target must be separate from the active profile root"
             )
-        minimum = self._keyring.monotonic_generation()
+        minimum = (
+            None
+            if envelope_version == RECORD_ENVELOPE_V2
+            else self._keyring.monotonic_generation()
+        )
         return BackupArchive.restore(
             archive,
             target_root / profile_name,
             scope=self.scope,
             confirm=confirm,
-            profile_key=(self._backup_key() if recovery_key is None else None),
+            profile_key=(
+                self._backup_key(envelope_version) if recovery_key is None else None
+            ),
             recovery_key=recovery_key,
             helper_path=helper_path,
             custody_provider=custody_provider,
@@ -6553,7 +6590,8 @@ class AgentMemory:
                 "logical_counts_reconciled": True,
                 "temporary_profile_removed": True,
             }
-        self._record_restore_readiness(receipt)
+        if receipt.record_envelope_version == RECORD_ENVELOPE_V3:
+            self._record_restore_readiness(receipt)
         return result
 
     def retire_file_key_custody(self, *, confirm: bool = False) -> dict[str, Any]:
@@ -6579,6 +6617,7 @@ class AgentMemory:
         *,
         confirm: bool = False,
         batch_size: int = 100,
+        verified_backup: VerifiedBackup | None = None,
     ) -> dict[str, Any]:
         """Activate or resume the internal dual-read v2-to-v3 migration."""
 
@@ -6602,6 +6641,31 @@ class AgentMemory:
             or not 1 <= batch_size <= 1000
         ):
             raise ValueError("record-envelope batch_size must be between 1 and 1000")
+
+        initial_status = self._payloads.record_envelope_status()
+        if initial_status["migration_state"] == "inactive" and any(
+            self._backup_counts().values()
+        ):
+            from .backup import profile_hash_for
+
+            if not isinstance(verified_backup, VerifiedBackup):
+                raise ValueError(
+                    "nonempty record-envelope migration requires a verified "
+                    "pre-migration backup receipt"
+                )
+            expected_backup_key = self._backup_key(RECORD_ENVELOPE_V2)
+            if (
+                verified_backup.record_envelope_version != RECORD_ENVELOPE_V2
+                or verified_backup.key_id != keyring.active_key_id
+                or not hmac.compare_digest(
+                    verified_backup.profile_hash,
+                    profile_hash_for(expected_backup_key, keyring.scope_id),
+                )
+                or verified_backup.record_count != len(self._payloads)
+            ):
+                raise ValueError(
+                    "verified pre-migration backup does not match the open profile"
+                )
 
         self._payloads.prepare_record_envelope_v3()
         keyring.enable_record_envelope_v3()

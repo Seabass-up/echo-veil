@@ -28,11 +28,16 @@ def _profile_snapshot(root: Path) -> dict[str, tuple[bytes, int, int]]:
 def _v3_profile(state: Path) -> None:
     with AgentMemory(state) as memory:
         memory.remember("operator fixture", "The operator marker is willow nine.")
-        while (
-            memory.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-            != "verified"
-        ):
-            pass
+        pre_migration = memory.backup_create(state / ".pre-v3-backup")
+        while True:
+            result = memory.migrate_record_envelope_v3(
+                confirm=True,
+                batch_size=100,
+                verified_backup=pre_migration,
+            )
+            pre_migration = None
+            if result["state"] == "verified":
+                break
 
 
 def _artifact_receipt() -> local_authority.VerifiedInstalledArtifact:
@@ -201,6 +206,45 @@ def test_backup_restore_operator_commands_round_trip(
         assert recalled["results"][0]["payload"] == (
             "The operator marker is willow nine."
         )
+
+
+def test_repair_migration_requires_and_consumes_a_verified_v2_backup(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    archive = tmp_path / "pre-v3-backup"
+    common = ["--state-dir", str(state), "--embedder", "hashing"]
+    with AgentMemory(state) as memory:
+        memory.remember("operator migration", "Recovery must precede activation.")
+
+    assert agent_cli.main([*common, "--confirm", "repair", "migrate-v3"]) == 1
+    blocked = json.loads(capsys.readouterr().err)
+    assert "pre-migration backup" in blocked["message"]
+
+    assert (
+        agent_cli.main([*common, "--destination", str(archive), "backup", "create"])
+        == 0
+    )
+    created = json.loads(capsys.readouterr().out)
+    assert created["schema"] == "echo-veil-backup-receipt-v1"
+
+    assert (
+        agent_cli.main(
+            [
+                *common,
+                "--archive",
+                str(archive),
+                "--confirm",
+                "repair",
+                "migrate-v3",
+            ]
+        )
+        == 0
+    )
+    migrated = json.loads(capsys.readouterr().out)
+    assert migrated["state"] == "verified"
+    assert migrated["preflight_protocol"] == "preflight_v2"
 
 
 def test_artifact_qualification_is_confirmed_path_free_and_reverified(

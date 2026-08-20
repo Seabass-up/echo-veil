@@ -49,7 +49,7 @@ def test_native_secure_enclave_portable_restore_and_rollback_detection(
     replacement_state = tmp_path / "replacement"
     source_profile = source_state / "default"
     replacement_profile = replacement_state / "restored"
-    pre_migration = tmp_path / "pre-migration"
+    custody_backup = tmp_path / "custody-backup"
     first_backup = tmp_path / "portable-first"
     second_backup = tmp_path / "portable-second"
     try:
@@ -58,12 +58,17 @@ def test_native_secure_enclave_portable_restore_and_rollback_detection(
                 "native custody fixture",
                 "The native replacement marker is quartz harbor nineteen.",
             )
-            while (
-                memory.migrate_record_envelope_v3(confirm=True, batch_size=10)["state"]
-                != "verified"
-            ):
-                pass
-            verified = memory.backup_create(pre_migration)
+            pre_migration = memory.backup_create(tmp_path / "record-envelope-v2-backup")
+            while True:
+                result = memory.migrate_record_envelope_v3(
+                    confirm=True,
+                    batch_size=10,
+                    verified_backup=pre_migration,
+                )
+                pre_migration = None
+                if result["state"] == "verified":
+                    break
+            verified = memory.backup_create(custody_backup)
             migration = memory.migrate_key_custody(
                 provider="macos-secure-enclave-v1",
                 helper_path=helper,

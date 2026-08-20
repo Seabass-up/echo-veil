@@ -122,6 +122,11 @@
       "maximum_bytes": 524288,
       "optional_fields": [],
       "producer": "echo_veil.backup.BackupArchive",
+      "semantic_invariants": [
+        "record-envelope-version-is-two-or-three",
+        "version-two-recovery-is-device-bound",
+        "version-two-recovery-never-satisfies-local-readiness"
+      ],
       "required_fields": [
         "artifact_digest",
         "backup_id",
@@ -158,6 +163,10 @@
       "maximum_bytes": 8192,
       "optional_fields": [],
       "producer": "echo_veil.backup.BackupArchive",
+      "semantic_invariants": [
+        "wire-shape-omits-internal-record-envelope-selector",
+        "only-version-three-receipts-may-enter-readiness-evidence"
+      ],
       "required_fields": [
         "artifact_digest",
         "backup_id",

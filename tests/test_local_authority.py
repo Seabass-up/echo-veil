@@ -61,11 +61,22 @@ def _artifact_receipt(
 
 
 def _enable_v3(memory: AgentMemory) -> None:
-    while (
-        memory.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-        != "verified"
-    ):
-        pass
+    pre_migration = (
+        memory.backup_create(
+            memory.profile_dir.parent / f".{memory.profile_dir.name}-pre-v3"
+        )
+        if any(memory._backup_counts().values())
+        else None
+    )
+    while True:
+        result = memory.migrate_record_envelope_v3(
+            confirm=True,
+            batch_size=100,
+            verified_backup=pre_migration,
+        )
+        pre_migration = None
+        if result["state"] == "verified":
+            return
 
 
 def test_runtime_host_identifier_is_bounded_and_canonical(tmp_path: Path) -> None:

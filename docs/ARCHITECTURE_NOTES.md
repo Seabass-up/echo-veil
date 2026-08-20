@@ -293,6 +293,14 @@ Deployment-provided:
   Oracle write can occur. The marker intentionally makes a pre-v0.8 core fail
   closed; rollback requires a verified pre-migration backup.
 
+  Nonempty activation is recovery-first: the v2 archive is created and fully
+  authenticated before the migration API accepts its non-serializable verifier
+  capability. Operator RPC clients cannot manufacture that capability from a
+  boolean. The archive manifest already authenticates its envelope version, so
+  v2 and v3 backups retain one exact field inventory; the serialized v1 receipt
+  also retains its exact shape. V2 recovery never counts as v3 backup/restore
+  readiness.
+
   This does not create a preflight v3. The RPC remains `preflight_v2`, the
   signed receipt remains `echo-veil-preflight-v2`, and the runtime, telemetry,
   and evidence-budget contracts retain their v1 identifiers. V3 improves

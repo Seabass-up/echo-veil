@@ -210,7 +210,12 @@ def build_bundle(state_dir: Path) -> dict[str, Any]:
                 f"Protected synthetic compatibility record {index} remains current.",
                 provenance=["qualification:n-minus-one"],
             )
-        mixed = memory.migrate_record_envelope_v3(confirm=True, batch_size=2)
+        pre_migration = memory.backup_create(state_dir / ".pre-v3-backup")
+        mixed = memory.migrate_record_envelope_v3(
+            confirm=True,
+            batch_size=2,
+            verified_backup=pre_migration,
+        )
         if mixed["state"] != "migrating" or mixed["remaining_v2_records"] < 1:
             raise RuntimeError("synthetic profile did not enter a mixed v2/v3 state")
         mixed_bundle = _state_bundle(memory, "mixed-v2-v3")

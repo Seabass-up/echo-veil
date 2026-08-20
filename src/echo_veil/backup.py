@@ -32,6 +32,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ._json import strict_json_loads
+from .record_envelope import (
+    RECORD_ENVELOPE_V2,
+    SUPPORTED_RECORD_ENVELOPES,
+)
 
 BACKUP_SCHEMA = "echo-veil-backup-v1"
 BACKUP_RECEIPT_SCHEMA = "echo-veil-backup-receipt-v1"
@@ -288,6 +292,9 @@ class VerifiedBackup:
     artifact_digest: str | None
     host_authority_digest: str | None
     verified_at: int
+    # Internal verifier capability.  Deliberately omitted from ``as_dict`` so
+    # the exact echo-veil-backup-receipt-v1 wire contract remains unchanged.
+    record_envelope_version: int
 
     def __post_init__(self) -> None:
         if _BACKUP_ID.fullmatch(self.backup_id) is None:
@@ -310,6 +317,8 @@ class VerifiedBackup:
                 raise ValueError(f"{label} is invalid")
         if self.host_authority_digest is not None and self.artifact_digest is None:
             raise ValueError("verified host authority requires an artifact binding")
+        if self.record_envelope_version not in SUPPORTED_RECORD_ENVELOPES:
+            raise ValueError("verified record-envelope version is invalid")
         for count in (self.generation, self.record_count, self.verified_at):
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise ValueError("verified backup count is invalid")
@@ -390,8 +399,13 @@ class BackupArchive:
             or key_epoch <= 0
         ):
             raise ValueError("backup key epoch must be positive")
-        if record_envelope_version != 3:
+        if record_envelope_version not in SUPPORTED_RECORD_ENVELOPES:
             raise ValueError("backup record-envelope version is invalid")
+        if (
+            record_envelope_version == RECORD_ENVELOPE_V2
+            and rollback_detection != "none"
+        ):
+            raise ValueError("pre-migration backup cannot claim rollback detection")
         if security_contract != "scoped-v2":
             raise ValueError("backup security contract is invalid")
         try:
@@ -413,6 +427,11 @@ class BackupArchive:
             if portable_recovery_key is not None
             else DEVICE_BOUND_RECOVERY
         )
+        if (
+            record_envelope_version == RECORD_ENVELOPE_V2
+            and recovery_mode != DEVICE_BOUND_RECOVERY
+        ):
+            raise ValueError("pre-migration backups must be device-bound")
         if portable_recovery_key is not None:
             if len(portable_recovery_key) != 32 or portable_root_envelope is None:
                 raise ValueError("portable recovery material is incomplete")
@@ -665,12 +684,20 @@ class BackupArchive:
             raise BackupError("backup recovery mode is invalid")
         if decoded["rollback_detection"] not in _ROLLBACK_TIERS:
             raise BackupError("backup rollback-detection tier is invalid")
+        record_envelope_version = decoded["record_envelope_version"]
         if (
-            decoded["security_contract"] != "scoped-v2"
-            or decoded["record_envelope_version"] != 3
+            isinstance(record_envelope_version, bool)
+            or not isinstance(record_envelope_version, int)
+            or record_envelope_version not in SUPPORTED_RECORD_ENVELOPES
+            or decoded["security_contract"] != "scoped-v2"
             or decoded["wal_state"] != "captured-in-consistent-sqlite-snapshots"
         ):
             raise BackupError("backup security contract is invalid")
+        if (
+            record_envelope_version == RECORD_ENVELOPE_V2
+            and decoded["rollback_detection"] != "none"
+        ):
+            raise BackupError("pre-migration backup cannot claim rollback detection")
         _model_identity(decoded["model_identity"])
         artifact_digest = _optional_digest(
             decoded["artifact_digest"],
@@ -698,6 +725,8 @@ class BackupArchive:
             if portable_envelope is not None:
                 raise BackupError("device-bound backup has portable recovery data")
         else:
+            if record_envelope_version == RECORD_ENVELOPE_V2:
+                raise BackupError("pre-migration backups must be device-bound")
             envelope = _decode_b64(
                 portable_envelope,
                 label="portable root envelope",
@@ -707,6 +736,25 @@ class BackupArchive:
         if _canonical(decoded) != raw:
             raise BackupError("backup manifest is not canonical")
         return decoded, raw
+
+    @staticmethod
+    def inspect_record_envelope_version(archive: Path) -> int:
+        """Return one bounded manifest selector before authentication.
+
+        Callers may use this only to select the corresponding profile key.  The
+        complete manifest and every archive member still require MAC/AEAD
+        verification before the returned version becomes trusted.
+        """
+
+        manifest, _raw = BackupArchive._load_manifest(archive)
+        version = manifest["record_envelope_version"]
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in SUPPORTED_RECORD_ENVELOPES
+        ):
+            raise BackupError("backup record-envelope version is invalid")
+        return version
 
     @staticmethod
     def verify(
@@ -952,6 +1000,7 @@ class BackupArchive:
                     label="backup host-authority digest",
                 ),
                 verified_at=int(time.time()),
+                record_envelope_version=int(manifest["record_envelope_version"]),
             )
         except Exception:
             shutil.rmtree(output_root, ignore_errors=True)
@@ -984,6 +1033,13 @@ class BackupArchive:
             uri=True,
         )
         try:
+            record_envelope_version = manifest.get("record_envelope_version")
+            if (
+                isinstance(record_envelope_version, bool)
+                or not isinstance(record_envelope_version, int)
+                or record_envelope_version not in SUPPORTED_RECORD_ENVELOPES
+            ):
+                raise BackupError("backup record-envelope version is invalid")
             records = int(
                 payload_connection.execute("SELECT COUNT(*) FROM payloads").fetchone()[
                     0
@@ -992,6 +1048,11 @@ class BackupArchive:
             contracts = int(
                 payload_connection.execute(
                     "SELECT COUNT(*) FROM adapter_metadata WHERE key LIKE 'memory_contract:%'"
+                ).fetchone()[0]
+            )
+            conflicts = int(
+                payload_connection.execute(
+                    "SELECT COUNT(*) FROM payloads WHERE superseded_by IS NOT NULL"
                 ).fetchone()[0]
             )
             vectors = int(
@@ -1009,9 +1070,38 @@ class BackupArchive:
                     "SELECT COUNT(*) FROM deletion_tombstones"
                 ).fetchone()[0]
             )
+            for table in (
+                "payloads",
+                "memory_vectors",
+                "memory_terms",
+                "deletion_tombstones",
+            ):
+                columns = {
+                    str(row[1])
+                    for row in payload_connection.execute(
+                        f"PRAGMA table_xinfo({table})"  # nosec B608
+                    ).fetchall()
+                }
+                if "format_version" not in columns:
+                    if record_envelope_version == RECORD_ENVELOPE_V2:
+                        continue
+                    raise BackupError(
+                        "backup record-envelope version does not match its schema"
+                    )
+                versions = {
+                    int(row[0])
+                    for row in payload_connection.execute(
+                        f"SELECT DISTINCT format_version FROM {table}"  # nosec B608
+                    ).fetchall()
+                }
+                if not versions.issubset({record_envelope_version}):
+                    raise BackupError(
+                        "backup record-envelope version does not match its records"
+                    )
         finally:
             payload_connection.close()
         observed = {
+            "conflicts": conflicts,
             "contracts": contracts,
             "records": records,
             "terms": terms,

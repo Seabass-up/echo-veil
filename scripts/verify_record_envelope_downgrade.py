@@ -64,9 +64,11 @@ def run(legacy_source: Path) -> dict[str, object]:
                 "The activated profile must not open through a v0.7 core.",
                 provenance=["qualification:cross-version"],
             )
+            pre_migration = memory.backup_create(Path(temporary) / "pre-v3-backup")
             result = memory.migrate_record_envelope_v3(
                 confirm=True,
                 batch_size=100,
+                verified_backup=pre_migration,
             )
             if result["state"] != "verified":
                 raise RuntimeError("record-envelope v3 qualification did not converge")

@@ -184,6 +184,15 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert contracts["host_boundary_v1"]["wire_schema"] == HOST_BOUNDARY_SCHEMA
     assert contracts["backup_manifest_v1"]["wire_schema"] == BACKUP_SCHEMA
     assert contracts["backup_receipt_v1"]["wire_schema"] == BACKUP_RECEIPT_SCHEMA
+    assert set(contracts["backup_manifest_v1"]["semantic_invariants"]) == {
+        "record-envelope-version-is-two-or-three",
+        "version-two-recovery-is-device-bound",
+        "version-two-recovery-never-satisfies-local-readiness",
+    }
+    assert set(contracts["backup_receipt_v1"]["semantic_invariants"]) == {
+        "wire-shape-omits-internal-record-envelope-selector",
+        "only-version-three-receipts-may-enter-readiness-evidence",
+    }
     assert contracts["capabilities_v1"]["wire_schema"] == CAPABILITIES_SCHEMA
     assert contracts["record_envelope_v3"]["status"] == ("dual-read-explicit-write")
     assert contracts["capabilities_v1"]["status"] == "emitted-rpc-only"
