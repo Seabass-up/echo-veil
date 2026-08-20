@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:75ca92f8b4fe7412bed2cce226d0db2d88c73faca16b2bbbf2cc54c1075e5901",
+  "shared_source_digest": "sha256:600d21355dc05deb17609dc6e71a248dd9e64631454c5092d2b3fcdae8ea8984",
   "hosts": [
     {
       "id": "algo-cli",
@@ -138,7 +138,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:4f7b7e063560f41f78840d7090b77118d0af5f746dcd936931575dcd1d746c66",
+      "source_digest": "sha256:e568f3f07cc670bdd7774064d3685868646c109766e9f3c690f2a1bbd5e2fb89",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -175,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:fe0fe1198b4709be40c5aa83f756d67c301be3fbb74c415daac356f26a7a6c64",
+      "source_digest": "sha256:517657587b222c962163e662104f10c91ab3157c96272b859536b23c883363e4",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -246,7 +246,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:04b30f9d7043d430af12183a4fc6a30a6830303b3c0ed6a95397d0d4d077f500",
+      "source_digest": "sha256:1955d0e9fdf4f5400541ca62e6a89992106e778286fee2c62ccd02bc83fe07f1",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
