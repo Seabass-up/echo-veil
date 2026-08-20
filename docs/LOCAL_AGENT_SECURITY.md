@@ -276,6 +276,25 @@ Losing a referenced key is a hard initialization error. It is never reported
 as an empty profile. Retirement cannot guarantee physical erasure of key bytes
 from snapshots, backups, storage media, or process memory.
 
+Migrating from `file-v1` to the reviewed macOS custody provider is a separate
+two-process operation. The migration process may import and verify the root but
+must retain the owner-only file copy. Activation writes a root-authenticated
+receipt bound to a random process-instance nonce. Reopening an object in that
+same process does not satisfy the gate: file custody can be retired only after
+a different process has reopened the profile through the pinned helper,
+derived the expected purpose keys, and completed protected recall. Retirement
+is restart-resumable if descriptor publication succeeds before raw-file
+removal. This prevents one compromised or faulty migration process from both
+installing and immediately destroying the only independently recoverable root
+copy.
+
+`local-best-effort` rollback detection advances a separately held custody
+generation after each authenticated backup. Once a newer generation exists,
+verification, dry-run restore, and actual restore reject an older snapshot.
+This detects stale restores only while the device-bound custody item and its
+generation remain trustworthy; it is not equivalent to an external monotonic
+authority or protection from whole-device rollback.
+
 ## Corruption behavior and diagnostics
 
 Authentication failure on a payload or retrieval vector quarantines that
