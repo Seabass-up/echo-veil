@@ -321,9 +321,11 @@ Harness and storage versions are independent. The signed RPC remains
 `preflight_v2`, its receipt remains `echo-veil-preflight-v2`, and the runtime,
 evidence-budget, and telemetry contracts retain their existing v1 identifiers.
 The older unsigned `preflight` RPC remains a registered compatibility bridge
-for installed harnesses that still consume it. A future record-envelope v3 is
-internal to Echo Veil: no harness may parse it, infer it from preflight, or
-require it for turn authorization.
+for installed harnesses that still consume it. Record-envelope v3 is an
+internal, dual-read storage format: no harness may parse it, infer it from
+preflight, or require it for turn authorization. A profile may contain v2 and
+v3 records while an unchanged v2 harness continues to consume exactly the
+same preflight-v2 response and receipt.
 
 The authoritative field inventory is `protocol/registry-v1.json`; every
 language adapter is checked against `protocol/fixtures/compatibility-v1.json`.
@@ -331,6 +333,29 @@ Signed objects use exact fields and reject unknown versions. New readiness data
 belongs to the separate optional `capabilities_v1` surface, never to an
 existing signed receipt. Capabilities can inform diagnostics but cannot
 authorize a model turn.
+
+### Internal record-envelope migration
+
+Existing profiles continue writing envelope v2 until an operator explicitly
+calls `migrate_record_envelope_v3(confirm=True, batch_size=...)`. This
+operator-only RPC is intentionally absent from the agent MCP tool catalog. The
+first call installs a persistent downgrade barrier, enables v3 writes, and
+converts at most the requested number of lifecycle anchors, records, and
+authenticated tombstones. Repeating the call resumes the migration until its
+state is `verified`; unmigrated v2 records remain readable throughout.
+
+Envelope v3 derives independent keys for payloads, vectors, semantic
+contracts, topic and lexical tokens, content digests, record-integrity tags,
+tombstones, LSH metadata, preflight-key protection, and backup manifests. Each
+derivation binds the profile scope, opaque scope ID, key epoch, purpose,
+envelope version, and algorithm. The database security contract remains
+`scoped-v2`, and preflight remains `echo-veil-preflight-v2`.
+
+Back up the profile before activation. Once the marker is present, cores that
+do not understand record-envelope v3 must fail closed. Downgrade recovery is a
+verified pre-migration restore, not removal of the marker or manual database
+editing. Keep the v0.8 dual-reader available until migration, restart, recall,
+and key rotation have all been verified.
 
 `capabilities_v1` is now available as an RPC-only action. It separately reports
 implementation health, host-trusted local-production readiness, and attested
@@ -871,6 +896,11 @@ secrets, raw protected vectors, proofs, or attestation credentials.
   it reports `verified`. Retire the previous key only after record-reference
   verification and an explicit backup-accounting confirmation. Legacy-v1
   profiles must migrate to a fresh scoped-v2 profile first.
+- Before enabling record-envelope v3, create and verify a recoverable profile
+  backup. Run the confirmed migration in bounded batches until it reports
+  `verified`; do not infer progress from the preflight schema, which remains
+  v2. An interrupted `prepared` or `migrating` state is resumed by the v0.8
+  dual-reader before new writes.
 - Keep one embedding model/version and dimension per Oracle/store. Migrate to a
   new profile when changing dimensions or model identity; use only the reviewed
   hashing-to-Qwen migration above for legacy adapter profiles.

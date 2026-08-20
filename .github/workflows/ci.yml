@@ -56,6 +56,38 @@ jobs:
       - name: Test
         run: uv run --locked pytest -q
 
+  record-envelope-compatibility:
+    name: Record-envelope downgrade barrier
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out current source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned v0.7.0 core
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: compatibility/v0.7.0
+          ref: e94be9e649048273ab74eb1150e65ac9481596d9
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked Python environment
+        run: uv sync --locked --extra dev --extra enclave-origin
+
+      - name: Verify v0.7 fails closed on a v3 profile
+        run: >-
+          uv run --locked python scripts/verify_record_envelope_downgrade.py
+          --legacy-source compatibility/v0.7.0
+
   package:
     name: Reproducible package
     runs-on: ubuntu-latest

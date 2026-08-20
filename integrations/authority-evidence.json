@@ -16,7 +16,7 @@
     "src/echo_veil/preflight_receipt.py",
     "src/echo_veil/protocol_compat.py"
   ],
-  "shared_source_digest": "sha256:c5400a814ca315a947abf88e1817a8326416c5d3658e1d1a9844ba2cfad74d70",
+  "shared_source_digest": "sha256:5a869b685a8a939d385bf32a33053cba3ad610ac24668f2154319fd63a7c0fb3",
   "hosts": [
     {
       "id": "algo-cli",

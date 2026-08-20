@@ -526,6 +526,7 @@ class SQLiteStore:
         source_key_id: str,
         limit: int,
         transform: Callable[[object], object],
+        source_schema_version: int | None = None,
     ) -> dict[str, int]:
         """Re-encrypt a bounded set of protected lifecycle anchors.
 
@@ -571,6 +572,11 @@ class SQLiteStore:
             key = str(key_raw)
             decoded = self._loader(bytes(payload_raw))
             if getattr(decoded, "key_id", None) != source_key_id:
+                continue
+            if (
+                source_schema_version is not None
+                and getattr(decoded, "schema_version", None) != source_schema_version
+            ):
                 continue
             record_id = getattr(decoded, "record_id", None)
             if record_id is not None and record_id != key:
@@ -631,10 +637,18 @@ class SQLiteStore:
                     raise
             migrated += 1
 
-        remaining = self.count_protected_payloads_for_key(source_key_id)
+        remaining = self.count_protected_payloads_for_key(
+            source_key_id,
+            schema_version=source_schema_version,
+        )
         return {"migrated": migrated, "remaining": remaining}
 
-    def count_protected_payloads_for_key(self, key_id: str) -> int:
+    def count_protected_payloads_for_key(
+        self,
+        key_id: str,
+        *,
+        schema_version: int | None = None,
+    ) -> int:
         """Count distinct lifecycle records still bound to ``key_id``."""
 
         if not isinstance(key_id, str) or not key_id.strip():
@@ -655,7 +669,10 @@ class SQLiteStore:
         matching: set[str] = set()
         for key_raw, payload_raw in rows:
             decoded = self._loader(bytes(payload_raw))
-            if getattr(decoded, "key_id", None) == key_id:
+            if getattr(decoded, "key_id", None) == key_id and (
+                schema_version is None
+                or getattr(decoded, "schema_version", None) == schema_version
+            ):
                 matching.add(str(key_raw))
         return len(matching)
 

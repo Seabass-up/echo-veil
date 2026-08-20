@@ -169,7 +169,7 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert contracts["broker_latency_v1"]["wire_schema"] == BROKER_TELEMETRY_SCHEMA
     assert contracts["artifact_codex_v1"]["wire_schema"] == CODEX_ARTIFACT_SCHEMA
     assert contracts["capabilities_v1"]["wire_schema"] == CAPABILITIES_SCHEMA
-    assert contracts["record_envelope_v3"]["status"] == "reserved-not-emitted"
+    assert contracts["record_envelope_v3"]["status"] == ("dual-read-explicit-write")
     assert contracts["capabilities_v1"]["status"] == "emitted-rpc-only"
     assert set(contracts["capabilities_v1"]["optional_fields"]) == {
         "generated_at_ms",
@@ -181,6 +181,7 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
         "crypto_environment",
         "local_production_ready",
         "mode_alias",
+        "record_envelope",
         "readiness_remediation",
     }
 

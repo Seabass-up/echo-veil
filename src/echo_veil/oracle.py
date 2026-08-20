@@ -233,6 +233,9 @@ class Oracle:
         self,
         source_key_id: str,
         transform: Callable[[object], object],
+        *,
+        source_schema_version: int | None = None,
+        limit: int | None = None,
     ) -> int:
         """Re-encrypt matching active anchors under the Oracle mutation lock."""
 
@@ -240,6 +243,10 @@ class Oracle:
             raise ValueError("source_key_id must be a non-empty string")
         if not callable(transform):
             raise TypeError("protected-anchor transform must be callable")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("protected-anchor transform limit must be positive")
         changed = 0
         with self._lock:
             for vine in self.workspace.vines:
@@ -247,6 +254,11 @@ class Oracle:
                 if (
                     protected is None
                     or getattr(protected, "key_id", None) != source_key_id
+                    or (
+                        source_schema_version is not None
+                        and getattr(protected, "schema_version", None)
+                        != source_schema_version
+                    )
                 ):
                     continue
                 replacement = transform(protected)
@@ -261,6 +273,8 @@ class Oracle:
                     )
                 vine.protected_anchor = replacement
                 changed += 1
+                if limit is not None and changed >= limit:
+                    break
             if changed:
                 self._persist_workspace()
         return changed
