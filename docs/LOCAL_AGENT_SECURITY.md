@@ -167,8 +167,26 @@ owners, reparse points, replaceable ancestry, and pre-existing broad files fail
 closed. A standalone `SQLiteStore` creates a missing dedicated parent privately,
 but never canonicalizes an existing caller-supplied parent: that directory must
 already satisfy the exact private DACL or the open fails. On POSIX, the existing
-owner-only mode, atomic replace, file fsync, and directory fsync contract is
-unchanged.
+boundary now validates the current UID as well as mode bits, pins every trusted
+directory edge with no-follow descriptors, rejects replaceable ancestry and
+multi-link security files, opens children relative to the pinned parent, and
+revalidates namespace identity after use. Key manifests are staged and
+published relative to that same parent, then checked for exact inode and bytes
+before the directory is synced. Main SQLite files and published WAL/SHM/journal
+sidecars use the same owner, mode, identity, and single-link checks. A dedicated
+private parent is required; Echo Veil does not silently repair an unsafe
+caller-owned POSIX directory.
+
+The local ANN derivation is independently versioned as `echo-veil-lsh-index-v2`.
+Projection seeds are derived from the profile LSH key and vector dimension, and
+the raw projection buckets are transformed into fixed-size HMAC-SHA256 tokens
+before SQLite persistence. A second keyed tag binds each token to its record and
+band, including protected records that a generic store cannot reveal. Index-key
+or derivation drift triggers a protected rebuild. This prevents an
+unauthenticated copied bucket table from being trusted
+and prevents raw cross-profile bucket correlation; it does not hide equality
+within one profile, query/access patterns, corpus size, or approximate-neighbor
+structure.
 
 SQLite may create WAL and shared-memory files; payload-bearing database pages
 remain encrypted at the record level. Backups must include the database,

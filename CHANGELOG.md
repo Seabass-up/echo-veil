@@ -28,6 +28,17 @@ All notable changes to Echo Veil are documented here. The project follows
   bounded, dual-read, restart-resumable, and protected by a persistent
   downgrade barrier; unknown formats, lost keys, and cross-domain decryptions
   fail closed.
+- Replaced raw stable LSH buckets with profile-keyed projection families,
+  HMAC-SHA256 bucket tokens, and record/band authentication tags under an
+  independently versioned index contract.
+  Schema 1-3 stores rebuild into schema 4, key/envelope rotation rekeys the
+  index, and integrity checks reject copied or altered buckets while continuing
+  to disclose equality, access-pattern, and approximate-neighborhood leakage.
+- Hardened POSIX key, manifest, profile, database, and SQLite-sidecar access with
+  UID validation, pinned no-follow ancestry, descriptor-relative opens,
+  single-link enforcement, atomic descriptor-relative publication, and
+  post-open inode revalidation. Unsafe writable ancestors, hard links,
+  symlinks, and namespace replacement now fail closed instead of being repaired.
 
 - Isolated Codex profiles now disable the plugin loader, account-level apps,
   the independently enabled remote plugin catalog, and app-backed MCP

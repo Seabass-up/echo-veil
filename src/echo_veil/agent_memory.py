@@ -50,7 +50,11 @@ from .agent_security import (
     ScopedAesGcmShield,
     ScopedProtectedBlob,
     ScopedProtectedVector,
-    _binary_noninheritable_read_flags,
+    _posix_open_private_file,
+    _posix_pinned_directory_chain,
+    _read_private_file_bytes,
+    _secure_directory as _secure_profile_directory,
+    _write_new_key,
     opaque_topic,
     scoped_aad,
     _windows_create_private_staging,
@@ -318,6 +322,7 @@ class _ProfileWriterLease:
             check_same_thread=False,
         )
         try:
+            _require_secure_regular_file(path, "profile writer lease")
             self._connection.execute(
                 f"PRAGMA busy_timeout = {max(1, int(timeout * 1000))}"
             )
@@ -329,6 +334,9 @@ class _ProfileWriterLease:
                 raise RuntimeError(
                     "memory profile is already in use by another writer"
                 ) from exc
+            raise
+        except Exception:
+            self._connection.close()
             raise
 
     def close(self) -> None:
@@ -774,8 +782,8 @@ class _LegacyEncryptedPayloadStore:
         self.path = path
         self._read_only = read_only
         if read_only:
-            _require_secure_regular_file(path, "payload database")
-            database = f"{path.resolve().as_uri()}?mode=ro"
+            _verify_private_sqlite_files(path, "payload database")
+            database = f"{path.absolute().as_uri()}?mode=ro"
         else:
             _secure_regular_file(path)
             database = str(path)
@@ -789,6 +797,7 @@ class _LegacyEncryptedPayloadStore:
             uri=read_only,
         )
         try:
+            _require_secure_regular_file(path, "payload database")
             self._connection.execute("PRAGMA busy_timeout = 5000")
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._connection.execute("PRAGMA trusted_schema = OFF")
@@ -800,6 +809,7 @@ class _LegacyEncryptedPayloadStore:
                 self._connection.execute("PRAGMA query_only = ON")
                 self._validate_existing_schema()
                 self._verify_integrity()
+                _verify_private_sqlite_files(path, "payload database")
                 return
             self._connection.execute("PRAGMA secure_delete = ON")
             self._connection.execute("PRAGMA synchronous = FULL")
@@ -863,6 +873,7 @@ class _LegacyEncryptedPayloadStore:
             self._connection.execute(
                 f"PRAGMA user_version = {LEGACY_PAYLOAD_SCHEMA_VERSION}"
             )
+            _verify_private_sqlite_files(path, "payload database")
         except Exception:
             self._connection.close()
             raise
@@ -1570,8 +1581,8 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         self.path = path
         self._read_only = read_only
         if read_only:
-            _require_secure_regular_file(path, "payload database")
-            database = f"{path.resolve().as_uri()}?mode=ro"
+            _verify_private_sqlite_files(path, "payload database")
+            database = f"{path.absolute().as_uri()}?mode=ro"
         else:
             _secure_regular_file(path)
             database = str(path)
@@ -1583,6 +1594,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             uri=read_only,
         )
         try:
+            _require_secure_regular_file(path, "payload database")
             self._connection.execute("PRAGMA busy_timeout = 5000")
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._connection.execute("PRAGMA trusted_schema = OFF")
@@ -1597,6 +1609,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 self._v3_schema = self._table_exists(RECORD_ENVELOPE_STATE_TABLE)
                 self._validate_existing_schema()
                 self._verify_integrity()
+                _verify_private_sqlite_files(path, "payload database")
                 return
             self._connection.execute("PRAGMA secure_delete = ON")
             self._connection.execute("PRAGMA synchronous = FULL")
@@ -1608,6 +1621,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             self._validate_existing_schema()
             self._verify_integrity()
             self._connection.execute(f"PRAGMA user_version = {PAYLOAD_SCHEMA_VERSION}")
+            _verify_private_sqlite_files(path, "payload database")
         except Exception:
             self._connection.close()
             raise
@@ -4758,7 +4772,15 @@ class AgentMemory:
                 shield: AesGcmCryptoShield | ScopedAesGcmShield = AesGcmCryptoShield(
                     key
                 )
-                self._store = SQLiteStore(self.profile_dir / "echo-veil.db")
+                self._store = SQLiteStore(
+                    self.profile_dir / "echo-veil.db",
+                    lsh_key=hmac.new(
+                        key,
+                        b"echo-veil-legacy-lsh-index-key-v2\0",
+                        hashlib.sha256,
+                    ).digest(),
+                    protected_index_hint=shield.reveal,
+                )
             else:
                 self._keyring = ProfileKeyring(self.profile_dir, scope)
                 self._payloads = _EncryptedPayloadStore(
@@ -4776,6 +4798,8 @@ class AgentMemory:
                 self._store = SQLiteStore(
                     self.profile_dir / "echo-veil.db",
                     protected_payload_loader=ScopedProtectedVector.from_json_bytes,
+                    lsh_key=self._keyring.lsh_index_key(),
+                    protected_index_hint=self._scoped_shield.reveal,
                 )
             self.oracle = Oracle(
                 WorkspaceConfig(capacity=capacity),
@@ -5721,10 +5745,14 @@ class AgentMemory:
                 "migrated_lifecycle_records": 0,
                 "remaining_key_references": 0,
                 "old_key_retained": True,
+                "lsh_index_rekeyed": False,
             }
         rotation = self._keyring.begin_rotation()
         source = rotation["from"]
         target = rotation["to"]
+        if self._store is None:
+            raise RuntimeError("lifecycle store is unavailable")
+        lsh_rotation = self._store.rotate_lsh_index(self._keyring.lsh_index_key())
 
         def transform(value: object) -> ScopedProtectedVector:
             if not isinstance(value, ScopedProtectedVector):
@@ -5735,8 +5763,6 @@ class AgentMemory:
             source,
             transform,
         )
-        if self._store is None:
-            raise RuntimeError("lifecycle store is unavailable")
         lifecycle = self._store.rotate_protected_payloads(
             source_key_id=source,
             limit=batch_size,
@@ -5762,6 +5788,7 @@ class AgentMemory:
             "migrated_lifecycle_records": (active_migrated + lifecycle["migrated"]),
             "remaining_key_references": remaining,
             "old_key_retained": True,
+            "lsh_index_rekeyed": bool(lsh_rotation["changed"]),
         }
 
     def migrate_record_envelope_v3(
@@ -5794,6 +5821,7 @@ class AgentMemory:
 
         self._payloads.prepare_record_envelope_v3()
         keyring.enable_record_envelope_v3()
+        lsh_rotation = store.rotate_lsh_index(keyring.lsh_index_key())
         self._payloads.enable_record_envelope_v3_writes()
         remaining_budget = batch_size
         migrated_lifecycle = 0
@@ -5875,6 +5903,7 @@ class AgentMemory:
             "remaining_v2_tombstones": int(status["v2_tombstones"]),
             "remaining_v2_lifecycle_records": remaining_lifecycle,
             "downgrade_requires_verified_backup": True,
+            "lsh_index_rekeyed": bool(lsh_rotation["changed"]),
             "preflight_protocol": "preflight_v2",
         }
 
@@ -6133,6 +6162,9 @@ class AgentMemory:
                 ),
                 "metadata": (
                     "opaque-authenticated" if scoped else "legacy-plaintext-topics"
+                ),
+                "lifecycle_index": (
+                    self._store.lsh_status() if self._store is not None else None
                 ),
             },
             "embedding": {
@@ -7587,39 +7619,26 @@ def _profile_access_is_owner_only(profile_dir: Path) -> bool:
         if os.name == "nt":
             _windows_verify_private_directory(profile_dir)
             return True
-        getuid = getattr(os, "getuid", None)
-        if not callable(getuid):
-            return False
-        expected_uid = int(getuid())
+        with _posix_pinned_directory_chain(profile_dir):
+            pass
         for candidate in (profile_dir, *profile_dir.rglob("*")):
-            information = candidate.lstat()
-            if (
-                stat.S_ISLNK(information.st_mode)
-                or int(information.st_uid) != expected_uid
-                or stat.S_IMODE(information.st_mode) & 0o077
-            ):
-                return False
             if candidate.is_dir():
-                if not stat.S_ISDIR(information.st_mode):
-                    return False
-            elif not stat.S_ISREG(information.st_mode):
-                return False
+                with _posix_pinned_directory_chain(candidate):
+                    pass
+            else:
+                with _posix_open_private_file(
+                    candidate,
+                    os.O_RDONLY,
+                    label="profile state file",
+                ):
+                    pass
         return True
     except (OSError, RuntimeError, ValueError):
         return False
 
 
 def _secure_directory(path: Path) -> Path:
-    candidate = path.absolute()
-    _reject_symlink_components(candidate)
-    if os.name == "nt":
-        return _windows_ensure_private_directory(candidate)
-    candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not candidate.is_dir():
-        raise ValueError("state directory must be a directory")
-    if os.name != "nt":
-        candidate.chmod(0o700)
-    return candidate
+    return _secure_profile_directory(path.absolute())
 
 
 def _reject_symlink_components(path: Path) -> None:
@@ -7670,19 +7689,16 @@ def _secure_regular_file(path: Path) -> None:
                 os.close(descriptor)
         _windows_verify_private_sqlite_sidecars(path.absolute())
         return
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
+    _secure_directory(path.parent)
     try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"{path.name} must be a regular file")
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-    finally:
-        os.close(descriptor)
+        with _posix_open_private_file(
+            path,
+            os.O_RDWR | os.O_CREAT,
+            label=path.name,
+        ):
+            pass
+    except OSError as exc:
+        raise ValueError(f"{path.name} ownership or identity is unsafe") from exc
 
 
 def _require_secure_regular_file(path: Path, label: str) -> None:
@@ -7711,8 +7727,38 @@ def _require_secure_regular_file(path: Path, label: str) -> None:
                     os.close(descriptor)
         except OSError as exc:
             raise RuntimeError(f"{label} Windows DACL or identity is unsafe") from exc
-    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise RuntimeError(f"{label} must be owner-only")
+    else:
+        try:
+            with _posix_open_private_file(path, os.O_RDONLY, label=label):
+                pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"{label} permissions, ownership, or identity are unsafe"
+            ) from exc
+
+
+def _verify_private_sqlite_files(path: Path, label: str) -> None:
+    """Verify the main SQLite inode and every currently published sidecar."""
+
+    _require_secure_regular_file(path, label)
+    if os.name == "nt":
+        _windows_verify_private_sqlite_sidecars(path.absolute())
+        return
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{path}{suffix}")
+        try:
+            with _posix_open_private_file(
+                sidecar,
+                os.O_RDONLY,
+                label=f"{label} {suffix[1:]} sidecar",
+            ):
+                pass
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"{label} sidecar permissions, ownership, or identity are unsafe"
+            ) from exc
 
 
 def _payload_database_version(path: Path) -> int:
@@ -7720,14 +7766,14 @@ def _payload_database_version(path: Path) -> int:
 
     if not path.exists():
         return 0
-    _require_secure_regular_file(path, "payload database")
-    _windows_verify_private_sqlite_sidecars(path)
+    _verify_private_sqlite_files(path, "payload database")
     connection = sqlite3.connect(
-        f"{path.resolve().as_uri()}?mode=ro",
+        f"{path.absolute().as_uri()}?mode=ro",
         uri=True,
         timeout=5.0,
     )
     try:
+        _verify_private_sqlite_files(path, "payload database")
         connection.execute("PRAGMA query_only = ON")
         connection.execute("PRAGMA trusted_schema = OFF")
         row = connection.execute("PRAGMA user_version").fetchone()
@@ -7768,67 +7814,17 @@ def _payload_database_version(path: Path) -> int:
 
 
 def _load_or_create_key(path: Path) -> bytes:
-    _reject_symlink_components(path.absolute())
-    if os.name == "nt":
-        _windows_ensure_private_directory(path.parent)
-        key = AesGcmCryptoShield.generate_key()
-        with _windows_pinned_directory_chain(path.parent):
-            try:
-                descriptor, state = _windows_create_private_staging(path.absolute())
-            except FileExistsError:
-                return _load_existing_key(path)
-            try:
-                view = memoryview(key)
-                while view:
-                    written = os.write(descriptor, view)
-                    if written <= 0:
-                        raise OSError("agent key write was incomplete")
-                    view = view[written:]
-                os.fsync(descriptor)
-                _windows_verify_descriptor(
-                    descriptor,
-                    path.absolute(),
-                    expected_payload=key,
-                    expected_state=state,
-                )
-            finally:
-                os.close(descriptor)
-        return key
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    _secure_directory(path.parent)
     key = AesGcmCryptoShield.generate_key()
     try:
-        descriptor = os.open(path, flags, 0o600)
+        _write_new_key(path, key)
     except FileExistsError:
-        descriptor = -1
-    if descriptor >= 0:
-        try:
-            os.write(descriptor, key)
-            if hasattr(os, "fchmod"):
-                os.fchmod(descriptor, 0o600)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        return key
-
-    return _load_existing_key(path)
+        return _load_existing_key(path)
+    return key
 
 
 def _load_existing_key(path: Path) -> bytes:
-    _require_secure_regular_file(path, "agent key")
-
-    descriptor = os.open(path, _binary_noninheritable_read_flags())
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError("agent key must be a regular file")
-        stored = os.read(descriptor, 33)
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-    finally:
-        os.close(descriptor)
+    stored = _read_private_file_bytes(path, label="agent key", maximum=32)
     if len(stored) != 32:
         raise ValueError("agent key must contain exactly 32 bytes")
     return stored

@@ -375,14 +375,20 @@ small multi-process deployment:
 - `Oracle.forget()` uses one `BEGIN IMMEDIATE` transaction to remove matching
   active, index, archive, ANN, and eviction-metadata records. Failures roll back
   before a live Vine is released, allowing the caller to retry.
-- Database files are created with owner-only permissions, versioned with
+- Database files are created beneath a dedicated private parent, versioned with
   `PRAGMA user_version`, and checked with `PRAGMA quick_check` and
   `foreign_key_check` on open by default. Expected tables, indexes, columns,
   and foreign-key definitions are validated so injected triggers or altered
-  indexes fail closed. Unknown future schema versions fail closed.
+  indexes fail closed. POSIX opens additionally bind current UID, no-follow
+  ancestry, inode identity, owner-only modes, and a link count of one across the
+  main file and SQLite sidecars. Unknown future schema versions fail closed.
 - Built-in AES and enclave payloads are reconstructed through the algorithm-aware
   protected payload loader. Custom shields may supply a compatible loader.
-- The SQLite index reports `search_strategy="lsh-ann"`. Eight indexed bands of
-  random-projection signatures select candidates, and the exact scorer reranks
-  only those rows. Version-1 databases migrate to version 2 and backfill all
-  plaintext index rows.
+- The SQLite index reports `search_strategy="lsh-ann"`. Eight indexed bands use
+  profile-keyed random projections; only HMAC-SHA256 bucket tokens and
+  record/band authentication tags are stored, and the exact scorer reranks the
+  selected rows. The ANN derivation has its own
+  version and key fingerprint. Schema 1-3 databases migrate to schema 4 by
+  discarding raw buckets and rebuilding every derivable protected or plaintext
+  index row. Equality, access-pattern, and approximate-neighborhood leakage
+  remains visible in `lsh_status()` rather than being described as hidden.
