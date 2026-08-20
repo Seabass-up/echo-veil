@@ -16,7 +16,7 @@
     "src/echo_veil/preflight_receipt.py",
     "src/echo_veil/protocol_compat.py"
   ],
-  "shared_source_digest": "sha256:5a869b685a8a939d385bf32a33053cba3ad610ac24668f2154319fd63a7c0fb3",
+  "shared_source_digest": "sha256:97b5c92f09970801ee8565aba6fa4944da7138e1568fb77d46f9e7d64fcd9b29",
   "hosts": [
     {
       "id": "algo-cli",
@@ -97,7 +97,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:9096602b59b89078d67f20dc60ab47d9301f810c2f5f12f834f355b141ff9831",
+      "source_digest": "sha256:8dcd309816c7760477cf289de5c39ffe300df79d46a687821041c2e16a4de42a",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",

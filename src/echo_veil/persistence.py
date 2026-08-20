@@ -12,11 +12,12 @@ selection and exact shield-aware reranking, avoiding global row scans.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import os
 import sqlite3
-import stat
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -30,6 +31,9 @@ import numpy as np
 
 from ._json import strict_json_loads
 from .agent_security import (
+    _posix_identity,
+    _posix_open_private_file,
+    _secure_directory as _secure_profile_directory,
     _windows_create_private_staging,
     _windows_ensure_private_directory,
     _windows_expected_private_security,
@@ -45,14 +49,18 @@ from .archive import (
     IndexEntry,
     MetadataIndex,
 )
-from .ann import RandomProjectionLSH
+from .ann import (
+    LSH_INDEX_DERIVATION_VERSION,
+    RandomProjectionLSH,
+)
 from .crypto_shield import is_serializable_protected_payload, load_protected_vector
 from .vectors import Vector, as_vector, cosine_similarity
 from .vine import Vine, VineState
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_METADATA_BYTES = 65_536
+LSH_INDEX_SCHEMA = "echo-veil-lsh-index-v2"
 
 
 class SQLiteStore:
@@ -85,6 +93,8 @@ class SQLiteStore:
     _closed: bool
     _connection: sqlite3.Connection
     _lsh: RandomProjectionLSH
+    _lsh_key_custody: str
+    _protected_index_hint: Callable[[object], Vector] | None
     _workspace_generation: int
     _transaction_generation: int | None
 
@@ -93,6 +103,8 @@ class SQLiteStore:
         path: str | os.PathLike[str],
         *,
         protected_payload_loader: Callable[[bytes], object] | None = None,
+        lsh_key: bytes | None = None,
+        protected_index_hint: Callable[[object], Vector] | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         verify_integrity: bool = True,
     ) -> None:
@@ -107,19 +119,39 @@ class SQLiteStore:
             protected_payload_loader
         ):
             raise TypeError("protected_payload_loader must be callable")
+        if lsh_key is not None and (
+            not isinstance(lsh_key, bytes) or len(lsh_key) != 32
+        ):
+            raise ValueError("lsh_key must contain exactly 32 bytes")
+        if protected_index_hint is not None and not callable(protected_index_hint):
+            raise TypeError("protected_index_hint must be callable")
 
         database_path, durable = self._prepare_path(path)
         self.database_path = database_path
         self.durable = durable
         self.cross_process_safe = durable
         self._loader = protected_payload_loader or load_protected_vector
-        self._lsh = RandomProjectionLSH()
+        if lsh_key is None:
+            identity = (
+                os.urandom(32)
+                if not durable
+                else database_path.encode("utf-8", errors="strict")
+            )
+            lsh_key = hashlib.sha256(
+                b"echo-veil-development-lsh-path-key-v2\0" + identity
+            ).digest()
+            self._lsh_key_custody = "path-derived-development"
+        else:
+            self._lsh_key_custody = "profile-derived"
+        self._lsh = RandomProjectionLSH(lsh_key)
+        self._protected_index_hint = protected_index_hint
         self._lock = RLock()
         self._closed = False
         self._workspace_generation = 0
         self._transaction_generation = None
-        if durable:
-            self._secure_database_file(database_path)
+        database_identity = (
+            self._secure_database_file(database_path) if durable else None
+        )
         self._connection = sqlite3.connect(
             database_path,
             timeout=timeout,
@@ -128,11 +160,17 @@ class SQLiteStore:
         )
 
         try:
+            if durable:
+                self._verify_database_files(database_path, database_identity)
             self._configure_connection(timeout)
+            if durable:
+                self._verify_database_files(database_path, database_identity)
             self._initialize_schema()
             self._workspace_generation = self._read_generation_locked()
             if verify_integrity:
                 self.verify_integrity()
+            if durable:
+                self._verify_database_files(database_path, database_identity)
         except Exception:
             self._connection.close()
             self._closed = True
@@ -169,11 +207,11 @@ class SQLiteStore:
                 harden_existing=False,
             )
         else:
-            candidate.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _secure_profile_directory(absolute_candidate.parent)
         return str(absolute_candidate), True
 
     @staticmethod
-    def _secure_database_file(database_path: str) -> None:
+    def _secure_database_file(database_path: str) -> tuple[int, int, int] | None:
         path = Path(database_path)
         if os.name == "nt":
             _windows_ensure_private_directory(
@@ -206,21 +244,56 @@ class SQLiteStore:
                 finally:
                     os.close(descriptor)
             _windows_verify_private_sqlite_sidecars(path)
-            return
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(database_path, flags, 0o600)
+            return None
+        _secure_profile_directory(path.parent)
         try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("database path must reference a regular file")
-            if hasattr(os, "fchmod"):
-                os.fchmod(descriptor, 0o600)
-            else:
-                os.chmod(database_path, stat.S_IREAD | stat.S_IWRITE)
-        finally:
-            os.close(descriptor)
+            with _posix_open_private_file(
+                path,
+                os.O_RDWR | os.O_CREAT,
+                label="SQLite database",
+            ) as descriptor:
+                return _posix_identity(os.fstat(descriptor))
+        except OSError as exc:
+            raise ValueError(
+                "database file permissions, ownership, or identity are unsafe"
+            ) from exc
+
+    @staticmethod
+    def _verify_database_files(
+        database_path: str,
+        expected_identity: tuple[int, int, int] | None,
+    ) -> None:
+        path = Path(database_path)
+        if os.name == "nt":
+            SQLiteStore._secure_database_file(database_path)
+            return
+        try:
+            with _posix_open_private_file(
+                path,
+                os.O_RDWR,
+                label="SQLite database",
+            ) as descriptor:
+                current_identity = _posix_identity(os.fstat(descriptor))
+                if (
+                    expected_identity is not None
+                    and current_identity != expected_identity
+                ):
+                    raise OSError("SQLite database identity changed during open")
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{database_path}{suffix}")
+                try:
+                    with _posix_open_private_file(
+                        sidecar,
+                        os.O_RDWR,
+                        label=f"SQLite {suffix[1:]} sidecar",
+                    ):
+                        pass
+                except FileNotFoundError:
+                    continue
+        except OSError as exc:
+            raise ValueError(
+                "database files changed identity or have unsafe access"
+            ) from exc
 
     def _configure_connection(self, timeout_seconds: float) -> None:
         timeout_ms = max(1, int(timeout_seconds * 1_000))
@@ -233,7 +306,7 @@ class SQLiteStore:
             """
             CREATE TEMP TABLE IF NOT EXISTS query_ann_buckets (
                 band INTEGER NOT NULL,
-                bucket INTEGER NOT NULL,
+                bucket BLOB NOT NULL CHECK(length(bucket) = 32),
                 PRIMARY KEY(band, bucket)
             ) WITHOUT ROWID
             """
@@ -249,7 +322,7 @@ class SQLiteStore:
         with self._lock:
             version_row = self._connection.execute("PRAGMA user_version").fetchone()
             version = int(version_row[0]) if version_row is not None else 0
-            if version not in {0, 1, 2, SCHEMA_VERSION}:
+            if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
                 raise RuntimeError(
                     f"unsupported Echo Veil SQLite schema version: {version}"
                 )
@@ -284,18 +357,52 @@ class SQLiteStore:
                     ON CONFLICT(singleton) DO NOTHING
                     """
                 )
-                self._connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS ann_buckets (
-                        key TEXT NOT NULL,
-                        band INTEGER NOT NULL CHECK (band >= 0),
-                        bucket INTEGER NOT NULL CHECK (bucket >= 0),
-                        PRIMARY KEY(key, band),
-                        FOREIGN KEY(key) REFERENCES metadata_index(key)
-                            ON DELETE CASCADE
+                if version < SCHEMA_VERSION:
+                    self._connection.execute("DROP INDEX IF EXISTS idx_ann_lookup")
+                    self._connection.execute("DROP TABLE IF EXISTS ann_buckets")
+                    self._connection.execute(
+                        """
+                        CREATE TABLE ann_buckets (
+                            key TEXT NOT NULL,
+                            band INTEGER NOT NULL CHECK (band >= 0),
+                            bucket BLOB NOT NULL CHECK(length(bucket) = 32),
+                            auth_tag BLOB NOT NULL CHECK(length(auth_tag) = 32),
+                            PRIMARY KEY(key, band),
+                            FOREIGN KEY(key) REFERENCES metadata_index(key)
+                                ON DELETE CASCADE
+                        )
+                        """
                     )
-                    """
-                )
+                    self._connection.execute(
+                        """
+                        CREATE TABLE ann_config (
+                            singleton INTEGER PRIMARY KEY NOT NULL
+                                CHECK(singleton = 1),
+                            schema TEXT NOT NULL,
+                            derivation_version INTEGER NOT NULL,
+                            key_fingerprint TEXT NOT NULL
+                                CHECK(length(key_fingerprint) = 64),
+                            bands INTEGER NOT NULL CHECK(bands > 0),
+                            bits_per_band INTEGER NOT NULL
+                                CHECK(bits_per_band > 0)
+                        )
+                        """
+                    )
+                    self._connection.execute(
+                        """
+                        INSERT INTO ann_config(
+                            singleton, schema, derivation_version,
+                            key_fingerprint, bands, bits_per_band
+                        ) VALUES (1, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            LSH_INDEX_SCHEMA,
+                            LSH_INDEX_DERIVATION_VERSION,
+                            self._lsh.key_fingerprint,
+                            self._lsh.config.bands,
+                            self._lsh.config.bits_per_band,
+                        ),
+                    )
                 self._connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS active_workspace (
@@ -348,8 +455,10 @@ class SQLiteStore:
                 if version == 1:
                     self._migrate_v1_eviction_metadata_locked()
                 self._validate_schema_objects_locked()
-                if version == 1:
+                if version < SCHEMA_VERSION:
                     self._backfill_ann_locked()
+                else:
+                    self._reconcile_lsh_key_locked()
                 self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self._commit_locked()
             except Exception:
@@ -367,7 +476,15 @@ class SQLiteStore:
             ),
             "cold_archive": ("key", "payload", "updated_at"),
             "eviction_metadata": ("key", "metadata_json"),
-            "ann_buckets": ("key", "band", "bucket"),
+            "ann_buckets": ("key", "band", "bucket", "auth_tag"),
+            "ann_config": (
+                "singleton",
+                "schema",
+                "derivation_version",
+                "key_fingerprint",
+                "bands",
+                "bits_per_band",
+            ),
             "active_workspace": (
                 "key",
                 "topic",
@@ -434,6 +551,7 @@ class SQLiteStore:
         tables = {
             "metadata_index",
             "ann_buckets",
+            "ann_config",
             "active_workspace",
             "cold_archive",
             "eviction_metadata",
@@ -492,11 +610,75 @@ class SQLiteStore:
             foreign_key_rows = self._connection.execute(
                 "PRAGMA foreign_key_check"
             ).fetchall()
+            self._verify_ann_integrity_locked()
         results = tuple(str(row[0]) for row in rows)
         if results != ("ok",):
             raise RuntimeError("SQLite integrity check failed")
         if foreign_key_rows:
             raise RuntimeError("SQLite foreign-key integrity check failed")
+
+    def lsh_status(self) -> dict[str, object]:
+        """Return payload-free index-derivation status."""
+
+        with self._lock:
+            self._ensure_open_locked()
+            self._validate_lsh_config_locked()
+            indexed_row = self._connection.execute(
+                "SELECT COUNT(DISTINCT key) FROM ann_buckets"
+            ).fetchone()
+        return {
+            "schema": LSH_INDEX_SCHEMA,
+            "derivation_version": LSH_INDEX_DERIVATION_VERSION,
+            "projection_seed": (
+                "profile-keyed"
+                if self._lsh_key_custody == "profile-derived"
+                else "path-derived-development"
+            ),
+            "bucket_identifiers": "hmac-sha256",
+            "key_custody": self._lsh_key_custody,
+            "protected_indexing": (
+                "profile-keyed"
+                if self._protected_index_hint is not None
+                else "linear-fallback"
+            ),
+            "indexed_records": 0 if indexed_row is None else int(indexed_row[0]),
+            "leakage": [
+                "bucket-equality",
+                "access-pattern",
+                "approximate-neighborhood",
+            ],
+        }
+
+    def rotate_lsh_index(self, index_key: bytes) -> dict[str, object]:
+        """Rebuild every derivable bucket under a new profile key."""
+
+        replacement = RandomProjectionLSH(index_key, self._lsh.config)
+        with self._lock:
+            self._ensure_open_locked()
+            if replacement.key_fingerprint == self._lsh.key_fingerprint:
+                return {"changed": False, **self.lsh_status()}
+            previous = self._lsh
+            self._begin_locked(advance_generation=False)
+            try:
+                self._lsh = replacement
+                self._connection.execute("DELETE FROM ann_buckets")
+                self._backfill_ann_locked()
+                updated = self._connection.execute(
+                    """
+                    UPDATE ann_config SET key_fingerprint = ?
+                    WHERE singleton = 1
+                    """,
+                    (replacement.key_fingerprint,),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("LSH index configuration is missing")
+                self._commit_locked()
+            except Exception:
+                self._lsh = previous
+                self._rollback_locked()
+                raise
+            self._lsh_key_custody = "profile-derived"
+            return {"changed": True, **self.lsh_status()}
 
     def managed_state_ids(
         self,
@@ -748,7 +930,7 @@ class SQLiteStore:
     def _prepare_eviction(
         self,
         record: EvictionRecord,
-    ) -> tuple[str, str, bytes, bytes, int, str, tuple[tuple[int, int], ...]]:
+    ) -> tuple[str, str, bytes, bytes, int, str, tuple[tuple[int, bytes], ...]]:
         MetadataIndex._validate_key(record.key)
         self._validate_kind(record.kind)
         dimension = self._validate_dimension(record.dimension)
@@ -793,13 +975,11 @@ class SQLiteStore:
         MetadataIndex._validate_key(key)
         self._validate_kind(kind)
         payload, dimension = self._encode_index_anchor(anchor, kind)
-        signatures = (
-            ()
-            if kind == "protected_anchor"
-            else self._lsh.signatures(
-                as_vector(anchor, allow_empty=False, name="index anchor")
-            )
+        prepared_signatures = self._signatures_for_entry(
+            IndexEntry(key=key, anchor=anchor, kind=kind),
+            dimension,
         )
+        signatures = () if prepared_signatures is None else prepared_signatures
         with self._lock:
             self._ensure_open_locked()
             self._begin_locked()
@@ -850,28 +1030,152 @@ class SQLiteStore:
             for key, kind, payload, dimension in rows
         ]
 
+    def _validate_lsh_config_locked(self) -> tuple[str, int, str, int, int]:
+        row = self._connection.execute(
+            """
+            SELECT schema, derivation_version, key_fingerprint,
+                   bands, bits_per_band
+            FROM ann_config WHERE singleton = 1
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("LSH index configuration is missing")
+        schema = str(row[0])
+        derivation_version = int(row[1])
+        fingerprint = str(row[2])
+        bands = int(row[3])
+        bits_per_band = int(row[4])
+        if (
+            schema != LSH_INDEX_SCHEMA
+            or derivation_version != LSH_INDEX_DERIVATION_VERSION
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+            or bands != self._lsh.config.bands
+            or bits_per_band != self._lsh.config.bits_per_band
+        ):
+            raise RuntimeError("LSH index configuration is invalid")
+        return schema, derivation_version, fingerprint, bands, bits_per_band
+
+    def _reconcile_lsh_key_locked(self) -> None:
+        _schema, _version, fingerprint, _bands, _bits = (
+            self._validate_lsh_config_locked()
+        )
+        if fingerprint == self._lsh.key_fingerprint:
+            return
+        self._connection.execute("DELETE FROM ann_buckets")
+        self._backfill_ann_locked()
+        updated = self._connection.execute(
+            "UPDATE ann_config SET key_fingerprint = ? WHERE singleton = 1",
+            (self._lsh.key_fingerprint,),
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError("LSH index configuration is missing")
+
+    def _signatures_for_entry(
+        self,
+        entry: IndexEntry,
+        dimension: int,
+    ) -> tuple[tuple[int, bytes], ...] | None:
+        if entry.kind == "protected_anchor":
+            if self._protected_index_hint is None:
+                return None
+            vector = as_vector(
+                self._protected_index_hint(entry.anchor),
+                allow_empty=False,
+                name="protected LSH index hint",
+            )
+        else:
+            vector = as_vector(
+                entry.anchor,
+                allow_empty=False,
+                name="LSH index anchor",
+            )
+        if vector.size != dimension:
+            raise RuntimeError("LSH index hint dimension does not match metadata")
+        return self._lsh.signatures(vector)
+
     def _backfill_ann_locked(self) -> None:
         rows = self._connection.execute(
-            "SELECT key, payload, dimension FROM metadata_index "
-            "WHERE kind IN ('anchor', 'fossil')"
+            "SELECT key, kind, payload, dimension FROM metadata_index"
         ).fetchall()
-        for key, payload, dimension in rows:
-            expected = int(dimension) * np.dtype(np.float64).itemsize
-            raw = bytes(payload)
-            if len(raw) != expected:
-                raise RuntimeError("cannot migrate malformed index vector")
-            vector = np.frombuffer(raw, dtype=np.float64).copy()
-            self._replace_ann_buckets_locked(str(key), self._lsh.signatures(vector))
+        for key, kind, payload, dimension_raw in rows:
+            dimension = self._validate_dimension(int(dimension_raw))
+            entry = self._decode_index_entry(
+                str(key),
+                str(kind),
+                bytes(payload),
+                dimension,
+            )
+            signatures = self._signatures_for_entry(entry, dimension)
+            self._replace_ann_buckets_locked(
+                str(key),
+                () if signatures is None else signatures,
+            )
+
+    def _verify_ann_integrity_locked(self) -> None:
+        self._validate_lsh_config_locked()
+        rows = self._connection.execute(
+            "SELECT key, kind, payload, dimension FROM metadata_index"
+        ).fetchall()
+        for key_raw, kind_raw, payload_raw, dimension_raw in rows:
+            key = str(key_raw)
+            kind = str(kind_raw)
+            dimension = self._validate_dimension(int(dimension_raw))
+            entry = self._decode_index_entry(
+                key,
+                kind,
+                bytes(payload_raw),
+                dimension,
+            )
+            expected = self._signatures_for_entry(entry, dimension)
+            actual = tuple(
+                (int(row[0]), bytes(row[1]), bytes(row[2]))
+                for row in self._connection.execute(
+                    """
+                    SELECT band, CAST(bucket AS BLOB), CAST(auth_tag AS BLOB)
+                    FROM ann_buckets
+                    WHERE key = ? ORDER BY band
+                    """,
+                    (key,),
+                ).fetchall()
+            )
+            for band, token, authentication in actual:
+                expected_authentication = self._lsh.bucket_authenticator(
+                    key,
+                    band,
+                    token,
+                )
+                if not hmac.compare_digest(authentication, expected_authentication):
+                    raise RuntimeError("LSH index bucket authentication failed")
+            if expected is None:
+                if actual and tuple(row[0] for row in actual) != tuple(
+                    range(self._lsh.config.bands)
+                ):
+                    raise RuntimeError("LSH index bucket authentication failed")
+                continue
+            if tuple((band, token) for band, token, _tag in actual) != expected:
+                raise RuntimeError("LSH index bucket authentication failed")
 
     def _replace_ann_buckets_locked(
         self,
         key: str,
-        signatures: tuple[tuple[int, int], ...],
+        signatures: tuple[tuple[int, bytes], ...],
     ) -> None:
         self._connection.execute("DELETE FROM ann_buckets WHERE key = ?", (key,))
         self._connection.executemany(
-            "INSERT INTO ann_buckets(key, band, bucket) VALUES (?, ?, ?)",
-            ((key, band, bucket) for band, bucket in signatures),
+            """
+            INSERT INTO ann_buckets(key, band, bucket, auth_tag)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                (
+                    key,
+                    band,
+                    bucket,
+                    self._lsh.bucket_authenticator(key, band, bucket),
+                )
+                for band, bucket in signatures
+            ),
         )
 
     def _index_dimension(self) -> int | None:

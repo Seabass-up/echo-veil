@@ -2808,6 +2808,138 @@ def test_security_files_with_broad_permissions_fail_closed(tmp_path: Path) -> No
         key_path.chmod(0o600)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX inode contract")
+def test_profile_key_hard_link_is_rejected_and_observed_by_doctor(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, scope="workspace:hard-link") as memory:
+        key_id = str(memory.doctor()["key_id"])
+        key_path = memory.profile_dir / "keys" / f"{key_id}.key"
+        alias = tmp_path / "key-alias"
+        os.link(key_path, alias)
+        try:
+            report = memory.doctor()
+            assert report["key_owner_only"] is False
+            assert report["store_permissions"] == "invalid"
+        finally:
+            alias.unlink()
+
+    alias = tmp_path / "key-alias"
+    os.link(key_path, alias)
+    try:
+        with pytest.raises(RuntimeError, match="identity"):
+            AgentMemory(tmp_path, scope="workspace:hard-link")
+    finally:
+        alias.unlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestry contract")
+def test_profile_creation_rejects_replaceable_parent_before_mutation(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o700)
+    shared.chmod(0o777)
+    profile = shared / "profile"
+    try:
+        with pytest.raises(PermissionError, match="replaceable"):
+            agent_security.ProfileKeyring(profile, "workspace:unsafe-parent")
+        assert not profile.exists()
+    finally:
+        shared.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX UID contract")
+def test_posix_directory_chain_rejects_foreign_uid_simulation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    current_uid = os.getuid()
+    monkeypatch.setattr(
+        agent_security,
+        "_posix_current_uid",
+        lambda: current_uid + 1,
+    )
+
+    with pytest.raises(PermissionError, match="owner"):
+        with agent_security._posix_pinned_directory_chain(profile):
+            pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX namespace contract")
+def test_posix_open_detects_namespace_replacement_while_descriptor_is_held(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    target = profile / "agent.key"
+    target.write_bytes(b"a" * 32)
+    target.chmod(0o600)
+    original = profile / "original.key"
+
+    with pytest.raises(OSError, match="identity"):
+        with agent_security._posix_open_private_file(
+            target,
+            os.O_RDONLY,
+            label="agent key",
+        ):
+            target.rename(original)
+            target.write_bytes(b"b" * 32)
+            target.chmod(0o600)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX concurrent-create contract")
+def test_posix_private_create_retries_transient_openat_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    target = profile / "profile-lock.db"
+    real_open = os.open
+    attempts = 0
+
+    def transient_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attempts
+        if path == target.name and flags & os.O_CREAT:
+            attempts += 1
+            if attempts == 1:
+                raise FileNotFoundError(2, "synthetic concurrent create race")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(agent_security.os, "open", transient_open)
+
+    agent_memory_module._secure_regular_file(target)
+
+    assert attempts == 2
+    assert target.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link contract")
+def test_atomic_manifest_rejects_existing_hard_link(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    target = profile / "keyring.json"
+    agent_security._atomic_write_json(target, {"version": 1})
+    original = target.read_bytes()
+    alias = profile / "keyring-alias.json"
+    os.link(target, alias)
+    try:
+        with pytest.raises(PermissionError, match="identity"):
+            agent_security._atomic_write_json(target, {"version": 2})
+        assert target.read_bytes() == original
+    finally:
+        alias.unlink()
+
+
 def test_key_readers_use_binary_noninheritable_windows_descriptors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2819,19 +2951,29 @@ def test_key_readers_use_binary_noninheritable_windows_descriptors(
     adversarial_key = b"\x1a\r\n" + bytes(range(29))
     opened: list[tuple[Path, int]] = []
     closed: list[int] = []
+    read_descriptors: set[int] = set()
 
-    class _RegularFile:
-        st_mode = stat.S_IFREG
-
-    def open_key(path: Path, flags: int) -> int:
+    def open_key(path: Path, *, writable: bool) -> int:
+        assert writable is False
+        flags = agent_security._binary_noninheritable_read_flags()
         opened.append((path, flags))
         return 73 + len(opened)
 
-    def read_key(_descriptor: int, maximum: int) -> bytes:
+    def read_key(descriptor: int, maximum: int) -> bytes:
+        if descriptor in read_descriptors:
+            return b""
+        read_descriptors.add(descriptor)
         assert maximum == 33
         assert opened[-1][1] & binary_flag
         assert opened[-1][1] & noninheritable_flag
         return adversarial_key
+
+    class _ParentGuard:
+        def __enter__(self) -> tuple[()]:
+            return ()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
 
     monkeypatch.setattr(agent_security.os, "name", "nt")
     monkeypatch.setattr(agent_security.os, "O_BINARY", binary_flag, raising=False)
@@ -2841,21 +2983,23 @@ def test_key_readers_use_binary_noninheritable_windows_descriptors(
         noninheritable_flag,
         raising=False,
     )
-    monkeypatch.setattr(agent_security, "_require_owner_file", lambda *_args: None)
     monkeypatch.setattr(
-        agent_memory_module,
-        "_require_secure_regular_file",
-        lambda *_args: None,
+        agent_security,
+        "_windows_pinned_directory_chain",
+        lambda _path: _ParentGuard(),
     )
-    monkeypatch.setattr(agent_security.os, "open", open_key)
-    monkeypatch.setattr(agent_security.os, "fstat", lambda _descriptor: _RegularFile())
+    monkeypatch.setattr(agent_security, "_windows_open_private_file", open_key)
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_expected_private_security",
+        lambda: (b"owner", b"private-dacl"),
+    )
+    monkeypatch.setattr(
+        agent_security,
+        "_windows_verify_descriptor",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(agent_security.os, "read", read_key)
-    monkeypatch.setattr(
-        agent_security.os,
-        "fchmod",
-        lambda _descriptor, _mode: None,
-        raising=False,
-    )
     monkeypatch.setattr(
         agent_security.os,
         "close",
@@ -2989,12 +3133,6 @@ def test_windows_manifest_write_uses_private_stage_and_write_through_move(
         "_windows_verify_publication",
         verify_publication,
     )
-    monkeypatch.setattr(
-        agent_security.tempfile,
-        "mkstemp",
-        lambda **_kwargs: pytest.fail("Windows must not use mkstemp"),
-    )
-
     agent_security._atomic_write_json_windows(target, encoded)
 
     assert events == [
@@ -3067,12 +3205,6 @@ def test_atomic_json_dispatch_never_enters_posix_tail_on_windows(
         "_atomic_write_json_windows",
         lambda path, encoded: calls.append((path, encoded)),
     )
-    monkeypatch.setattr(
-        agent_security.tempfile,
-        "mkstemp",
-        lambda **_kwargs: pytest.fail("Windows must not use mkstemp"),
-    )
-
     agent_security._atomic_write_json(target, {"version": 1})
 
     assert calls == [(target, b'{"version":1}')]
@@ -3126,10 +3258,14 @@ def test_payload_version_rejects_unsafe_windows_sidecar_before_sqlite_open(
         calls.append("sidecar-rejected")
         raise OSError("unsafe stale Windows SQLite sidecar")
 
+    def verify_database(path: Path, label: str) -> None:
+        agent_memory_module._require_secure_regular_file(path, label)
+        reject_sidecar(path)
+
     monkeypatch.setattr(
         agent_memory_module,
-        "_windows_verify_private_sqlite_sidecars",
-        reject_sidecar,
+        "_verify_private_sqlite_files",
+        verify_database,
     )
     monkeypatch.setattr(
         agent_memory_module.sqlite3,

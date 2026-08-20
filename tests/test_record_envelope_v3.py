@@ -141,6 +141,7 @@ def test_v3_activation_is_explicit_and_persists_a_downgrade_barrier(
         finally:
             connection.close()
         assert result["preflight_protocol"] == "preflight_v2"
+        assert result["lsh_index_rekeyed"] is True
         assert RECORD_ENVELOPE_V3_FEATURE in keyring_after["features"]
         assert keyring_after["keys"][keyring_after["active_key_id"]]["epoch"] == 1
         assert "record_envelope_state" in objects
@@ -372,6 +373,7 @@ def test_v3_key_rotation_preserves_envelope_and_blocks_early_retirement(
         )
         first = memory.rotate_key(confirm=True, batch_size=1)
         assert first["remaining_key_references"] > 0
+        assert first["lsh_index_rekeyed"] is True
         with pytest.raises(RuntimeError, match="fully verified"):
             memory.retire_previous_key(confirm_backups_accounted_for=True)
         for _attempt in range(20):

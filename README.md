@@ -590,15 +590,22 @@ SBOM generation, and provenance requirements are documented in
   checkpoints active L1 vines and commits each L2 index entry, L3 archive payload, and lifecycle/topic metadata
   in one crash-recoverable transaction. It enables WAL mode, full synchronous
   durability, integrity and foreign-key checks, schema-object validation,
-  cross-process writer coordination, and owner-only database-file permissions.
+  cross-process writer coordination, and descriptor-pinned owner-only database
+  state. POSIX profiles validate UID, ancestry, inode identity, and single-link
+  files before and after open; unsafe writable ancestors and SQLite sidecars
+  fail closed.
   The host adapter additionally reconciles lifecycle records left by an
   interrupted remember operation and refuses to delete an unexplained encrypted
   payload orphan automatically. Reopening the store restores active, twilight,
   locked, and focal-crest state as well as searchable lower-tier memory.
-- **SQLite retrieval is indexed.** Stable random-projection LSH signatures are
-  stored in indexed SQLite buckets. Lookup selects approximate cosine-neighbor
-  candidates and then applies the exact shield-aware scorer. Schema-v1 databases
-  migrate automatically and backfill signatures for plaintext entries.
+- **SQLite retrieval is indexed without raw bucket persistence.** Projection
+  families are derived from a per-profile key and persisted bucket identifiers
+  are HMAC-SHA256 tokens with record/band authentication under the separately
+  versioned LSH-index-v2 contract.
+  Lookup selects approximate cosine-neighbor candidates and then applies the
+  exact shield-aware scorer. Earlier schema indexes rebuild automatically;
+  record/key migration rekeys the index. Equality, access-pattern, and
+  approximate-neighborhood leakage remain explicit limitations.
 - **Internal operations are serialized.** Oracle, Workspace, index, archive,
   and drift mutations use reentrant locks. Returned `Vine` objects remain
   mutable, so callers should not edit them concurrently or bypass the public

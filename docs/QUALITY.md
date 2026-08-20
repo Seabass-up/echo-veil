@@ -51,7 +51,8 @@ The adapter combines:
 - a second predicate-focused answerability embedding that masks grammatical
   subjects and rejects subject-only matches at a separately calibrated `0.42`;
 - AES-GCM-protected passage vectors and MaxSim for long memories;
-- bounded candidate generation from live memory, persisted LSH, and lexical hits;
+- bounded candidate generation from live memory, profile-keyed/HMAC-tokenized
+  persisted LSH, and lexical hits;
 - keyed-hash lexical features, so searchable terms are not stored in plaintext;
 - topic-aware maximal marginal relevance for result diversity;
 - explicit `effective_at` and `supersedes` links for current and point-in-time

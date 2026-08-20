@@ -25,7 +25,6 @@ import os
 import re
 import secrets
 import stat
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from numpy.typing import NDArray
 
 from ._json import strict_json_loads
 from .record_envelope import (
+    KEY_PURPOSE_LSH_INDEX,
     KEY_PURPOSE_SEMANTIC_CONTRACT,
     KEY_PURPOSE_VECTOR,
     RECORD_ENVELOPE_V2,
@@ -86,6 +86,15 @@ class _WindowsFileState:
     identity: tuple[int, ...]
     owner: bytes
     dacl: bytes
+
+
+@dataclass(frozen=True)
+class _PosixFileState:
+    """Identity and access material pinned to one POSIX descriptor."""
+
+    identity: tuple[int, int, int]
+    uid: int
+    mode: int
 
 
 def normalize_scope(value: str) -> str:
@@ -170,18 +179,310 @@ def _reject_symlink_components(path: Path) -> None:
             raise ValueError("security-sensitive paths must not contain symbolic links")
 
 
+def _posix_current_uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    if os.name == "nt" or not callable(getuid):
+        raise OSError("POSIX ownership checks are unavailable")
+    return int(getuid())
+
+
+def _posix_identity(information: os.stat_result) -> tuple[int, int, int]:
+    return (
+        int(information.st_dev),
+        int(information.st_ino),
+        int(stat.S_IFMT(information.st_mode)),
+    )
+
+
+def _posix_directory_flags() -> int:
+    directory = getattr(os, "O_DIRECTORY", None)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if not isinstance(directory, int) or not isinstance(nofollow, int):
+        raise OSError("POSIX directory pinning flags are unavailable")
+    return os.O_RDONLY | directory | nofollow | int(getattr(os, "O_CLOEXEC", 0))
+
+
+def _posix_validate_directory(
+    information: os.stat_result,
+    *,
+    private_leaf: bool,
+) -> None:
+    if not stat.S_ISDIR(information.st_mode):
+        raise OSError("security-sensitive ancestry is not a directory")
+    expected_uid = _posix_current_uid()
+    owner = int(information.st_uid)
+    mode = stat.S_IMODE(information.st_mode)
+    if private_leaf:
+        if owner != expected_uid or mode & 0o077:
+            raise PermissionError(
+                "security-sensitive directory must be current-user owner-only"
+            )
+        return
+    if owner not in {0, expected_uid}:
+        raise PermissionError("security-sensitive ancestry has an untrusted owner")
+    if mode & 0o022:
+        trusted_sticky_root = owner == 0 and bool(information.st_mode & stat.S_ISVTX)
+        if not trusted_sticky_root:
+            raise PermissionError("security-sensitive ancestry is replaceable")
+
+
+@contextmanager
+def _posix_pinned_directory_chain(
+    path: Path,
+    *,
+    private_leaf: bool = True,
+) -> Iterator[int]:
+    """Pin a private directory and every trusted namespace edge above it."""
+
+    if os.name == "nt":
+        raise OSError("POSIX directory pinning is unavailable")
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if not absolute.is_absolute() or absolute == Path(absolute.anchor):
+        raise OSError("private directory boundary is unsupported")
+    flags = _posix_directory_flags()
+    descriptors: list[int] = []
+    edges: list[tuple[int | None, str, _PosixFileState]] = []
+    try:
+        root = os.open(absolute.anchor, flags)
+        descriptors.append(root)
+        root_info = os.fstat(root)
+        _posix_validate_directory(root_info, private_leaf=False)
+        edges.append(
+            (
+                None,
+                absolute.anchor,
+                _PosixFileState(
+                    identity=_posix_identity(root_info),
+                    uid=int(root_info.st_uid),
+                    mode=stat.S_IMODE(root_info.st_mode),
+                ),
+            )
+        )
+        parent_descriptor = root
+        parts = absolute.parts[1:]
+        for index, part in enumerate(parts):
+            descriptor = os.open(part, flags, dir_fd=parent_descriptor)
+            descriptors.append(descriptor)
+            information = os.fstat(descriptor)
+            _posix_validate_directory(
+                information,
+                private_leaf=private_leaf and index == len(parts) - 1,
+            )
+            namespace = os.stat(
+                part,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if _posix_identity(namespace) != _posix_identity(information):
+                raise OSError("security-sensitive directory identity changed")
+            edges.append(
+                (
+                    parent_descriptor,
+                    part,
+                    _PosixFileState(
+                        identity=_posix_identity(information),
+                        uid=int(information.st_uid),
+                        mode=stat.S_IMODE(information.st_mode),
+                    ),
+                )
+            )
+            parent_descriptor = descriptor
+        yield parent_descriptor
+        for edge_parent_descriptor, name, expected in edges:
+            information = (
+                os.lstat(name)
+                if edge_parent_descriptor is None
+                else os.stat(
+                    name,
+                    dir_fd=edge_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            )
+            if (
+                _posix_identity(information) != expected.identity
+                or int(information.st_uid) != expected.uid
+                or stat.S_IMODE(information.st_mode) != expected.mode
+            ):
+                raise OSError("security-sensitive directory identity changed")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _posix_verify_private_file_descriptor(
+    descriptor: int,
+    parent_descriptor: int,
+    name: str,
+    *,
+    label: str,
+) -> _PosixFileState:
+    descriptor_info = os.fstat(descriptor)
+    namespace_info = os.stat(
+        name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    expected_uid = _posix_current_uid()
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(namespace_info.st_mode)
+        or int(descriptor_info.st_uid) != expected_uid
+        or int(namespace_info.st_uid) != expected_uid
+        or int(descriptor_info.st_nlink) != 1
+        or int(namespace_info.st_nlink) != 1
+        or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+        or stat.S_IMODE(namespace_info.st_mode) & 0o077
+        or _posix_identity(descriptor_info) != _posix_identity(namespace_info)
+    ):
+        raise PermissionError(f"{label} POSIX ownership or identity is unsafe")
+    return _PosixFileState(
+        identity=_posix_identity(descriptor_info),
+        uid=int(descriptor_info.st_uid),
+        mode=stat.S_IMODE(descriptor_info.st_mode),
+    )
+
+
+@contextmanager
+def _posix_open_private_file(
+    path: Path,
+    flags: int,
+    *,
+    label: str,
+    mode: int = 0o600,
+) -> Iterator[int]:
+    """Open one private file relative to a pinned owner-only parent."""
+
+    if os.name == "nt":
+        raise OSError("POSIX private file open is unavailable")
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    safe_flags = flags | int(getattr(os, "O_CLOEXEC", 0))
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if not isinstance(nofollow, int):
+        raise OSError("POSIX no-follow file opens are unavailable")
+    safe_flags |= nofollow
+    with _posix_pinned_directory_chain(absolute.parent) as parent_descriptor:
+        for attempt in range(3):
+            try:
+                descriptor = os.open(
+                    absolute.name,
+                    safe_flags,
+                    mode,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileNotFoundError as exc:
+                if not safe_flags & os.O_CREAT:
+                    raise
+                pinned = os.fstat(parent_descriptor)
+                try:
+                    namespace = os.stat(
+                        absolute.parent,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    namespace = None
+                if (
+                    namespace is None
+                    or int(pinned.st_nlink) == 0
+                    or _posix_identity(namespace) != _posix_identity(pinned)
+                    or attempt == 2
+                ):
+                    raise OSError(
+                        "private file parent identity changed during open"
+                    ) from exc
+        try:
+            expected = _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                absolute.name,
+                label=label,
+            )
+            yield descriptor
+            current = _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                absolute.name,
+                label=label,
+            )
+            if current != expected:
+                raise OSError(f"{label} POSIX identity changed while open")
+        finally:
+            os.close(descriptor)
+
+
 def _secure_directory(path: Path) -> Path:
     _reject_symlink_components(path)
     if os.name == "nt":
         return _windows_ensure_private_directory(path)
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = Path(os.path.abspath(os.fspath(path)))
+    existing_ancestor = path
+    while not existing_ancestor.exists():
+        if existing_ancestor == existing_ancestor.parent:
+            raise OSError("profile key directory has no trusted ancestor")
+        existing_ancestor = existing_ancestor.parent
+    missing_parts = path.relative_to(existing_ancestor).parts
+    with _posix_pinned_directory_chain(
+        existing_ancestor,
+        private_leaf=False,
+    ) as existing_descriptor:
+        parent_descriptor = existing_descriptor
+        created_descriptors: list[int] = []
+        created_edges: list[tuple[int, str, _PosixFileState]] = []
+        try:
+            for part in missing_parts:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+                except FileExistsError:
+                    # A concurrent creator must still satisfy the same private
+                    # ownership and identity contract before it can be used.
+                    pass
+                descriptor = os.open(
+                    part,
+                    _posix_directory_flags(),
+                    dir_fd=parent_descriptor,
+                )
+                created_descriptors.append(descriptor)
+                information = os.fstat(descriptor)
+                _posix_validate_directory(information, private_leaf=True)
+                namespace = os.stat(
+                    part,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if _posix_identity(namespace) != _posix_identity(information):
+                    raise OSError("profile key directory identity changed")
+                created_edges.append(
+                    (
+                        parent_descriptor,
+                        part,
+                        _PosixFileState(
+                            identity=_posix_identity(information),
+                            uid=int(information.st_uid),
+                            mode=stat.S_IMODE(information.st_mode),
+                        ),
+                    )
+                )
+                parent_descriptor = descriptor
+            for edge_parent, name, expected in created_edges:
+                current = os.stat(
+                    name,
+                    dir_fd=edge_parent,
+                    follow_symlinks=False,
+                )
+                if (
+                    _posix_identity(current) != expected.identity
+                    or int(current.st_uid) != expected.uid
+                    or stat.S_IMODE(current.st_mode) != expected.mode
+                ):
+                    raise OSError("profile key directory identity changed")
+        finally:
+            for descriptor in reversed(created_descriptors):
+                os.close(descriptor)
     if path.is_symlink() or not path.is_dir():
         raise ValueError("profile key directory must be a regular directory")
-    if os.name != "nt":
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
-            raise PermissionError("profile key directory must be owner-only")
-        os.chmod(path, 0o700)
+    with _posix_pinned_directory_chain(path):
+        pass
     return path
 
 
@@ -207,8 +508,14 @@ def _require_owner_file(path: Path, label: str) -> None:
                     os.close(descriptor)
         except OSError as exc:
             raise KeyUnavailable(f"{label} Windows DACL or identity is unsafe") from exc
-    elif stat.S_IMODE(path.stat().st_mode) & 0o077:
-        raise KeyUnavailable(f"{label} permissions are too broad")
+    else:
+        try:
+            with _posix_open_private_file(path, os.O_RDONLY, label=label):
+                pass
+        except OSError as exc:
+            raise KeyUnavailable(
+                f"{label} POSIX ownership or identity is unsafe"
+            ) from exc
 
 
 def _binary_noninheritable_read_flags() -> int:
@@ -232,25 +539,66 @@ def _binary_noninheritable_read_flags() -> int:
 
 
 def _read_key(path: Path) -> bytes:
-    _require_owner_file(path, "profile key")
-    descriptor = os.open(path, _binary_noninheritable_read_flags())
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise KeyUnavailable("profile key is not a regular file")
-        raw = os.read(descriptor, AES_256_KEY_BYTES + 1)
-    finally:
-        os.close(descriptor)
+    raw = _read_private_file_bytes(
+        path,
+        label="profile key",
+        maximum=AES_256_KEY_BYTES,
+    )
     if len(raw) != AES_256_KEY_BYTES:
         raise KeyUnavailable("profile key has an invalid length")
     return raw
+
+
+def _read_private_file_bytes(path: Path, *, label: str, maximum: int) -> bytes:
+    """Read a bounded private file through one identity-checked descriptor."""
+
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+        raise ValueError("private file read bound must be a positive integer")
+    try:
+        _reject_symlink_components(path)
+        if os.name == "nt":
+            target = path.absolute()
+            with _windows_pinned_directory_chain(target.parent):
+                descriptor = _windows_open_private_file(target, writable=False)
+                try:
+                    _windows_verify_descriptor(
+                        descriptor,
+                        target,
+                        expected_payload=None,
+                        expected_security=_windows_expected_private_security(),
+                    )
+                    return _read_bounded(descriptor, maximum)
+                finally:
+                    os.close(descriptor)
+        with _posix_open_private_file(
+            path,
+            _binary_noninheritable_read_flags(),
+            label=label,
+        ) as descriptor:
+            return _read_bounded(descriptor, maximum)
+    except (OSError, ValueError) as exc:
+        raise KeyUnavailable(
+            f"{label} permissions, ownership, or identity are unsafe"
+        ) from exc
+
+
+def _read_bounded(descriptor: int, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = maximum + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def _write_new_key(path: Path, key: bytes) -> None:
     if len(key) != AES_256_KEY_BYTES:
         raise ValueError("profile key must contain exactly 32 bytes")
     _reject_symlink_components(path)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _secure_directory(path.parent)
     if os.name == "nt":
         with _windows_pinned_directory_chain(path.parent):
             descriptor, created_state = _windows_create_private_staging(path)
@@ -266,17 +614,53 @@ def _write_new_key(path: Path, key: bytes) -> None:
             finally:
                 os.close(descriptor)
         return
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        _write_all(descriptor, key)
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    target = path.absolute()
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | int(getattr(os, "O_CLOEXEC", 0))
+        | int(getattr(os, "O_NOFOLLOW"))
+    )
+    with _posix_pinned_directory_chain(target.parent) as parent_descriptor:
+        descriptor = os.open(
+            target.name,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        published = True
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            expected = _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                target.name,
+                label="profile key",
+            )
+            _write_all(descriptor, key)
+            os.fsync(descriptor)
+            current = _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                target.name,
+                label="profile key",
+            )
+            if current != expected:
+                raise OSError("profile key identity changed while writing")
+        except Exception:
+            published = False
+            try:
+                os.unlink(target.name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(descriptor)
+        if not published:
+            raise OSError("profile key publication failed")
+        os.fsync(parent_descriptor)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -291,34 +675,148 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     if os.name == "nt":
         _atomic_write_json_windows(path, encoded)
         return
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    temporary = Path(temporary_name)
-    try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-        _write_all(descriptor, encoded)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
+    target = Path(os.path.abspath(os.fspath(path)))
+    with _posix_pinned_directory_chain(target.parent) as parent_descriptor:
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
+            existing_descriptor = os.open(
+                target.name,
+                os.O_RDONLY
+                | int(getattr(os, "O_CLOEXEC", 0))
+                | int(getattr(os, "O_NOFOLLOW")),
+                dir_fd=parent_descriptor,
+            )
         except FileNotFoundError:
-            # A successful replace already moved the temporary file.
-            pass
+            existing_descriptor = -1
+        if existing_descriptor >= 0:
+            try:
+                _posix_verify_private_file_descriptor(
+                    existing_descriptor,
+                    parent_descriptor,
+                    target.name,
+                    label="profile key manifest",
+                )
+            finally:
+                os.close(existing_descriptor)
+
+        descriptor = -1
+        temporary_name: str | None = None
+        try:
+            for _attempt in range(128):
+                candidate = f".{target.name}.{secrets.token_hex(16)}.tmp"
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_RDWR
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | int(getattr(os, "O_CLOEXEC", 0))
+                        | int(getattr(os, "O_NOFOLLOW")),
+                        0o600,
+                        dir_fd=parent_descriptor,
+                    )
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            else:
+                raise OSError("profile manifest staging name is unavailable")
+
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
+            staged = _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                temporary_name,
+                label="profile manifest staging file",
+            )
+            _write_all(descriptor, encoded)
+            os.fsync(descriptor)
+            if (
+                _posix_verify_private_file_descriptor(
+                    descriptor,
+                    parent_descriptor,
+                    temporary_name,
+                    label="profile manifest staging file",
+                )
+                != staged
+            ):
+                raise OSError("profile manifest staging identity changed")
+            os.replace(
+                temporary_name,
+                target.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            temporary_name = None
+            published_descriptor = os.open(
+                target.name,
+                os.O_RDONLY
+                | int(getattr(os, "O_CLOEXEC", 0))
+                | int(getattr(os, "O_NOFOLLOW")),
+                dir_fd=parent_descriptor,
+            )
+            try:
+                published = _posix_verify_private_file_descriptor(
+                    published_descriptor,
+                    parent_descriptor,
+                    target.name,
+                    label="profile key manifest",
+                )
+                if published.identity != staged.identity:
+                    raise OSError("profile manifest publication identity changed")
+                if _read_bounded(published_descriptor, len(encoded)) != encoded:
+                    raise OSError("profile manifest publication bytes changed")
+            finally:
+                os.close(published_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+
+
+def _unlink_private_file(path: Path, *, label: str) -> None:
+    """Remove one identity-checked private file without path re-resolution."""
+
+    target = path.absolute()
+    if os.name == "nt":
+        _require_owner_file(target, label)
+        with _windows_pinned_directory_chain(target.parent):
+            target.unlink()
+        return
+    with _posix_pinned_directory_chain(target.parent) as parent_descriptor:
+        descriptor = os.open(
+            target.name,
+            os.O_RDONLY
+            | int(getattr(os, "O_CLOEXEC", 0))
+            | int(getattr(os, "O_NOFOLLOW")),
+            dir_fd=parent_descriptor,
+        )
+        try:
+            _posix_verify_private_file_descriptor(
+                descriptor,
+                parent_descriptor,
+                target.name,
+                label=label,
+            )
+            os.unlink(target.name, dir_fd=parent_descriptor)
+            try:
+                os.stat(
+                    target.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError(f"{label} name remained after unlink")
+        finally:
+            os.close(descriptor)
+        os.fsync(parent_descriptor)
 
 
 def _atomic_write_json_windows(path: Path, encoded: bytes) -> None:
@@ -490,7 +988,7 @@ def _windows_create_private_staging(path: Path) -> tuple[int, _WindowsFileState]
         if descriptor >= 0:
             try:
                 os.close(descriptor)
-            except OSError:
+            except (OSError, KeyUnavailable):
                 pass
         elif handle is not None:
             kernel32.CloseHandle(wintypes.HANDLE(handle))
@@ -1903,6 +2401,24 @@ class ProfileKeyring:
             algorithm=RECORD_ENVELOPE_V3_ALGORITHM,
         )
 
+    def lsh_index_key(self) -> bytes:
+        """Derive the active profile's separately versioned LSH key."""
+
+        if RECORD_ENVELOPE_V3_FEATURE in self.features:
+            return self.key_for_envelope(
+                self.active_key_id,
+                purpose=KEY_PURPOSE_LSH_INDEX,
+                envelope_version=RECORD_ENVELOPE_V3,
+            )
+        return hmac.new(
+            self.active_key(),
+            b"echo-veil-lsh-index-key-v2\0"
+            + self.scope_id.encode("ascii")
+            + b"\0"
+            + self.scope.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+
     @staticmethod
     def _key_epochs_from_manifest(
         manifest: dict[str, Any],
@@ -1990,7 +2506,7 @@ class ProfileKeyring:
             _atomic_write_json(self.manifest_path, manifest)
         except Exception:
             try:
-                key_path.unlink()
+                _unlink_private_file(key_path, label="unactivated profile key")
             except OSError:
                 # Preserve the manifest failure; an orphan key is never activated.
                 pass
@@ -2037,7 +2553,7 @@ class ProfileKeyring:
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
         self._keys.pop(source, None)
-        key_path.unlink()
+        _unlink_private_file(key_path, label="previous profile key")
         return source
 
     def _create_manifest(self) -> dict[str, Any]:
@@ -2063,8 +2579,11 @@ class ProfileKeyring:
         return manifest
 
     def _load_manifest(self) -> dict[str, Any]:
-        _require_owner_file(self.manifest_path, "profile key manifest")
-        raw = self.manifest_path.read_bytes()
+        raw = _read_private_file_bytes(
+            self.manifest_path,
+            label="profile key manifest",
+            maximum=64 * 1024,
+        )
         if not raw or len(raw) > 64 * 1024:
             raise KeyUnavailable("profile key manifest has an invalid size")
         try:

@@ -20,6 +20,7 @@ from echo_veil import (
     WorkspaceConfig,
 )
 from echo_veil.archive import EvictionRecord
+from echo_veil.ann import LSH_INDEX_DERIVATION_VERSION
 from echo_veil.capability import CapabilityStatus
 from echo_veil.vectors import cosine_similarity
 
@@ -466,6 +467,54 @@ def test_database_file_permissions_are_owner_only(tmp_path: Path) -> None:
         assert mode == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link contract")
+def test_database_hard_link_is_rejected(tmp_path: Path) -> None:
+    path = _database_path(tmp_path, "hard-linked.db")
+    with SQLiteStore(path):
+        pass
+    alias = path.parent / "database-alias"
+    os.link(path, alias)
+    try:
+        with pytest.raises(ValueError, match="identity"):
+            SQLiteStore(path)
+    finally:
+        alias.unlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestry contract")
+def test_database_creation_rejects_replaceable_parent_before_mutation(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o700)
+    shared.chmod(0o777)
+    database = shared / "rejected.db"
+    try:
+        with pytest.raises(PermissionError, match="replaceable"):
+            SQLiteStore(database)
+        assert not database.exists()
+    finally:
+        shared.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sidecar contract")
+def test_database_sidecar_hard_link_is_rejected(tmp_path: Path) -> None:
+    path = _database_path(tmp_path, "sidecar.db")
+    with SQLiteStore(path) as store:
+        wal = Path(f"{path}-wal")
+        assert wal.exists()
+        alias = path.parent / "wal-alias"
+        os.link(wal, alias)
+        try:
+            with pytest.raises(ValueError, match="unsafe access"):
+                store._verify_database_files(
+                    str(path),
+                    persistence_module._posix_identity(os.stat(path)),
+                )
+        finally:
+            alias.unlink()
+
+
 def test_sqlite_secure_delete_is_enabled(tmp_path: Path) -> None:
     with SQLiteStore(_database_path(tmp_path, "secure-delete.db")) as store:
         row = store._connection.execute("PRAGMA secure_delete").fetchone()
@@ -668,6 +717,144 @@ def test_sqlite_lsh_restricts_exact_reranking_to_candidates(tmp_path: Path) -> N
         assert scored < len(vectors) // 2
 
 
+def test_lsh_projection_and_bucket_tokens_are_profile_keyed() -> None:
+    vector = np.array([1.0, 0.5, -0.25, 0.75])
+    with SQLiteStore(":memory:", lsh_key=b"a" * 32) as first:
+        first.index.upsert("same", vector)
+        first_tokens = first._connection.execute(
+            "SELECT band, CAST(bucket AS BLOB) FROM ann_buckets ORDER BY band"
+        ).fetchall()
+        first_status = first.lsh_status()
+    with SQLiteStore(":memory:", lsh_key=b"b" * 32) as second:
+        second.index.upsert("same", vector)
+        second_tokens = second._connection.execute(
+            "SELECT band, CAST(bucket AS BLOB) FROM ann_buckets ORDER BY band"
+        ).fetchall()
+
+    assert first_tokens != second_tokens
+    assert all(len(bytes(row[1])) == 32 for row in first_tokens)
+    assert first_status["derivation_version"] == LSH_INDEX_DERIVATION_VERSION
+    assert first_status["projection_seed"] == "profile-keyed"
+    assert first_status["bucket_identifiers"] == "hmac-sha256"
+    assert "key_fingerprint" not in first_status
+
+
+def test_lsh_key_rotation_rebuilds_buckets_and_preserves_search(tmp_path: Path) -> None:
+    path = _database_path(tmp_path, "lsh-rotation.db")
+    key_one = b"1" * 32
+    key_two = b"2" * 32
+    vector = np.array([0.25, 0.5, 0.75, 1.0])
+    with SQLiteStore(path, lsh_key=key_one) as store:
+        store.index.upsert("rotated", vector)
+        before = tuple(
+            bytes(row[0])
+            for row in store._connection.execute(
+                "SELECT CAST(bucket AS BLOB) FROM ann_buckets ORDER BY band"
+            )
+        )
+        report = store.rotate_lsh_index(key_two)
+        after = tuple(
+            bytes(row[0])
+            for row in store._connection.execute(
+                "SELECT CAST(bucket AS BLOB) FROM ann_buckets ORDER BY band"
+            )
+        )
+        assert report["changed"] is True
+        assert before != after
+        assert store.index.search(vector, top_k=1) == [("rotated", 1.0)]
+
+    with SQLiteStore(path, lsh_key=key_two) as restored:
+        assert restored.index.search(vector, top_k=1) == [("rotated", 1.0)]
+        assert restored.lsh_status()["key_custody"] == "profile-derived"
+
+
+def test_lsh_bucket_tampering_fails_integrity_check(tmp_path: Path) -> None:
+    path = _database_path(tmp_path, "lsh-tamper.db")
+    key = b"k" * 32
+    vector = np.array([1.0, 0.0, 0.5, -0.5])
+    with SQLiteStore(path, lsh_key=key) as store:
+        store.index.upsert("authenticated", vector)
+        store._connection.execute(
+            "UPDATE ann_buckets SET bucket = ? WHERE key = ? AND band = 0",
+            (b"x" * 32, "authenticated"),
+        )
+
+    with pytest.raises(RuntimeError, match="bucket authentication"):
+        SQLiteStore(path, lsh_key=key)
+
+
+def test_bucketless_protected_index_rejects_injected_lsh_token(
+    tmp_path: Path,
+) -> None:
+    path = _database_path(tmp_path, "protected-lsh-tamper.db")
+    shield = AesGcmCryptoShield(AesGcmCryptoShield.generate_key())
+    with SQLiteStore(path, lsh_key=b"p" * 32) as store:
+        store.index.upsert(
+            "protected",
+            shield.protect(np.array([1.0, 0.0, 0.5])),
+            kind="protected_anchor",
+        )
+        assert store.lsh_status()["protected_indexing"] == "linear-fallback"
+        store._connection.execute(
+            """
+            INSERT INTO ann_buckets(key, band, bucket, auth_tag)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("protected", 0, b"x" * 32, b"y" * 32),
+        )
+
+    with pytest.raises(RuntimeError, match="bucket authentication"):
+        SQLiteStore(path, lsh_key=b"p" * 32)
+
+
+def test_schema_v3_raw_lsh_buckets_are_rebuilt_as_keyed_tokens(
+    tmp_path: Path,
+) -> None:
+    path = _database_path(tmp_path, "v3-lsh.db")
+    key = b"m" * 32
+    vector = np.array([1.0, 0.0, 0.25, -0.25])
+    with SQLiteStore(path, lsh_key=key) as store:
+        store.index.upsert("legacy-v3", vector)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP INDEX idx_ann_lookup")
+        connection.execute("DROP TABLE ann_config")
+        connection.execute("ALTER TABLE ann_buckets RENAME TO ann_buckets_v4")
+        connection.execute(
+            """
+            CREATE TABLE ann_buckets (
+                key TEXT NOT NULL,
+                band INTEGER NOT NULL CHECK(band >= 0),
+                bucket INTEGER NOT NULL CHECK(bucket >= 0),
+                PRIMARY KEY(key, band),
+                FOREIGN KEY(key) REFERENCES metadata_index(key) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO ann_buckets(key, band, bucket) VALUES (?, ?, ?)",
+            (("legacy-v3", band, band + 1) for band in range(8)),
+        )
+        connection.execute("DROP TABLE ann_buckets_v4")
+        connection.execute(
+            "CREATE INDEX idx_ann_lookup ON ann_buckets(band, bucket, key)"
+        )
+        connection.execute("PRAGMA user_version = 3")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with SQLiteStore(path, lsh_key=key) as migrated:
+        buckets = migrated._connection.execute(
+            "SELECT typeof(bucket), length(bucket) FROM ann_buckets"
+        ).fetchall()
+        version = migrated._connection.execute("PRAGMA user_version").fetchone()
+        assert version == (4,)
+        assert buckets and set(buckets) == {("blob", 32)}
+        assert migrated.index.search(vector, top_k=1) == [("legacy-v3", 1.0)]
+
+
 def test_schema_v1_is_migrated_and_backfilled_for_ann(tmp_path: Path) -> None:
     path = _database_path(tmp_path, "v1.db")
     SQLiteStore._secure_database_file(str(path))
@@ -698,7 +885,7 @@ def test_schema_v1_is_migrated_and_backfilled_for_ann(tmp_path: Path) -> None:
     with SQLiteStore(path) as store:
         assert store.index.search(vector, top_k=1) == [("legacy", 1.0)]
         version_row = store._connection.execute("PRAGMA user_version").fetchone()
-        assert version_row is not None and version_row[0] == 3
+        assert version_row is not None and version_row[0] == 4
 
 
 def test_workspace_generation_rejects_a_stale_cross_process_snapshot(
