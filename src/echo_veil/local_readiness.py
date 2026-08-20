@@ -90,6 +90,10 @@ REMEDIATIONS: dict[str, str] = {
     "EV-MODEL-UNAVAILABLE": (
         "Restore the digest-matched local embedding model before qualification."
     ),
+    "EV-STORAGE-CAPACITY": (
+        "Free profile-disk capacity, checkpoint oversized WAL state, or archive "
+        "data before retrying protected mutations."
+    ),
 }
 
 
@@ -153,6 +157,7 @@ class LocalReadinessState:
     key_migration_complete: bool
     model_available: bool
     evidence: LocalReadinessEvidence = LocalReadinessEvidence()
+    storage_healthy: bool = True
     enclave_production_ready: bool = False
     hardware_isolated: bool = False
     remotely_attested: bool = False
@@ -173,6 +178,7 @@ class LocalReadinessState:
             "hardware_isolated",
             "remotely_attested",
             "host_compromise_protected",
+            "storage_healthy",
         ):
             _strict_bool(getattr(self, name), name)
         for name in (
@@ -216,6 +222,7 @@ def _readiness_failures(state: LocalReadinessState) -> list[str]:
         (state.plaintext_fallback_attempts == 0, "EV-PLAINTEXT-FALLBACK"),
         (state.key_migration_complete, "EV-KEY-MIGRATION-INCOMPLETE"),
         (state.model_available, "EV-MODEL-UNAVAILABLE"),
+        (state.storage_healthy, "EV-STORAGE-CAPACITY"),
     )
     for passed, code in checks:
         if not passed:
@@ -246,6 +253,7 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
         and state.plaintext_fallback_attempts == 0
         and state.key_migration_complete
         and state.model_available
+        and state.storage_healthy
         and state.hardware_isolated
         and state.remotely_attested
         and state.host_compromise_protected

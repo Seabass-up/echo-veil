@@ -915,7 +915,7 @@ def test_layer_promotion_is_explicit_and_survives_restart(tmp_path: Path) -> Non
     ]
 
 
-def test_expired_live_memory_is_pruned_without_archival(
+def test_expired_live_memory_is_hidden_until_explicit_maintenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -933,7 +933,45 @@ def test_expired_live_memory_is_pruned_without_archival(
 
         assert memory.list_memories() == []
         assert memory.oracle.archived_metadata(str(created["vine_id"])) is None
+        assert memory.doctor()["authenticated_deletion_records"] == 0
+        assert memory._prune_expired_live_memory() == 1
         assert memory.doctor()["authenticated_deletion_records"] == 1
+
+
+def test_storage_capacity_blocks_mutation_before_embedding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with AgentMemory(tmp_path) as memory:
+        monkeypatch.setattr(
+            agent_memory_module.shutil,
+            "disk_usage",
+            lambda _path: type("Usage", (), {"free": 0})(),
+        )
+        status = memory.storage_qos_status()
+        assert status["healthy"] is False
+        assert "EV-STORAGE-FREE-SPACE-LOW" in status["warnings"]
+        with pytest.raises(RuntimeError, match="storage capacity gate"):
+            memory.remember(
+                "blocked write",
+                "The embedding backend must not run after capacity blocks.",
+            )
+        report = memory.doctor()
+        assert "EV-STORAGE-CAPACITY" in (report["capabilities_v1"]["remediation_codes"])
+
+
+def test_storage_maintenance_is_explicit_and_payload_free(tmp_path: Path) -> None:
+    with AgentMemory(tmp_path) as memory:
+        memory.remember("maintenance", "Checkpoint maintenance is explicit.")
+        with pytest.raises(ValueError, match="confirm"):
+            memory.maintain_storage("checkpoint")
+        result = memory.maintain_storage("checkpoint", confirm=True)
+
+    assert result["schema"] == "echo-veil-storage-maintenance-v1"
+    assert result["payload_included"] is False
+    assert result["operation"] == "checkpoint"
+    assert result["outcomes"]["payloads"]["busy"] == 0
+    assert result["outcomes"]["lifecycle"]["busy"] == 0
 
 
 def test_contextual_logic_rejects_unknown_relationships(tmp_path: Path) -> None:
@@ -1315,6 +1353,7 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests: list[tuple[str, str, bytes | None]] = []
+    connections = 0
     digest = "a" * 64
 
     class Response:
@@ -1335,7 +1374,9 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
 
     class Connection:
         def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            nonlocal connections
             assert timeout == 2.0
+            connections += 1
 
         def request(
             self,
@@ -1396,6 +1437,8 @@ def test_ollama_embedder_is_loopback_only_digest_bound_and_instruction_aware(
     assert "Taylor" not in query_body["input"][1]
     assert query_body["input"][1].endswith("Query: What is passport number?")
     assert query_body["input"][0].endswith("Query: What is Taylor's passport number?")
+    assert connections == 1
+    assert embedder.transport_status()["connection_reuses"] >= 1
 
     with pytest.raises(ValueError, match="loopback IP literal"):
         OllamaTextEmbedder(base_url="http://localhost:11434", dimension=32)
@@ -1479,6 +1522,86 @@ def test_ollama_unavailable_fails_closed_without_hashing_fallback(
     monkeypatch.setattr(http.client, "HTTPConnection", Connection)
     with pytest.raises(RuntimeError, match="service is unavailable"):
         OllamaTextEmbedder(dimension=32)
+
+
+def test_ollama_transport_circuit_opens_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail = False
+    attempts = 0
+    digest = "c" * 64
+
+    class Response:
+        status = 200
+        will_close = False
+
+        def __init__(self, body: object) -> None:
+            self._body = json.dumps(body).encode()
+
+        def getheader(self, name: str, default: str | None = None) -> str | None:
+            if name == "Content-Type":
+                return "application/json"
+            return default
+
+        def read(self, _limit: int) -> bytes:
+            return self._body
+
+    class Connection:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.path = ""
+
+        def request(self, _method: str, path: str, **_kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if fail:
+                raise ConnectionRefusedError("synthetic outage")
+            self.path = path
+
+        def getresponse(self) -> Response:
+            if self.path == "/api/tags":
+                return Response(
+                    {
+                        "models": [
+                            {
+                                "name": "qwen3-embedding:latest",
+                                "digest": digest,
+                                "details": {"embedding_length": 4096},
+                            }
+                        ]
+                    }
+                )
+            vector = [0.0] * 32
+            vector[0] = 1.0
+            return Response({"embeddings": [vector]})
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(
+        agent_memory_module,
+        "OLLAMA_CIRCUIT_COOLDOWN_SECONDS",
+        0.01,
+    )
+    embedder = OllamaTextEmbedder(dimension=32)
+    fail = True
+    for _ in range(3):
+        with pytest.raises(EmbeddingUnavailable):
+            embedder.embed_query("Where is the runbook?")
+    opened_at = attempts
+    assert embedder.transport_status()["circuit_state"] == "open"
+    with pytest.raises(EmbeddingUnavailable, match="circuit"):
+        embedder.embed_query("Where is the runbook?")
+    assert attempts == opened_at
+
+    time.sleep(0.02)
+    fail = False
+    recovered = embedder.embed_query("Where is the runbook?")
+    assert np.linalg.norm(recovered) == pytest.approx(1.0)
+    status = embedder.transport_status()
+    assert status["circuit_state"] == "healthy"
+    assert status["consecutive_failures"] == 0
+    assert status["payload_included"] is False
 
 
 def test_always_available_layer_is_read_only_explicit_and_conservative(

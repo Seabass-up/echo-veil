@@ -17,7 +17,14 @@ from typing import Any, BinaryIO, cast
 
 from . import __version__
 from ._json import strict_json_loads
-from .agent_broker import BrokerClient, BrokerServer, default_broker_socket
+from .agent_broker import (
+    DEFAULT_BROKER_PER_CALLER_QUOTA,
+    DEFAULT_BROKER_QUEUE_DEPTH,
+    DEFAULT_BROKER_TIMEOUT_SECONDS,
+    BrokerClient,
+    BrokerServer,
+    default_broker_socket,
+)
 from .agent_memory import (
     AgentMemory,
     AlwaysAvailableMemory,
@@ -1582,6 +1589,33 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--broker-queue-depth",
+        type=int,
+        default=_int_from_env(
+            "ECHO_VEIL_BROKER_QUEUE_DEPTH",
+            DEFAULT_BROKER_QUEUE_DEPTH,
+        ),
+        help="maximum queued broker requests before fail-closed saturation",
+    )
+    parser.add_argument(
+        "--broker-per-caller-quota",
+        type=int,
+        default=_int_from_env(
+            "ECHO_VEIL_BROKER_PER_CALLER_QUOTA",
+            DEFAULT_BROKER_PER_CALLER_QUOTA,
+        ),
+        help="maximum queued requests for one declared local caller",
+    )
+    parser.add_argument(
+        "--broker-request-deadline",
+        type=float,
+        default=_float_from_env(
+            "ECHO_VEIL_BROKER_REQUEST_DEADLINE",
+            DEFAULT_BROKER_TIMEOUT_SECONDS,
+        ),
+        help="server-side queue and dispatch deadline in seconds",
+    )
+    parser.add_argument(
         "--scope",
         default=os.environ.get("ECHO_VEIL_SCOPE", "local-user"),
         help="authorization scope bound to this encrypted profile",
@@ -1729,13 +1763,20 @@ def main(argv: list[str] | None = None) -> int:
                     if args.broker_socket is None
                     else args.broker_socket.expanduser().absolute()
                 )
-                return _run_broker(broker_memory, socket_path)
+                return _run_broker(
+                    broker_memory,
+                    socket_path,
+                    queue_depth=args.broker_queue_depth,
+                    per_caller_quota=args.broker_per_caller_quota,
+                    request_deadline_seconds=args.broker_request_deadline,
+                )
         if args.broker_socket is not None:
             broker = BrokerClient(
                 args.broker_socket,
                 caller=caller or "local-cli",
                 timeout_seconds=min(
                     float(args.profile_lock_timeout),
+                    float(args.broker_request_deadline),
                     120.0,
                 ),
             )
@@ -2053,13 +2094,29 @@ def _run_explicit_maintenance(args: argparse.Namespace) -> int:
             if args.confirm is not True:
                 raise ValueError("Live pruning requires --confirm")
             result = {"expired_live_pruned": memory._prune_expired_live_memory()}
+        elif args.mode == "maintain" and args.command in {
+            "analyze",
+            "checkpoint",
+            "vacuum",
+        }:
+            result = memory.maintain_storage(
+                args.command,
+                confirm=args.confirm,
+            )
         else:
             raise ValueError(f"unsupported {args.mode} subcommand")
     print(_json(result))
     return 0
 
 
-def _run_broker(memory: MemoryAdapter, socket_path: Path) -> int:
+def _run_broker(
+    memory: MemoryAdapter,
+    socket_path: Path,
+    *,
+    queue_depth: int,
+    per_caller_quota: int,
+    request_deadline_seconds: float,
+) -> int:
     """Serve a single profile until SIGINT/SIGTERM while preserving cleanup."""
 
     stop = threading.Event()
@@ -2083,6 +2140,9 @@ def _run_broker(memory: MemoryAdapter, socket_path: Path) -> int:
                 arguments,
                 caller=caller,
             ),
+            queue_depth=queue_depth,
+            per_caller_quota=per_caller_quota,
+            request_deadline_seconds=request_deadline_seconds,
         ).serve_forever(stop_event=stop)
     finally:
         for number, handler in previous_handlers.items():

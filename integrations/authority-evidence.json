@@ -16,7 +16,7 @@
     "src/echo_veil/preflight_receipt.py",
     "src/echo_veil/protocol_compat.py"
   ],
-  "shared_source_digest": "sha256:97b5c92f09970801ee8565aba6fa4944da7138e1568fb77d46f9e7d64fcd9b29",
+  "shared_source_digest": "sha256:ca774dcc5e3939b5de3d030f7259ddfbbf258cf92ee57f2783a332b09ba640b3",
   "hosts": [
     {
       "id": "algo-cli",
@@ -168,7 +168,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:bf0b7fdb21c58a35d27ead9545ddda83e0355ef1ab4149d5e5ecc79137187b5b",
+      "source_digest": "sha256:587ae8ee485d3a141bbb61328fbbd3c50ec83a1873f92799d063e99f88ca2422",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
