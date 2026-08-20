@@ -7,6 +7,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Expanded the bounded local qualification gate with six lifecycle checkpoints
+  spanning 365 simulated days and a 48-record v2-to-v3 migration under 96
+  scheduled reads from four workers. The stale record demotes and evicts, the
+  locked record survives, all records reconcile after restart, and the report
+  explicitly keeps `preflight_v2` while disclaiming wall-clock soak and physical
+  power-loss evidence.
 - Added an explicit, non-default `supporting` recall mode for indirect and
   multi-hop evidence while preserving the existing `direct` answerability gate.
   Supporting results are labeled non-authoritative, confidence gating remains

@@ -12,14 +12,18 @@ import os
 from pathlib import Path
 import statistics
 import tempfile
+import threading
 import time
 from typing import Any
 
 import numpy as np
 
 from echo_veil.archive import IndexEntry
+from echo_veil.agent_memory import AgentMemory
 from echo_veil.persistence import MAX_INDEX_BATCH_SIZE, SQLiteStore
 from echo_veil.vectors import cosine_similarity
+from echo_veil.vine import Vine, VineState
+from echo_veil.workspace import Workspace, WorkspaceConfig
 
 REPORT_SCHEMA = "echo-veil-local-qualification-v1"
 DEFAULT_SIZES = (1_000, 10_000, 100_000)
@@ -27,6 +31,37 @@ MAX_CORPUS_SIZE = 1_000_000
 ABRUPT_BEFORE_COMMIT_EXIT = 86
 ABRUPT_AFTER_COMMIT_EXIT = 87
 LSH_KEY = b"echo-veil-qualification-key-v1!!"
+MIGRATION_LOAD_RECORDS = 48
+MIGRATION_LOAD_READERS = 4
+MIGRATION_LOAD_READS_PER_READER = 12
+
+
+class _QualificationEmbedder:
+    identity = "qualification:semantic:v1:dimension:32"
+    name = "qualification"
+    model = "deterministic-semantic-v1"
+    dimension = 32
+    semantic = True
+    default_min_score = 0.44
+
+    @staticmethod
+    def _vector() -> np.ndarray:
+        value = np.zeros(32, dtype=np.float64)
+        value[0] = 1.0
+        return value
+
+    def embed_document(self, _text: str) -> np.ndarray:
+        return self._vector()
+
+    def embed_documents(self, texts: list[str]) -> list[np.ndarray]:
+        return [self._vector() for _text in texts]
+
+    def embed_query(self, _text: str) -> np.ndarray:
+        return self._vector()
+
+    def embed_retrieval_queries(self, _text: str) -> tuple[np.ndarray, np.ndarray]:
+        value = self._vector()
+        return value, value.copy()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -362,6 +397,176 @@ def _run_abrupt_recovery(root: Path, *, dimension: int) -> dict[str, Any]:
     }
 
 
+def _run_long_duration_lifecycle() -> dict[str, Any]:
+    start = 1_700_000_000.0
+    anchor = np.array([1.0, 0.0], dtype=np.float64)
+    unrelated = np.array([0.0, 1.0], dtype=np.float64)
+    workspace = Workspace(WorkspaceConfig(capacity=8))
+    stale = workspace.add(
+        Vine(
+            "long-duration stale record",
+            anchor,
+            created_at=start,
+            last_touched=start,
+        )
+    )
+    locked = workspace.add(
+        Vine(
+            "long-duration locked record",
+            anchor,
+            created_at=start,
+            last_touched=start,
+        )
+    )
+    workspace.lock(locked.vine_id)
+    checkpoints_days = (0, 1, 30, 180, 364, 365)
+    stale_scores: list[float] = []
+    demoted = False
+    evicted = False
+    for days in checkpoints_days:
+        report = workspace.run_decay_cycle(
+            unrelated,
+            now=start + days * 24 * 60 * 60,
+        )
+        demoted = demoted or stale.vine_id in report["demoted"]
+        evicted = evicted or stale.vine_id in report["evicted"]
+        stale_scores.append(stale.score)
+    monotonic = all(
+        left >= right for left, right in zip(stale_scores, stale_scores[1:])
+    )
+    passed = (
+        demoted
+        and evicted
+        and stale.state == VineState.EVICTED
+        and locked.state == VineState.ACTIVE
+        and locked.locked
+        and monotonic
+    )
+    return {
+        "passed": passed,
+        "simulated_days": checkpoints_days[-1],
+        "checkpoints": len(checkpoints_days),
+        "stale_demoted": demoted,
+        "stale_evicted": evicted,
+        "locked_record_survived": (locked.state == VineState.ACTIVE and locked.locked),
+        "stale_scores_monotonic": monotonic,
+        "wall_clock_wait_claimed": False,
+    }
+
+
+def _run_migration_under_load(root: Path) -> dict[str, Any]:
+    state_dir = root / "migration-under-load"
+    state_dir.mkdir(mode=0o700)
+    profile = "qualification"
+    embedder = _QualificationEmbedder()
+    reader_barrier = threading.Barrier(MIGRATION_LOAD_READERS + 1)
+    with AgentMemory(
+        state_dir,
+        profile=profile,
+        capacity=MIGRATION_LOAD_RECORDS + 8,
+        embed=embedder,
+    ) as memory:
+        for index in range(MIGRATION_LOAD_RECORDS):
+            memory.remember(
+                f"migration record {index:03d}",
+                f"Protected migration record {index:03d} remains readable.",
+                provenance=["qualification:migration-under-load"],
+            )
+        backup = memory.backup_create(root / "migration-under-load-backup")
+        first = memory.migrate_record_envelope_v3(
+            confirm=True,
+            batch_size=1,
+            verified_backup=backup,
+        )
+        if first["state"] != "migrating":
+            raise RuntimeError("migration-under-load fixture completed unexpectedly")
+
+        def migrate() -> dict[str, Any]:
+            reader_barrier.wait(timeout=10.0)
+            result = first
+            calls = 1
+            while result["state"] != "verified" and calls <= 1_000:
+                result = memory.migrate_record_envelope_v3(
+                    confirm=True,
+                    batch_size=2,
+                )
+                calls += 1
+            return {
+                "calls": calls,
+                "verified": result["state"] == "verified",
+                "remaining_v2_records": int(result["remaining_v2_records"]),
+                "remaining_v2_lifecycle_records": int(
+                    result["remaining_v2_lifecycle_records"]
+                ),
+            }
+
+        def read() -> dict[str, int]:
+            reader_barrier.wait(timeout=10.0)
+            operations = 0
+            incomplete = 0
+            empty_recall = 0
+            for _index in range(MIGRATION_LOAD_READS_PER_READER):
+                listed = memory.list_memories(limit=MIGRATION_LOAD_RECORDS + 1)
+                incomplete += int(len(listed) != MIGRATION_LOAD_RECORDS)
+                recalled = memory.recall("Which migration records remain readable?")
+                empty_recall += int(not recalled["results"])
+                operations += 2
+            return {
+                "operations": operations,
+                "incomplete": incomplete,
+                "empty_recall": empty_recall,
+            }
+
+        with ThreadPoolExecutor(max_workers=MIGRATION_LOAD_READERS + 1) as executor:
+            migration_future = executor.submit(migrate)
+            reader_futures = [
+                executor.submit(read) for _index in range(MIGRATION_LOAD_READERS)
+            ]
+            migration = migration_future.result()
+            reader_reports = [future.result() for future in reader_futures]
+
+        final = memory.doctor()["record_envelope"]
+        final_count = len(memory.list_memories(limit=MIGRATION_LOAD_RECORDS + 1))
+
+    with AgentMemory(
+        state_dir,
+        profile=profile,
+        capacity=MIGRATION_LOAD_RECORDS + 8,
+        embed=embedder,
+    ) as reopened:
+        restart_count = len(reopened.list_memories(limit=MIGRATION_LOAD_RECORDS + 1))
+        restart_state = reopened.doctor()["record_envelope"]["migration_state"]
+
+    read_operations = sum(item["operations"] for item in reader_reports)
+    incomplete_reads = sum(item["incomplete"] for item in reader_reports)
+    empty_recalls = sum(item["empty_recall"] for item in reader_reports)
+    passed = (
+        migration["verified"] is True
+        and migration["remaining_v2_records"] == 0
+        and migration["remaining_v2_lifecycle_records"] == 0
+        and final["migration_state"] == "verified"
+        and final_count == MIGRATION_LOAD_RECORDS
+        and restart_count == MIGRATION_LOAD_RECORDS
+        and restart_state == "verified"
+        and read_operations
+        == MIGRATION_LOAD_READERS * MIGRATION_LOAD_READS_PER_READER * 2
+        and incomplete_reads == 0
+        and empty_recalls == 0
+    )
+    return {
+        "passed": passed,
+        "records": MIGRATION_LOAD_RECORDS,
+        "reader_workers": MIGRATION_LOAD_READERS,
+        "reader_operations": read_operations,
+        "incomplete_reads": incomplete_reads,
+        "empty_recalls": empty_recalls,
+        "migration_calls": migration["calls"],
+        "migration_verified": migration["verified"],
+        "restart_verified": restart_state == "verified",
+        "preflight_protocol": "preflight_v2",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _validate_args(args)
@@ -383,11 +588,15 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
         )
         abrupt_recovery = _run_abrupt_recovery(root, dimension=args.dimension)
+        lifecycle = _run_long_duration_lifecycle()
+        migration_under_load = _run_migration_under_load(root)
 
     passed = (
         all(item["passed"] is True for item in scale)
         and concurrency["passed"] is True
         and abrupt_recovery["passed"] is True
+        and lifecycle["passed"] is True
+        and migration_under_load["passed"] is True
     )
     report = {
         "schema": REPORT_SCHEMA,
@@ -395,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         "scale": scale,
         "concurrent_read_write": concurrency,
         "abrupt_recovery": abrupt_recovery,
+        "long_duration_lifecycle": lifecycle,
+        "migration_under_load": migration_under_load,
         "scope": {
             "measured": [
                 "durable keyed-LSH candidate lookup",
@@ -402,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
                 "SQLite storage growth and integrity-checked reopen",
                 "concurrent WAL readers with one bounded writer",
                 "abrupt process exit before and after commit",
+                "365-day simulated lifecycle decay and locked-record survival",
+                "bounded record-envelope v3 migration under concurrent read load",
             ],
             "not_measured": [
                 "semantic embedding quality",
