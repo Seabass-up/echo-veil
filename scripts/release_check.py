@@ -87,6 +87,7 @@ REQUIRED_SDIST_FILES = {
     "scripts/verify_n_minus_one_consumers.py",
     "scripts/privacy_scan.py",
     "scripts/quality_benchmark.py",
+    "scripts/qualification_benchmark.py",
     "scripts/release_check.py",
     "scripts/secure_bundle.py",
     "scripts/security_scan.py",

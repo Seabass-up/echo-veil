@@ -65,7 +65,13 @@
     {"category":"keyword","query":"security audit events searchable 400 days","expected":"retention"},
     {"category":"paraphrase","query":"How long can investigators look up security history?","expected":"retention"},
     {"category":"long_memory","query":"Which replica restores Orchard after quorum loss?","expected":"long"},
-    {"category":"long_memory","query":"What sequence number must be checked before Orchard traffic resumes?","expected":"long"}
+    {"category":"long_memory","query":"What sequence number must be checked before Orchard traffic resumes?","expected":"long"},
+    {"category":"multilingual","language":"es","query":"¿Cuántos días tiene un cliente para pagar una factura normal?","expected":"invoice"},
+    {"category":"multilingual","language":"fr","query":"Comment s’appellent les enfants de Taylor ?","expected":"family"},
+    {"category":"multilingual","language":"de","query":"Darf der Agent über die Chat-Integration antworten?","expected":"messages"},
+    {"category":"multilingual","language":"pt","query":"Por quantos dias os backups diários criptografados são mantidos?","expected":"backup"},
+    {"category":"multilingual","language":"ja","query":"現在、サービスはどのリージョンで稼働していますか？","expected":"region_current"},
+    {"category":"multilingual","language":"zh","query":"控制面板批准使用哪一种二十四伏电源？","expected":"power"}
   ],
   "distractors": [
     "purple llama tungsten",

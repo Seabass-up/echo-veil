@@ -8,8 +8,8 @@ installed embedding model as proof of quality.
 On 2026-08-20, `qwen3-embedding:latest` at 1,024 dimensions passed the committed
 neutral suite with:
 
-- 42/42 correct top-1 results: 17 keyword, 19 paraphrase, 2 current-update,
-  2 temporal, and 2 long-memory queries;
+- 48/48 correct top-1 results: 17 keyword, 19 paraphrase, 6 multilingual,
+  2 current-update, 2 temporal, and 2 long-memory queries;
 - 14/14 unrelated and same-subject/absent-fact queries rejected;
 - 17/17 keyword records recovered and 14/14 distractors rejected through the
   read-only always-available layer with semantic embeddings unavailable;
@@ -22,18 +22,19 @@ neutral suite with:
 - 1/1 protected Live-refresh probe renewed unchanged state in place, created a
   shielded superseding version for changed content, survived restart and
   read-only reopen, and rejected a degraded write;
-- 213.19 ms mean and 223.29 ms p95 recall;
-- 26.86 ms to resolve and verify the local model identity;
-- 192.59 ms for the first protected remember and 146.47 ms steady mean
+- 212.60 ms mean and 223.61 ms p95 recall;
+- 26.54 ms to resolve and verify the local model identity;
+- 192.52 ms for the first protected remember and 146.49 ms steady mean
   remember after that operation;
-- 223.13 ms for the semantic protected-context trace;
-- 221.54 ms for the semantic competing-pair probe;
-- 109.89 ms for a changed-content protected Live refresh; and
-- 23.45 ms to reopen, authenticate the four-layer contracts, and restore the
+- 223.90 ms for the semantic protected-context trace;
+- 223.64 ms for the semantic competing-pair probe;
+- 114.39 ms for a changed-content protected Live refresh; and
+- 23.28 ms to reopen, authenticate the four-layer contracts, and restore the
   persisted profile.
 
-The same committed corpus, queried through the installed OpenClaw memory-core
-CLI, returned 32/42 correct top-1 results and rejected 9/14 distractors. Its
+The original 42-case English subset, queried through the installed OpenClaw
+memory-core CLI, returned 32/42 correct top-1 results and rejected 9/14
+distractors. Its
 category result was 17/17 keyword, 10/19 paraphrase, 2/2 current-update, 1/2
 temporal, and 2/2 long-memory. The CLI-level latency measurement includes host
 process overhead and therefore is not used as a direct engine-latency claim.
@@ -431,12 +432,13 @@ retrieval cases finish.
 
 ## Pi/Codex broker and adversarial gate
 
-On 2026-08-20 the expanded real-Qwen3 gate repeated all 42 retrieval cases and
+On 2026-08-20 the expanded real-Qwen3 gate repeated all 48 retrieval cases and
 14 hard negatives, then exercised Pi and Codex concurrently against one
 owner-only serialized broker. It passed:
 
-- 19/19 natural paraphrases, 14/14 unrelated/same-person absent facts, both
-  corrections/temporal histories, and the protected competing pair;
+- 19/19 natural paraphrases, 6/6 multilingual paraphrases, 14/14
+  unrelated/same-person absent facts, both corrections/temporal histories,
+  and the protected competing pair;
 - 13 warm brokered preflights across six concurrent Pi/Codex pairs plus one
   poisoned-memory request, with one socket round trip and zero subprocesses per
   preflight;
@@ -446,10 +448,10 @@ owner-only serialized broker. It passed:
   `trust=untrusted_memory_evidence`, with no mutation capability in the signed
   receipt;
 - payload-free preflight/broker telemetry and compact runtime ritual status;
-- 478.17 ms concurrent warm preflight p95, below the 500 ms target;
+- 479.52 ms concurrent warm preflight p95, below the 500 ms target;
 - a bounded one-slot saturation gate that rejected the third request before
   dispatcher, provider, model, agent, or tool execution, with payload-free
-  queue telemetry and a 7.642 ms queue-wait p95; and
+  queue telemetry and a 7.537 ms queue-wait p95; and
 - forced Pi/Codex semantic-gate failure with zero provider calls, zero agent
   starts, zero tool executions, a blocked write, and a still-manual degraded
   read-only availability query.
@@ -467,12 +469,33 @@ availability failures. SQLite capacity, WAL, analyze, checkpoint, and vacuum
 controls are exposed through payload-free status and explicit maintenance;
 read-only diagnostics do not run those operations.
 
+## Local scale and recovery gate
+
+On 2026-08-20 the deterministic 1,024-dimensional qualification gate passed at
+1K, 10K, and 100K durable index records. Every tier returned 12/12 retained
+targets at top one after an integrity-checked reopen. At 100K, keyed LSH sent a
+maximum 3.275% of the corpus to exact reranking, search p95 was 359.45 ms, the
+full authenticated-index reopen took 6.67 seconds, insertion took 23.82
+seconds, and the closed SQLite set occupied 1,024,405,504 bytes (10,244 bytes
+per record). Those are same-machine local measurements rather than universal
+SLOs.
+
+The same gate completed 48 correct reads through four SQLite WAL reader
+connections while one bounded writer committed 1,000 records, with no errors
+or wrong results and 21.65 ms reader p95. Separate spawned processes exited
+abruptly before and after commit: the uncommitted transaction rolled back and
+the committed record survived an integrity-checked reopen. SQLite uses
+`synchronous=FULL`, but this is an abrupt-process/WAL simulation, not evidence
+of physical power removal, controller-cache durability, distributed storage,
+or semantic quality at 100K. The semantic Qwen3 gate above remains separate.
+
 ## Reproduce
 
 ```bash
 ollama pull qwen3-embedding:latest
 ollama stop qwen3-embedding:latest
 uv run --locked python scripts/quality_benchmark.py
+uv run --locked python scripts/qualification_benchmark.py
 uv run --locked python scripts/memory_core_benchmark.py
 ```
 

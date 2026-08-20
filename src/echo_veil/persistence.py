@@ -61,6 +61,7 @@ SCHEMA_VERSION = 4
 DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_METADATA_BYTES = 65_536
 LSH_INDEX_SCHEMA = "echo-veil-lsh-index-v2"
+MAX_INDEX_BATCH_SIZE = 1_000
 
 
 class SQLiteStore:
@@ -972,16 +973,11 @@ class SQLiteStore:
         )
 
     def _upsert_index(self, key: str, anchor: Any, kind: str) -> None:
-        MetadataIndex._validate_key(key)
-        self._validate_kind(kind)
-        payload, dimension = self._encode_index_anchor(anchor, kind)
-        prepared_signatures = self._signatures_for_entry(
-            IndexEntry(key=key, anchor=anchor, kind=kind),
-            dimension,
-        )
-        signatures = () if prepared_signatures is None else prepared_signatures
         with self._lock:
             self._ensure_open_locked()
+            key, kind, payload, dimension, signatures = self._prepare_index_upsert(
+                IndexEntry(key=key, anchor=anchor, kind=kind)
+            )
             self._begin_locked()
             try:
                 self._upsert_metadata_locked(key, kind, payload, dimension)
@@ -990,6 +986,68 @@ class SQLiteStore:
             except Exception:
                 self._rollback_locked()
                 raise
+
+    def _upsert_index_batch(self, entries: list[IndexEntry]) -> None:
+        if not isinstance(entries, list):
+            raise TypeError("index batch must be a list of IndexEntry objects")
+        if not entries or len(entries) > MAX_INDEX_BATCH_SIZE:
+            raise ValueError(
+                f"index batch must contain between 1 and {MAX_INDEX_BATCH_SIZE} entries"
+            )
+        if not all(isinstance(entry, IndexEntry) for entry in entries):
+            raise TypeError("index batch must be a list of IndexEntry objects")
+        with self._lock:
+            self._ensure_open_locked()
+            prepared = [self._prepare_index_upsert(entry) for entry in entries]
+            keys = [entry[0] for entry in prepared]
+            if len(set(keys)) != len(keys):
+                raise ValueError("index batch keys must be unique")
+            dimensions = {entry[3] for entry in prepared}
+            if len(dimensions) != 1:
+                raise ValueError("index batch dimensions must match")
+            dimension = next(iter(dimensions))
+            self._begin_locked()
+            try:
+                rows = self._connection.execute(
+                    "SELECT DISTINCT dimension FROM metadata_index LIMIT 2"
+                ).fetchall()
+                if len(rows) > 1:
+                    raise RuntimeError(
+                        "metadata index contains inconsistent dimensions"
+                    )
+                if rows and int(rows[0][0]) != dimension:
+                    raise ValueError(
+                        f"dimension mismatch: expected ({int(rows[0][0])},), "
+                        f"got ({dimension},)"
+                    )
+                for key, kind, payload, entry_dimension, signatures in prepared:
+                    self._write_metadata_locked(
+                        key,
+                        kind,
+                        payload,
+                        entry_dimension,
+                    )
+                    self._replace_ann_buckets_locked(key, signatures)
+                self._commit_locked()
+            except Exception:
+                self._rollback_locked()
+                raise
+
+    def _prepare_index_upsert(
+        self,
+        entry: IndexEntry,
+    ) -> tuple[str, str, bytes, int, tuple[tuple[int, bytes], ...]]:
+        MetadataIndex._validate_key(entry.key)
+        self._validate_kind(entry.kind)
+        payload, dimension = self._encode_index_anchor(entry.anchor, entry.kind)
+        prepared_signatures = self._signatures_for_entry(entry, dimension)
+        return (
+            entry.key,
+            entry.kind,
+            payload,
+            dimension,
+            () if prepared_signatures is None else prepared_signatures,
+        )
 
     def _remove_index(self, key: str) -> bool:
         MetadataIndex._validate_key(key)
@@ -1007,9 +1065,9 @@ class SQLiteStore:
                 raise
 
     def _index_rows(self, query: Vector) -> list[tuple[str, str, bytes, int]]:
-        signatures = self._lsh.signatures(query)
         with self._lock:
             self._ensure_open_locked()
+            signatures = self._lsh.signatures(query)
             self._connection.execute("DELETE FROM query_ann_buckets")
             self._connection.executemany(
                 "INSERT INTO query_ann_buckets(band, bucket) VALUES (?, ?)",
@@ -1521,6 +1579,15 @@ class SQLiteStore:
                 f"dimension mismatch: expected ({int(conflicting_rows[0][0])},), "
                 f"got ({dimension},)"
             )
+        self._write_metadata_locked(key, kind, payload, dimension)
+
+    def _write_metadata_locked(
+        self,
+        key: str,
+        kind: str,
+        payload: bytes,
+        dimension: int,
+    ) -> None:
         self._connection.execute(
             """
             INSERT INTO metadata_index(key, kind, payload, dimension, updated_at)
@@ -1690,6 +1757,11 @@ class SQLiteMetadataIndex:
 
     def upsert(self, key: str, anchor: Any, kind: str = "anchor") -> None:
         self._store._upsert_index(key, anchor, kind)
+
+    def upsert_many(self, entries: list[IndexEntry]) -> None:
+        """Atomically upsert one bounded batch of already constructed entries."""
+
+        self._store._upsert_index_batch(entries)
 
     def remove(self, key: str) -> bool:
         return self._store._remove_index(key)

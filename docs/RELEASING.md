@@ -136,6 +136,13 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    unrequested preflight mutations, zero provider/agent/tool activity on forced
    outage, poisoned memory remaining escaped untrusted evidence, and warm
    concurrent Pi/Codex broker p95 below 500 ms on the qualification machine.
+   Run `uv run --locked python scripts/qualification_benchmark.py` for the
+   1K, 10K, and 100K 1,024-dimensional durable-index tiers. It must preserve
+   exact top-one targets, keep exact reranking below ten percent of each
+   corpus, survive an integrity-checked reopen, serve concurrent WAL readers
+   during a bounded write, and recover correctly from abrupt process exit on
+   both sides of commit. This is a local index/storage gate, not a semantic,
+   distributed-scale, or physical power-removal claim.
    OpenClaw must also block a hot-reload attempt to re-enable native
    session-memory. Hermes and normal Goose recipe mode should be smoke-tested in isolated
    temporary host profiles so release checks never mutate an operator's

@@ -13,6 +13,12 @@ All notable changes to Echo Veil are documented here. The project follows
   external-monotonic tier. The 2026-08-20 real-Qwen gate passed all 42 retrieval
   cases and 14 hard negatives, with 223.29 ms recall p95 and 478.17 ms warm
   concurrent Pi/Codex preflight p95.
+- Added six-language semantic retrieval cases and a bounded 1K/10K/100K local
+  index qualification gate. Keyed projection planes are reused per stable
+  dimension, SQLite accepts atomic 1,000-entry index batches, and the gate
+  reports recall, exact-rerank candidate fraction, latency, storage growth,
+  concurrent WAL reads/writes, and abrupt pre/post-commit recovery without
+  mislabeling the latter as a physical power-cut test.
 - Added a pinned N-1 compatibility gate for the exact v0.7 consumer bytes.
   CI now generates responses from real mixed-v2/v3 and fully-v3 profiles,
   executes the prior OpenClaw, OpenCode, Pi, Hermes, and shared Python
