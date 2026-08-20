@@ -26,6 +26,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 import time
 import uuid
 from collections import deque
@@ -67,12 +68,14 @@ from .agent_security import (
     _windows_verify_private_sqlite_sidecars,
 )
 from .archive import TransactionalEvictionStore
+from .backup import VerifiedBackup
 from .confidence import classify
 from .crypto_shield import AesGcmCryptoShield
 from .oracle import GenerationGated, Oracle
 from .persistence import SQLiteStore
 from .proximity import time_decay
 from .record_envelope import (
+    KEY_PURPOSE_BACKUP_MANIFEST,
     KEY_PURPOSE_CONTENT_DIGEST,
     KEY_PURPOSE_LEXICAL_TOKEN,
     KEY_PURPOSE_PAYLOAD,
@@ -85,6 +88,7 @@ from .record_envelope import (
     RECORD_ENVELOPE_V3_FEATURE,
     SUPPORTED_RECORD_ENVELOPES,
 )
+from .readiness_store import ReadinessEvidenceError, ReadinessEvidenceStore
 from .memory_layers import (
     LogicKind,
     MemoryLayer,
@@ -117,6 +121,8 @@ DEFAULT_SEMANTIC_MIN_SCORE = 0.44
 DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
 DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
 DEFAULT_HASHING_MIN_SCORE = 0.35
+OFFLINE_READ_ONLY_DISPLAY_NAME = "Offline Read-Only Recall"
+ALWAYS_AVAILABLE_COMPAT_MODE = "always-available-read-only"
 DEFAULT_CAPACITY = 400
 MAX_TOPIC_CHARS = 512
 MAX_PAYLOAD_CHARS = 100_000
@@ -783,7 +789,7 @@ class _LegacyEncryptedPayloadStore:
         self._read_only = read_only
         if read_only:
             _verify_private_sqlite_files(path, "payload database")
-            database = f"{path.absolute().as_uri()}?mode=ro"
+            database = _immutable_sqlite_uri(path, "payload database")
         else:
             _secure_regular_file(path)
             database = str(path)
@@ -1559,7 +1565,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         legacy_key: bytes | None = None,
         read_only: bool = False,
     ) -> None:
-        existing_version = _payload_database_version(path)
+        existing_version = _payload_database_version(path, observational=read_only)
         if existing_version == LEGACY_PAYLOAD_SCHEMA_VERSION:
             if legacy_key is None:
                 raise KeyUnavailable("legacy profile key is unavailable")
@@ -1582,7 +1588,7 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         self._read_only = read_only
         if read_only:
             _verify_private_sqlite_files(path, "payload database")
-            database = f"{path.absolute().as_uri()}?mode=ro"
+            database = _immutable_sqlite_uri(path, "payload database")
         else:
             _secure_regular_file(path)
             database = str(path)
@@ -2804,46 +2810,51 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         if not self._secure_schema:
             return super().find_by_hash(super().digest(topic, payload))
         keyring = self._require_keyring()
-        versions = (
-            SUPPORTED_RECORD_ENVELOPES
-            if keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE)
-            else frozenset({RECORD_ENVELOPE_V2})
-        )
-        for key_id in keyring.key_ids:
-            for version in versions:
-                content_hash = self._content_digest(
-                    keyring.key_for_envelope(
-                        key_id,
-                        purpose=KEY_PURPOSE_CONTENT_DIGEST,
-                        envelope_version=version,
-                    ),
-                    topic,
-                    payload,
-                )
-                row = self._connection.execute(
-                    """
-                    SELECT payloads.vine_id
-                    FROM payloads
-                    LEFT JOIN quarantine
-                      ON quarantine.vine_id = payloads.vine_id
-                    WHERE payloads.content_hash = ?
-                      AND payloads.operation_state = 'committed'
-                      AND quarantine.vine_id IS NULL
-                    """,
-                    (content_hash,),
-                ).fetchone()
-                if row is None:
-                    continue
-                record = self.get_record(str(row[0]))
-                if record is not None and hmac.compare_digest(
-                    record[0].encode("utf-8"),
-                    topic.encode("utf-8"),
+        contexts = self._connection.execute(
+            "SELECT DISTINCT key_id, format_version FROM payloads "
+            "WHERE operation_state = 'committed'"
+        ).fetchall()
+        for key_id_raw, version_raw in contexts:
+            key_id = str(key_id_raw)
+            version = int(version_raw)
+            if (
+                key_id not in keyring.key_ids
+                or version not in SUPPORTED_RECORD_ENVELOPES
+            ):
+                raise KeyUnavailable("encrypted record context is invalid")
+            content_hash = self._content_digest(
+                keyring.key_for_envelope(
+                    key_id,
+                    purpose=KEY_PURPOSE_CONTENT_DIGEST,
+                    envelope_version=version,
+                ),
+                topic,
+                payload,
+            )
+            row = self._connection.execute(
+                """
+                SELECT payloads.vine_id
+                FROM payloads
+                LEFT JOIN quarantine
+                  ON quarantine.vine_id = payloads.vine_id
+                WHERE payloads.content_hash = ?
+                  AND payloads.operation_state = 'committed'
+                  AND quarantine.vine_id IS NULL
+                """,
+                (content_hash,),
+            ).fetchone()
+            if row is None:
+                continue
+            record = self.get_record(str(row[0]))
+            if record is not None and hmac.compare_digest(
+                record[0].encode("utf-8"),
+                topic.encode("utf-8"),
+            ):
+                if hmac.compare_digest(
+                    record[1].encode("utf-8"),
+                    payload.encode("utf-8"),
                 ):
-                    if hmac.compare_digest(
-                        record[1].encode("utf-8"),
-                        payload.encode("utf-8"),
-                    ):
-                        return str(row[0]), record[0]
+                    return str(row[0]), record[0]
         return None
 
     def find_by_hash(self, content_hash: str) -> tuple[str, str] | None:
@@ -3663,11 +3674,17 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
         if not self._secure_schema:
             return super()._lexical_matches(query)
         keyring = self._require_keyring()
-        versions = (
-            SUPPORTED_RECORD_ENVELOPES
-            if keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE)
-            else frozenset({RECORD_ENVELOPE_V2})
+        context_query = (
+            "SELECT DISTINCT memory_terms.key_id, memory_terms.format_version "
+            "FROM memory_terms JOIN payloads "
+            "ON payloads.vine_id = memory_terms.vine_id "
+            "WHERE payloads.operation_state = 'committed'"
+            if self._v3_schema
+            else "SELECT DISTINCT memory_terms.key_id, 2 FROM memory_terms "
+            "JOIN payloads ON payloads.vine_id = memory_terms.vine_id "
+            "WHERE payloads.operation_state = 'committed'"
         )
+        contexts = self._connection.execute(context_query).fetchall()
         query_terms_by_context: dict[tuple[str, int], dict[bytes, int]] = {
             (key_id, version): self._term_features_for_key(
                 query,
@@ -3678,9 +3695,12 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                     envelope_version=version,
                 ),
             )
-            for key_id in keyring.key_ids
-            for version in versions
+            for key_id_raw, version_raw in contexts
+            for key_id, version in [(str(key_id_raw), int(version_raw))]
+            if key_id in keyring.key_ids and version in SUPPORTED_RECORD_ENVELOPES
         }
+        if len(query_terms_by_context) != len(contexts):
+            raise KeyUnavailable("encrypted lexical context is invalid")
         flattened: dict[tuple[bytes, str, int], int] = {}
         term_hashes: set[bytes] = set()
         for (key_id, version), terms in query_terms_by_context.items():
@@ -4747,6 +4767,8 @@ class AgentMemory:
         # recovery, and host-boundary verifiers.  RPC input and environment
         # variables must never be able to self-assert these fields.
         self._readiness_evidence = LocalReadinessEvidence()
+        self._readiness_evidence_error: str | None = None
+        self._readiness_store: ReadinessEvidenceStore | None = None
         self._lease = _ProfileWriterLease(
             self.profile_dir / "profile-lock.db",
             profile_lock_timeout_seconds,
@@ -4757,6 +4779,7 @@ class AgentMemory:
         self._authenticated_record_migrations = 0
         self._expired_live_pruned = 0
         self._restored_on_startup = False
+        self._last_verified_backup: VerifiedBackup | None = None
         self._store: SQLiteStore | None = None
         self._keyring: ProfileKeyring | None = None
         self._scoped_shield: ScopedAesGcmShield | None = None
@@ -4820,8 +4843,20 @@ class AgentMemory:
                 # startup so every later preflight remains read-only.
                 from .preflight_receipt import PreflightReceiptAuthority
 
-                PreflightReceiptAuthority(self.profile_dir, create=True)
+                PreflightReceiptAuthority(
+                    self.profile_dir,
+                    create=True,
+                    keyring=self._keyring,
+                )
             self._expired_live_pruned = self._prune_expired_live_memory()
+            if self._keyring is not None and self._keyring.has_feature(
+                RECORD_ENVELOPE_V3_FEATURE
+            ):
+                self._readiness_store = ReadinessEvidenceStore(
+                    self.profile_dir,
+                    self._keyring,
+                )
+                self._refresh_readiness_evidence()
             self._restored_on_startup = True
         except Exception:
             payloads = getattr(self, "_payloads", None)
@@ -4833,8 +4868,12 @@ class AgentMemory:
                     if self._store is not None:
                         self._store.close()
                 finally:
-                    self._lease.close()
-                    self._closed = True
+                    try:
+                        if self._keyring is not None:
+                            self._keyring.close()
+                    finally:
+                        self._lease.close()
+                        self._closed = True
             raise
 
     @property
@@ -5750,6 +5789,13 @@ class AgentMemory:
         rotation = self._keyring.begin_rotation()
         source = rotation["from"]
         target = rotation["to"]
+        if self._readiness_store is not None:
+            self._readiness_store.invalidate_recovery()
+            self._refresh_readiness_evidence()
+        if self._keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
+            from .preflight_receipt import protect_preflight_signing_key
+
+            protect_preflight_signing_key(self.profile_dir, self._keyring)
         if self._store is None:
             raise RuntimeError("lifecycle store is unavailable")
         lsh_rotation = self._store.rotate_lsh_index(self._keyring.lsh_index_key())
@@ -5791,6 +5837,397 @@ class AgentMemory:
             "lsh_index_rekeyed": bool(lsh_rotation["changed"]),
         }
 
+    def migrate_key_custody(
+        self,
+        *,
+        provider: str,
+        helper_path: Path,
+        verified_backup: VerifiedBackup | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Prepare and verify native custody while retaining the raw root.
+
+        The verifier receipt is an in-process capability, not a user-supplied
+        boolean. File retirement remains a separate confirmed operation.
+        """
+
+        if confirm is not True:
+            raise ValueError("key-custody migration requires confirm=true")
+        if self._keyring is None or self._scoped_shield is None:
+            raise RuntimeError("key custody requires a scoped profile")
+        status = self._payloads.record_envelope_status()
+        if status["migration_state"] != "verified" or status["v2_records"] != 0:
+            raise RuntimeError(
+                "key custody requires a fully verified record-envelope v3 profile"
+            )
+        keyring = self._keyring
+        from .backup import profile_hash_for
+
+        if not isinstance(verified_backup, VerifiedBackup):
+            raise ValueError("key-custody migration requires a verified backup receipt")
+        backup_key = keyring.key_for_envelope(
+            keyring.active_key_id,
+            purpose=KEY_PURPOSE_BACKUP_MANIFEST,
+            envelope_version=RECORD_ENVELOPE_V3,
+        )
+        if (
+            verified_backup.key_id != keyring.active_key_id
+            or verified_backup.profile_hash
+            != profile_hash_for(backup_key, keyring.scope_id)
+            or verified_backup.record_count != len(self._payloads)
+        ):
+            raise ValueError("verified backup does not match the open profile")
+        if keyring.custody_provider == "file-v1":
+            prepared = keyring.prepare_custody_migration(
+                provider=provider,
+                helper_path=helper_path,
+                backup_verified=True,
+            )
+            activated = keyring.activate_custody_migration(confirm=True)
+        else:
+            prepared = {
+                "provider": keyring.custody_provider,
+                "state": keyring.custody_state,
+            }
+            activated = dict(prepared)
+        verified_records = 0
+        for vine_id in self._payloads.record_ids_for_reindex():
+            record = self._payloads.get(vine_id)
+            if record is None:
+                raise RuntimeError("custody verification lost an encrypted record")
+            self._payloads.get_memory_contract(vine_id)
+            verified_records += 1
+        if self._payloads.quarantine_count() != 0:
+            raise RuntimeError("custody verification found quarantined records")
+        return {
+            "provider": activated["provider"],
+            "state": activated["state"],
+            "prepared": prepared["state"] == "prepared",
+            "verified_records": verified_records,
+            "raw_root_retained": keyring.raw_active_key_present,
+            "restart_verification_required": True,
+        }
+
+    def _backup_key(self) -> bytes:
+        if self._keyring is None:
+            raise RuntimeError("backups require a scoped profile")
+        if not self._keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
+            raise RuntimeError("backups require record-envelope v3")
+        return self._keyring.key_for_envelope(
+            self._keyring.active_key_id,
+            purpose=KEY_PURPOSE_BACKUP_MANIFEST,
+            envelope_version=RECORD_ENVELOPE_V3,
+        )
+
+    def _refresh_readiness_evidence(self) -> None:
+        """Load authenticated readiness facts without granting new authority."""
+
+        if self._readiness_store is None:
+            self._readiness_evidence = LocalReadinessEvidence()
+            self._readiness_evidence_error = None
+            return
+        try:
+            self._readiness_evidence = self._readiness_store.evidence()
+        except ReadinessEvidenceError:
+            self._readiness_evidence = LocalReadinessEvidence()
+            self._readiness_evidence_error = "EV-READINESS-EVIDENCE-INVALID"
+        else:
+            self._readiness_evidence_error = None
+
+    def _record_backup_readiness(self, receipt: VerifiedBackup) -> None:
+        if self._readiness_store is None:
+            if self._keyring is None:
+                raise RuntimeError("readiness evidence requires a scoped profile")
+            self._readiness_store = ReadinessEvidenceStore(
+                self.profile_dir,
+                self._keyring,
+            )
+        self._readiness_store.record_backup(receipt)
+        self._refresh_readiness_evidence()
+
+    def _record_restore_readiness(self, receipt: VerifiedBackup) -> None:
+        if self._readiness_store is None:
+            raise RuntimeError("readiness evidence requires record-envelope v3")
+        self._readiness_store.record_restore(receipt)
+        self._refresh_readiness_evidence()
+
+    def _backup_counts(self) -> dict[str, int]:
+        connection = self._payloads._connection
+        return {
+            "conflicts": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM payloads WHERE superseded_by IS NOT NULL"
+                ).fetchone()[0]
+            ),
+            "contracts": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM adapter_metadata "
+                    "WHERE key LIKE 'memory_contract:%'"
+                ).fetchone()[0]
+            ),
+            "records": int(
+                connection.execute("SELECT COUNT(*) FROM payloads").fetchone()[0]
+            ),
+            "terms": int(
+                connection.execute("SELECT COUNT(*) FROM memory_terms").fetchone()[0]
+            ),
+            "tombstones": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deletion_tombstones"
+                ).fetchone()[0]
+            ),
+            "vectors": int(
+                connection.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0]
+            ),
+        }
+
+    def backup_create(
+        self,
+        destination: Path,
+        *,
+        recovery_mode: str = "device-bound",
+        recovery_key: bytes | None = None,
+        rollback_detection: str = "none",
+    ) -> VerifiedBackup:
+        """Create and fully verify one writer-locked encrypted backup."""
+
+        from .backup import (
+            DEVICE_BOUND_RECOVERY,
+            PORTABLE_RECOVERY,
+            BackupArchive,
+            snapshot_sqlite,
+        )
+
+        if self._keyring is None or self._store is None:
+            raise RuntimeError("backups require a scoped profile")
+        if self._keyring.rotation_state is not None:
+            raise RuntimeError("backups require a completed key rotation")
+        envelope = self._payloads.record_envelope_status()
+        if envelope["migration_state"] != "verified":
+            raise RuntimeError("backups require a verified record-envelope v3 profile")
+        if recovery_mode not in {DEVICE_BOUND_RECOVERY, PORTABLE_RECOVERY}:
+            raise ValueError("backup recovery mode is invalid")
+        if recovery_mode == DEVICE_BOUND_RECOVERY and recovery_key is not None:
+            raise ValueError("device-bound backup does not accept a recovery key")
+        if recovery_mode == PORTABLE_RECOVERY and (
+            not isinstance(recovery_key, bytes) or len(recovery_key) != 32
+        ):
+            raise ValueError("portable backup requires a separate 32-byte recovery key")
+        if rollback_detection == "external-monotonic":
+            raise RuntimeError("external monotonic authority is not configured")
+        backup_id = os.urandom(16).hex()
+        portable_envelope: bytes | None = None
+        if recovery_mode == PORTABLE_RECOVERY:
+            portable_envelope = self._keyring.export_portable_root(
+                recovery_key=cast(bytes, recovery_key),
+                context=b"echo-veil-portable-backup-v1\0" + backup_id.encode("ascii"),
+            )
+        if rollback_detection == "local-best-effort":
+            current = self._keyring.monotonic_generation()
+            if current is None:
+                raise RuntimeError(
+                    "local rollback detection requires active native key custody"
+                )
+            generation = current + 1
+        elif rollback_detection == "none":
+            stored_generation = self._payloads.get_metadata("backup_generation")
+            current = 0 if stored_generation is None else int(stored_generation)
+            generation = current + 1
+            self._payloads.set_metadata("backup_generation", str(generation))
+        else:
+            raise ValueError("rollback-detection tier is invalid")
+        with tempfile.TemporaryDirectory(prefix="echo-veil-backup-snapshot-") as raw:
+            snapshot_root = Path(raw).resolve()
+            payload_snapshot = snapshot_root / "payloads.db"
+            lifecycle_snapshot = snapshot_root / "echo-veil.db"
+            snapshot_sqlite(self._payloads._connection, payload_snapshot)
+            snapshot_sqlite(self._store._connection, lifecycle_snapshot)
+            sources: dict[str, Path] = {
+                "echo-veil.db": lifecycle_snapshot,
+                "keyring.json": self.profile_dir / "keyring.json",
+                "payloads.db": payload_snapshot,
+                "preflight-ed25519.key": self.profile_dir / "preflight-ed25519.key",
+            }
+            for directory, suffix in (("keys", "*.key"), ("custody", "*.json")):
+                root = self.profile_dir / directory
+                if root.is_dir():
+                    for path in sorted(root.glob(suffix)):
+                        sources[f"{directory}/{path.name}"] = path
+            receipt = BackupArchive.create(
+                destination,
+                sources=sources,
+                profile_key=self._backup_key(),
+                key_id=self._keyring.active_key_id,
+                scope_id=self._keyring.scope_id,
+                key_epoch=self._keyring.key_epoch(self._keyring.active_key_id),
+                generation=generation,
+                rollback_detection=rollback_detection,
+                counts=self._backup_counts(),
+                model_identity=self._embedder.identity,
+                security_contract=self._payloads.security_schema,
+                record_envelope_version=RECORD_ENVELOPE_V3,
+                artifact_digest=None,
+                host_authority_digest=None,
+                portable_recovery_key=recovery_key,
+                portable_root_envelope=portable_envelope,
+                backup_id=backup_id,
+            )
+        if rollback_detection == "local-best-effort":
+            self._keyring.advance_monotonic_generation(
+                expected=cast(int, current),
+                new=generation,
+            )
+        self._last_verified_backup = receipt
+        self._record_backup_readiness(receipt)
+        return receipt
+
+    def backup_verify(
+        self,
+        archive: Path,
+        *,
+        recovery_key: bytes | None = None,
+        record_evidence: bool = True,
+    ) -> VerifiedBackup:
+        """Authenticate and fully decrypt an archive without changing profile state."""
+
+        from .backup import BackupArchive, profile_hash_for
+
+        if self._keyring is None:
+            raise RuntimeError("backup verification requires a scoped profile")
+        backup_key = self._backup_key()
+        minimum = self._keyring.monotonic_generation()
+        receipt = BackupArchive.verify(
+            archive,
+            profile_key=(backup_key if recovery_key is None else None),
+            recovery_key=recovery_key,
+            expected_profile_hash=profile_hash_for(
+                backup_key,
+                self._keyring.scope_id,
+            ),
+            minimum_generation=minimum,
+        )
+        self._last_verified_backup = receipt
+        if record_evidence:
+            self._record_backup_readiness(receipt)
+        return receipt
+
+    def restore_dry_run(
+        self,
+        archive: Path,
+        *,
+        recovery_key: bytes | None = None,
+    ) -> dict[str, object]:
+        receipt = self.backup_verify(
+            archive,
+            recovery_key=recovery_key,
+            record_evidence=False,
+        )
+        return {**receipt.as_dict(), "dry_run": True, "profile_mutated": False}
+
+    def restore(
+        self,
+        archive: Path,
+        target_state_dir: Path,
+        *,
+        target_profile: str = "restored",
+        recovery_key: bytes | None = None,
+        helper_path: Path | None = None,
+        custody_provider: str = "macos-secure-enclave-v1",
+        confirm: bool = False,
+    ) -> VerifiedBackup:
+        """Restore into a new profile; the open source profile is never replaced."""
+
+        from .backup import BackupArchive
+
+        if self._keyring is None:
+            raise RuntimeError("restore requires a scoped source profile")
+        profile_name = _validate_profile(target_profile)
+        target_root = Path(target_state_dir).expanduser().absolute()
+        target_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(target_root, 0o700)
+        if target_root == self.profile_dir.parent:
+            raise ValueError(
+                "restore target must be separate from the active profile root"
+            )
+        minimum = self._keyring.monotonic_generation()
+        return BackupArchive.restore(
+            archive,
+            target_root / profile_name,
+            scope=self.scope,
+            confirm=confirm,
+            profile_key=(self._backup_key() if recovery_key is None else None),
+            recovery_key=recovery_key,
+            helper_path=helper_path,
+            custody_provider=custody_provider,
+            minimum_generation=minimum,
+        )
+
+    def restore_drill(
+        self,
+        archive: Path,
+        *,
+        recovery_key: bytes | None = None,
+        helper_path: Path | None = None,
+        custody_provider: str = "macos-secure-enclave-v1",
+    ) -> dict[str, object]:
+        """Perform an actual isolated restore, open it, reconcile, and clean it."""
+
+        with tempfile.TemporaryDirectory(prefix="echo-veil-restore-drill-") as raw:
+            target_root = Path(raw).resolve() / "state"
+            receipt = self.restore(
+                archive,
+                target_root,
+                recovery_key=recovery_key,
+                helper_path=helper_path,
+                custody_provider=custody_provider,
+                confirm=True,
+            )
+            restored = AgentMemory(
+                target_root,
+                profile="restored",
+                scope=self.scope,
+                capacity=self.oracle.workspace.config.capacity,
+                embed=self._embedder,
+                deployment_mode=LOCAL_STAGING_MODE,
+            )
+            try:
+                report = restored.doctor()
+                if report["payload_count"] != receipt.record_count:
+                    raise RuntimeError("restore drill record count did not reconcile")
+                if recovery_key is not None:
+                    if restored._keyring is None:
+                        raise RuntimeError("portable restore custody is unavailable")
+                    restored._keyring.destroy_opaque_custody_for_restore_drill(
+                        confirm=True
+                    )
+            finally:
+                restored.close()
+            result = {
+                **receipt.as_dict(),
+                "restore_drill": "passed",
+                "logical_counts_reconciled": True,
+                "temporary_profile_removed": True,
+            }
+        self._record_restore_readiness(receipt)
+        return result
+
+    def retire_file_key_custody(self, *, confirm: bool = False) -> dict[str, Any]:
+        """Remove the raw root after a separately confirmed restart drill."""
+
+        if confirm is not True:
+            raise ValueError("file-custody retirement requires confirm=true")
+        if self._keyring is None:
+            raise RuntimeError("key custody requires a scoped profile")
+        result = self._keyring.retire_file_custody(confirm=True)
+        if self._readiness_store is not None:
+            self._readiness_store.invalidate_recovery()
+            self._refresh_readiness_evidence()
+        return {
+            **result,
+            "raw_root_retained": self._keyring.raw_active_key_present,
+            "physical_erasure_guaranteed": False,
+        }
+
     def migrate_record_envelope_v3(
         self,
         *,
@@ -5821,6 +6258,9 @@ class AgentMemory:
 
         self._payloads.prepare_record_envelope_v3()
         keyring.enable_record_envelope_v3()
+        from .preflight_receipt import protect_preflight_signing_key
+
+        protect_preflight_signing_key(self.profile_dir, keyring)
         lsh_rotation = store.rotate_lsh_index(keyring.lsh_index_key())
         self._payloads.enable_record_envelope_v3_writes()
         remaining_budget = batch_size
@@ -5947,6 +6387,18 @@ class AgentMemory:
             raise RuntimeError("capabilities_v1 report is unavailable")
         return dict(capabilities)
 
+    def preflight_receipt_authority(self) -> Any:
+        """Open the profile-bound receipt authority without exposing its key."""
+
+        if self._keyring is None:
+            raise RuntimeError("preflight receipts require a scoped profile")
+        from .preflight_receipt import PreflightReceiptAuthority
+
+        return PreflightReceiptAuthority(
+            self.profile_dir,
+            keyring=self._keyring,
+        )
+
     def assert_operational_mode(self) -> None:
         """Block an explicitly requested but unqualified production boundary."""
 
@@ -5976,6 +6428,7 @@ class AgentMemory:
         )
 
     def doctor(self) -> dict[str, Any]:
+        self._refresh_readiness_evidence()
         capability = self.oracle.capability_report().as_dict()
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
         layer_counts = self._payloads.memory_contract_counts()
@@ -5986,12 +6439,21 @@ class AgentMemory:
         )
         scoped = self._payloads.metadata_protected
         preflight_authority_id: str | None = None
+        preflight_key_protection = "unavailable"
         if scoped:
-            from .preflight_receipt import PreflightReceiptAuthority
+            from .preflight_receipt import (
+                PreflightReceiptAuthority,
+                preflight_signing_key_status,
+            )
 
             preflight_authority_id = PreflightReceiptAuthority(
-                self.profile_dir
+                self.profile_dir,
+                keyring=self._keyring,
             ).authority_id
+            preflight_key_protection = preflight_signing_key_status(
+                self.profile_dir,
+                self._keyring,
+            )
         key_id = self._keyring.active_key_id if self._keyring is not None else "legacy"
         rotation_state = (
             self._keyring.rotation_state if self._keyring is not None else None
@@ -6041,7 +6503,36 @@ class AgentMemory:
             else record_envelope["migration_state"]
             in {"inactive", "migrating", "verified"}
         )
-        key_migration_complete = rotation_complete and record_envelope_ready
+        preflight_key_ready = (
+            preflight_key_protection == "v3-purpose-protected"
+            if effective_mode == LOCAL_PRODUCTION_MODE
+            else preflight_key_protection in {"legacy-raw", "v3-purpose-protected"}
+        )
+        key_migration_complete = (
+            rotation_complete and record_envelope_ready and preflight_key_ready
+        )
+        custody_provider = (
+            self._keyring.custody_provider if self._keyring is not None else "file-v1"
+        )
+        custody_state = (
+            self._keyring.custody_state if self._keyring is not None else "legacy"
+        )
+        raw_key_files_present = bool(
+            self._keyring is not None and self._keyring.raw_active_key_present
+        )
+        qualified_custody = (
+            custody_provider
+            if custody_state == "active" and not raw_key_files_present
+            else "file-v1"
+        )
+        readiness_evidence = LocalReadinessEvidence(
+            artifact_verified=self._readiness_evidence.artifact_verified,
+            backup_verified=self._readiness_evidence.backup_verified,
+            restore_verified=self._readiness_evidence.restore_verified,
+            host_boundary_verified=self._readiness_evidence.host_boundary_verified,
+            key_custody=qualified_custody,
+            rollback_detection=self._readiness_evidence.rollback_detection,
+        )
         capabilities_v1 = build_capabilities_v1(
             LocalReadinessState(
                 configured_mode=effective_mode,
@@ -6055,9 +6546,15 @@ class AgentMemory:
                 plaintext_fallback_attempts=0,
                 key_migration_complete=key_migration_complete,
                 model_available=True,
-                evidence=self._readiness_evidence,
+                evidence=readiness_evidence,
             )
         )
+        if self._readiness_evidence_error is not None:
+            capabilities_v1["local_production_ready"] = False
+            codes = list(capabilities_v1["remediation_codes"])
+            if self._readiness_evidence_error not in codes:
+                codes.append(self._readiness_evidence_error)
+            capabilities_v1["remediation_codes"] = codes
         local_production_ready = bool(capabilities_v1["local_production_ready"])
         operational_healthy = implementation_healthy and (
             effective_mode != LOCAL_PRODUCTION_MODE or local_production_ready
@@ -6076,6 +6573,7 @@ class AgentMemory:
             "scope_bound": scoped,
             "preflight_receipt_schema": "echo-veil-preflight-v2",
             "preflight_authority_id": preflight_authority_id,
+            "preflight_signing_key_protection": preflight_key_protection,
             "key_id": key_id,
             "payload_count": len(self._payloads),
             "active_count": len(self.oracle.workspace.vines),
@@ -6109,6 +6607,13 @@ class AgentMemory:
             "rotation": {
                 "state": "idle" if rotation_state is None else rotation_state["state"],
                 "remaining_key_references": rotation_remaining,
+            },
+            "key_custody": {
+                "provider": custody_provider,
+                "state": custody_state,
+                "raw_key_files_present": raw_key_files_present,
+                "root_exportable_to_python": custody_provider == "file-v1",
+                "host_compromise_protected": False,
             },
             "record_envelope": record_envelope,
             "reconciliation_backlog": len(self._payloads.pending_ids()),
@@ -6325,7 +6830,11 @@ class AgentMemory:
                 if self._store is not None:
                     self._store.close()
             finally:
-                self._lease.close()
+                try:
+                    if self._keyring is not None:
+                        self._keyring.close()
+                finally:
+                    self._lease.close()
 
     def __enter__(self) -> AgentMemory:
         return self
@@ -6354,9 +6863,13 @@ class AlwaysAvailableMemory:
         profile: str = "default",
         scope: str = "local-user",
         reason: str = "embedding_service_unavailable",
+        configured_mode: str | None = None,
     ) -> None:
         profile_name = _validate_profile(profile)
         self.reason = _validate_text(reason, "availability reason", 128)
+        if configured_mode not in {None, LOCAL_STAGING_MODE, LOCAL_PRODUCTION_MODE}:
+            raise ValueError("configured offline-inspection mode is invalid")
+        self._configured_mode = configured_mode
         base = (
             default_state_dir() if state_dir is None else Path(state_dir).expanduser()
         )
@@ -6377,7 +6890,10 @@ class AlwaysAvailableMemory:
             raise RuntimeError("availability profile directory must be owner-only")
         self.profile_dir = profile_dir.absolute()
         payload_path = self.profile_dir / "payloads.db"
-        if _payload_database_version(payload_path) == LEGACY_PAYLOAD_SCHEMA_VERSION:
+        if (
+            _payload_database_version(payload_path, observational=True)
+            == LEGACY_PAYLOAD_SCHEMA_VERSION
+        ):
             raise RuntimeError(
                 "always-available recall requires a scoped-v2 profile because "
                 "legacy topic and layer metadata are not fully shielded"
@@ -6401,6 +6917,16 @@ class AlwaysAvailableMemory:
         """Return the authenticated logical authorization scope."""
 
         return self._keyring.scope
+
+    def preflight_receipt_authority(self) -> Any:
+        """Open the protected verifier authority for degraded read-only turns."""
+
+        from .preflight_receipt import PreflightReceiptAuthority
+
+        return PreflightReceiptAuthority(
+            self.profile_dir,
+            keyring=self._keyring,
+        )
 
     def remember(
         self,
@@ -6575,7 +7101,10 @@ class AlwaysAvailableMemory:
         return {
             "query": clean_query,
             "as_of": point_in_time,
-            "mode": "always-available-read-only",
+            "mode": ALWAYS_AVAILABLE_COMPAT_MODE,
+            "canonical_mode": OFFLINE_READ_ONLY_MODE,
+            "display_name": OFFLINE_READ_ONLY_DISPLAY_NAME,
+            "compatibility_aliases": [ALWAYS_AVAILABLE_COMPAT_MODE],
             "degraded": True,
             "degraded_reason": self.reason,
             "semantic_available": False,
@@ -6717,15 +7246,46 @@ class AlwaysAvailableMemory:
         rotation_state = self._keyring.rotation_state
         record_envelope = self._payloads.record_envelope_status()
         profile_access_verified = _profile_access_is_owner_only(self.profile_dir)
+        evidence_error: str | None = None
+        evidence = LocalReadinessEvidence()
+        if self._keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
+            try:
+                evidence = ReadinessEvidenceStore(
+                    self.profile_dir,
+                    self._keyring,
+                ).evidence()
+            except ReadinessEvidenceError:
+                evidence_error = "EV-READINESS-EVIDENCE-INVALID"
+        custody_provider = self._keyring.custody_provider
+        custody_state = self._keyring.custody_state
+        raw_key_files_present = self._keyring.raw_active_key_present
+        qualified_custody = (
+            custody_provider
+            if custody_state == "active" and not raw_key_files_present
+            else "file-v1"
+        )
+        readiness_evidence = LocalReadinessEvidence(
+            artifact_verified=evidence.artifact_verified,
+            backup_verified=evidence.backup_verified,
+            restore_verified=evidence.restore_verified,
+            host_boundary_verified=evidence.host_boundary_verified,
+            key_custody=qualified_custody,
+            rollback_detection=evidence.rollback_detection,
+        )
+        stored_embedding_identity = self._payloads.get_metadata("embedding_identity")
+        embedding_identity_verified = bool(
+            isinstance(stored_embedding_identity, str)
+            and _QWEN3_EMBEDDING_IDENTITY.fullmatch(stored_embedding_identity)
+        )
         capabilities_v1 = build_capabilities_v1(
             LocalReadinessState(
-                configured_mode=OFFLINE_READ_ONLY_MODE,
+                configured_mode=self._configured_mode or OFFLINE_READ_ONLY_MODE,
                 implementation_healthy=(all_records_shielded and quarantine_count == 0),
                 at_rest_encrypted=all_records_shielded,
                 protected_semantic_state=(
                     all_records_shielded and unindexed_count == 0
                 ),
-                embedding_identity_verified=False,
+                embedding_identity_verified=embedding_identity_verified,
                 profile_access_verified=profile_access_verified,
                 reconciliation_backlog=0,
                 quarantined_records=quarantine_count,
@@ -6735,12 +7295,22 @@ class AlwaysAvailableMemory:
                     and record_envelope["migration_state"] in {"inactive", "verified"}
                 ),
                 model_available=False,
+                evidence=readiness_evidence,
             )
         )
+        if evidence_error is not None:
+            codes = list(capabilities_v1["remediation_codes"])
+            if evidence_error not in codes:
+                codes.append(evidence_error)
+            capabilities_v1["remediation_codes"] = codes
         return {
             "adapter_ready": True,
-            "mode": "always-available-read-only",
+            "mode": ALWAYS_AVAILABLE_COMPAT_MODE,
             "mode_alias": OFFLINE_READ_ONLY_MODE,
+            "canonical_mode": OFFLINE_READ_ONLY_MODE,
+            "display_name": OFFLINE_READ_ONLY_DISPLAY_NAME,
+            "compatibility_aliases": [ALWAYS_AVAILABLE_COMPAT_MODE],
+            "configured_mode": self._configured_mode,
             "local_protection_ready": False,
             "local_production_ready": False,
             "production_ready": False,
@@ -6755,6 +7325,18 @@ class AlwaysAvailableMemory:
                 self._keyring.active_key_id if self._keyring is not None else "legacy"
             ),
             "key_owner_only": profile_access_verified,
+            "key_custody": {
+                "provider": custody_provider,
+                "state": custody_state,
+                "raw_key_files_present": raw_key_files_present,
+                "root_exportable_to_python": custody_provider == "file-v1",
+                "host_compromise_protected": False,
+            },
+            "embedding_identity": {
+                "configured": stored_embedding_identity,
+                "digest_bound": embedding_identity_verified,
+                "runtime_available": False,
+            },
             "semantic_available": False,
             "writes_available": False,
             "lifecycle_mutation_available": False,
@@ -6802,7 +7384,10 @@ class AlwaysAvailableMemory:
         }
 
     def close(self) -> None:
-        self._payloads.close()
+        try:
+            self._payloads.close()
+        finally:
+            self._keyring.close()
 
     def __enter__(self) -> AlwaysAvailableMemory:
         return self
@@ -7761,14 +8346,19 @@ def _verify_private_sqlite_files(path: Path, label: str) -> None:
             ) from exc
 
 
-def _payload_database_version(path: Path) -> int:
+def _payload_database_version(path: Path, *, observational: bool = False) -> int:
     """Read a profile schema version without creating or mutating the database."""
 
     if not path.exists():
         return 0
     _verify_private_sqlite_files(path, "payload database")
+    database = (
+        _immutable_sqlite_uri(path, "payload database")
+        if observational
+        else f"{path.absolute().as_uri()}?mode=ro"
+    )
     connection = sqlite3.connect(
-        f"{path.absolute().as_uri()}?mode=ro",
+        database,
         uri=True,
         timeout=5.0,
     )
@@ -7811,6 +8401,17 @@ def _payload_database_version(path: Path) -> int:
         return 0
     finally:
         connection.close()
+
+
+def _immutable_sqlite_uri(path: Path, label: str) -> str:
+    """Return a side-effect-free URI only for a checkpointed SQLite file."""
+
+    for suffix in ("-wal", "-shm"):
+        if Path(f"{path}{suffix}").exists():
+            raise RuntimeError(
+                f"observational {label} inspection requires a stopped writer"
+            )
+    return f"{path.absolute().as_uri()}?mode=ro&immutable=1"
 
 
 def _load_or_create_key(path: Path) -> bytes:

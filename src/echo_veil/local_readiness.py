@@ -70,6 +70,10 @@ REMEDIATIONS: dict[str, str] = {
     "EV-KEY-CUSTODY-UNQUALIFIED": (
         "Migrate the profile root to the reviewed Secure Enclave custody provider."
     ),
+    "EV-READINESS-EVIDENCE-INVALID": (
+        "Verify the latest backup and repeat the restore drill; authenticated "
+        "local-readiness evidence is missing or corrupt."
+    ),
     "EV-RECONCILIATION-PENDING": (
         "Finish the protected reconciliation backlog before retrying readiness."
     ),
