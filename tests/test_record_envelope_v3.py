@@ -272,7 +272,9 @@ def test_mixed_v2_v3_profile_resumes_after_restart_and_keeps_preflight_v2(
         assert "record_envelope" not in response
         assert final["remaining_v2_records"] == 0
         assert final["remaining_v2_lifecycle_records"] == 0
-        assert memory.doctor()["record_envelope"]["migration_state"] == "verified"
+        envelope = memory.doctor()["record_envelope"]
+        assert envelope["migration_state"] == "verified"
+        assert envelope["v2_lifecycle_records"] == 0
 
     profile_dir = tmp_path / profile
     assert _versions(profile_dir, "payloads") == {RECORD_ENVELOPE_V3: 5}
@@ -447,3 +449,131 @@ def test_profile_keyring_v3_rotation_increments_epoch_and_separates_keys(
         purpose=KEY_PURPOSE_PAYLOAD,
         envelope_version=RECORD_ENVELOPE_V3,
     )
+
+
+def test_v3_rejects_live_write_version_downgrade_and_false_verification(
+    tmp_path: Path,
+) -> None:
+    profile = "v3-state-integrity"
+    with AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder()) as memory:
+        for index in range(3):
+            memory.remember(
+                "migration state",
+                f"Protected state record {index}.",
+                provenance=["test"],
+            )
+        migrating = memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+        assert migrating["state"] == "migrating"
+        assert migrating["remaining_v2_records"] > 0
+
+    database = tmp_path / profile / "payloads.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE record_envelope_state SET migration_state = 'verified'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match="migration state is inconsistent"):
+        AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder())
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE record_envelope_state SET migration_state = 'migrating'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder()) as memory:
+        for _attempt in range(20):
+            result = memory.migrate_record_envelope_v3(confirm=True, batch_size=2)
+            if result["state"] == "verified":
+                break
+        else:  # pragma: no cover - bounded profile must converge
+            raise AssertionError("v3 state-integrity migration did not converge")
+        count_before = len(memory.list_memories(limit=10))
+        memory._payloads._connection.execute(
+            """
+            UPDATE record_envelope_state
+            SET write_version = 2, migration_state = 'prepared'
+            """
+        )
+        with pytest.raises(RuntimeError, match="migration state is inconsistent"):
+            memory.remember(
+                "downgrade attempt",
+                "This record must not be written under envelope v2.",
+            )
+        assert len(memory.list_memories(limit=10)) == count_before
+
+    with AgentMemory(
+        tmp_path, profile="empty-v3-floor", embed=_SemanticEmbedder()
+    ) as empty:
+        assert (
+            empty.migrate_record_envelope_v3(confirm=True, batch_size=1)["state"]
+            == "verified"
+        )
+        empty._payloads._connection.execute(
+            """
+            UPDATE record_envelope_state
+            SET write_version = 2, migration_state = 'prepared'
+            """
+        )
+        with pytest.raises(RuntimeError, match="write-version downgrade detected"):
+            empty.remember(
+                "empty downgrade attempt",
+                "The authenticated v3 feature keeps writes on envelope v3.",
+            )
+
+
+def test_v3_ciphertext_cannot_be_transplanted_between_profiles(tmp_path: Path) -> None:
+    with AgentMemory(
+        tmp_path, profile="v3-source", embed=_SemanticEmbedder()
+    ) as source:
+        created_source = source.remember(
+            "source profile",
+            "The source profile remains cryptographically isolated.",
+        )
+        assert (
+            source.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
+            == "verified"
+        )
+    with AgentMemory(
+        tmp_path, profile="v3-target", embed=_SemanticEmbedder()
+    ) as target:
+        created_target = target.remember(
+            "target profile",
+            "The target profile rejects transplanted ciphertext.",
+        )
+        assert (
+            target.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
+            == "verified"
+        )
+
+    source_connection = sqlite3.connect(tmp_path / "v3-source" / "payloads.db")
+    try:
+        transplanted = source_connection.execute(
+            "SELECT CAST(nonce AS BLOB), CAST(ciphertext AS BLOB) "
+            "FROM payloads WHERE vine_id = ?",
+            (str(created_source["vine_id"]),),
+        ).fetchone()
+    finally:
+        source_connection.close()
+    assert transplanted is not None
+    target_connection = sqlite3.connect(tmp_path / "v3-target" / "payloads.db")
+    try:
+        target_connection.execute(
+            "UPDATE payloads SET nonce = ?, ciphertext = ? WHERE vine_id = ?",
+            (*transplanted, str(created_target["vine_id"])),
+        )
+        target_connection.commit()
+    finally:
+        target_connection.close()
+
+    with AgentMemory(
+        tmp_path, profile="v3-target", embed=_SemanticEmbedder()
+    ) as target:
+        report = target.doctor()
+        assert report["quarantined_records"] == 1
+        assert target.recall("target profile ciphertext")["results"] == []

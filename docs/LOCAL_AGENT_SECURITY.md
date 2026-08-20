@@ -248,6 +248,14 @@ or backup domain. The root remains file-backed in the current implementation,
 so this separation does not protect plaintext or keys after trusted-host
 compromise.
 
+The authenticated key-manifest feature is also a one-way write-version floor.
+Once that feature is present, a live database edit cannot switch new writes
+back to envelope v2. Prepared, migrating, and verified states are checked
+against their allowed write version and stored-version counts; false
+verification, a late v2 write, and cross-profile ciphertext transplantation
+fail closed. Local-production readiness also counts remaining v2 lifecycle
+anchors instead of trusting the migration-state label alone.
+
 The activation marker is also a downgrade barrier. A pre-v0.8 core must reject
 the unknown manifest/schema instead of returning an apparently empty profile.
 Returning to that core requires restoring a verified pre-migration recovery
