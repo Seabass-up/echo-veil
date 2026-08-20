@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import struct
+from threading import Lock
 
 import numpy as np
 
@@ -54,6 +55,9 @@ class RandomProjectionLSH:
             raise ValueError("LSH index key must contain exactly 32 bytes")
         self._index_key = index_key
         self.config = config or LSHConfig()
+        self._projection_lock = Lock()
+        self._projection_dimension: int | None = None
+        self._projection_planes: np.ndarray | None = None
 
     @property
     def key_fingerprint(self) -> str:
@@ -63,18 +67,7 @@ class RandomProjectionLSH:
 
     def signatures(self, vector: Vector) -> tuple[tuple[int, bytes], ...]:
         value = normalize(as_vector(vector, allow_empty=False, name="LSH vector"))
-        seed_material = hmac.new(
-            self._index_key,
-            b"echo-veil-lsh-projection-seed-v2\0"
-            + struct.pack(">II", self.config.derivation_version, int(value.size)),
-            hashlib.sha256,
-        ).digest()
-        seed = int.from_bytes(seed_material[:8], "big")
-        rng = np.random.default_rng(seed)
-        planes = rng.standard_normal(
-            (self.config.bands, self.config.bits_per_band, value.size),
-            dtype=np.float64,
-        )
+        planes = self._planes_for_dimension(int(value.size))
         bits = np.einsum("bij,j->bi", planes, value) >= 0.0
         signatures: list[tuple[int, bytes]] = []
         for band, band_bits in enumerate(bits):
@@ -98,6 +91,32 @@ class RandomProjectionLSH:
                 raise RuntimeError("LSH bucket token length is invalid")
             signatures.append((band, token))
         return tuple(signatures)
+
+    def _planes_for_dimension(self, dimension: int) -> np.ndarray:
+        """Return one immutable deterministic plane set for the active dimension."""
+
+        with self._projection_lock:
+            if (
+                self._projection_dimension == dimension
+                and self._projection_planes is not None
+            ):
+                return self._projection_planes
+        seed_material = hmac.new(
+            self._index_key,
+            b"echo-veil-lsh-projection-seed-v2\0"
+            + struct.pack(">II", self.config.derivation_version, dimension),
+            hashlib.sha256,
+        ).digest()
+        seed = int.from_bytes(seed_material[:8], "big")
+        rng = np.random.default_rng(seed)
+        planes = rng.standard_normal(
+            (self.config.bands, self.config.bits_per_band, dimension),
+            dtype=np.float64,
+        )
+        planes.setflags(write=False)
+        self._projection_dimension = dimension
+        self._projection_planes = planes
+        return planes
 
     def bucket_authenticator(
         self,

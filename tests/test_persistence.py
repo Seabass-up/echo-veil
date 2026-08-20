@@ -19,8 +19,8 @@ from echo_veil import (
     VineState,
     WorkspaceConfig,
 )
-from echo_veil.archive import EvictionRecord
-from echo_veil.ann import LSH_INDEX_DERIVATION_VERSION
+from echo_veil.archive import EvictionRecord, IndexEntry
+from echo_veil.ann import LSH_INDEX_DERIVATION_VERSION, RandomProjectionLSH
 from echo_veil.capability import CapabilityStatus
 from echo_veil.vectors import cosine_similarity
 
@@ -715,6 +715,72 @@ def test_sqlite_lsh_restricts_exact_reranking_to_candidates(tmp_path: Path) -> N
 
         assert results[0][0] == "0"
         assert scored < len(vectors) // 2
+
+
+def test_sqlite_batch_upsert_is_bounded_atomic_and_searchable(tmp_path: Path) -> None:
+    path = _database_path(tmp_path, "batch-index.db")
+    vectors = [
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+    ]
+    with SQLiteStore(path, lsh_key=b"q" * 32) as store:
+        store.index.upsert_many(
+            [
+                IndexEntry(key=f"batch-{index}", anchor=vector, kind="anchor")
+                for index, vector in enumerate(vectors)
+            ]
+        )
+        assert len(store.index) == 3
+        assert store.index.search(vectors[1], top_k=1) == [("batch-1", 1.0)]
+
+        with pytest.raises(ValueError, match="dimensions must match"):
+            store.index.upsert_many(
+                [
+                    IndexEntry(key="valid", anchor=vectors[0], kind="anchor"),
+                    IndexEntry(
+                        key="invalid",
+                        anchor=np.array([1.0, 0.0]),
+                        kind="anchor",
+                    ),
+                ]
+            )
+        assert len(store.index) == 3
+
+        with pytest.raises(ValueError, match="keys must be unique"):
+            store.index.upsert_many(
+                [
+                    IndexEntry(key="duplicate", anchor=vectors[0], kind="anchor"),
+                    IndexEntry(key="duplicate", anchor=vectors[1], kind="anchor"),
+                ]
+            )
+        with pytest.raises(ValueError, match="between 1 and 1000"):
+            store.index.upsert_many([])
+        with pytest.raises(ValueError, match="between 1 and 1000"):
+            store.index.upsert_many(
+                [
+                    IndexEntry(
+                        key=f"oversized-{index}",
+                        anchor=vectors[0],
+                        kind="anchor",
+                    )
+                    for index in range(1_001)
+                ]
+            )
+
+
+def test_lsh_reuses_immutable_projection_planes_for_stable_dimension() -> None:
+    lsh = RandomProjectionLSH(b"r" * 32)
+    first = np.array([1.0, 0.0, 0.0, 0.0])
+    second = np.array([0.0, 1.0, 0.0, 0.0])
+
+    lsh.signatures(first)
+    planes = lsh._projection_planes
+    lsh.signatures(second)
+
+    assert lsh._projection_planes is planes
+    assert planes is not None
+    assert planes.flags.writeable is False
 
 
 def test_lsh_projection_and_bucket_tokens_are_profile_keyed() -> None:
