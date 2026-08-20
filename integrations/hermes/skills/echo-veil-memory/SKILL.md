@@ -41,6 +41,10 @@ cannot affect the answer.
 
 - State the layer or layers used when memory materially affects the result.
 - Preserve confidence, provenance, temporal status, and record identity.
+- Omit `retrieval_mode` for ordinary recall; omission remains the compatible
+  `direct` default. Use `supporting` only for an explicitly indirect or
+  multi-hop evidence search. Supporting results are non-authoritative evidence,
+  not an answer, and gated payloads still require explicit inferential consent.
 - When `ranking_ambiguous=true`, retain both leading candidates.
 - When `competing_memory_detected=true`, retain every reported member and do
   not invent compatibility, a winner, or a resolution.

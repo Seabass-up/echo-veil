@@ -584,6 +584,10 @@ describe("Pi protected integration", () => {
     expect(echoVeilTools).toHaveLength(9);
     expect(echoVeilTools.every((tool) => tool.executionMode === "sequential"))
       .toBe(true);
+    const recall = echoVeilTools.find((tool) => tool.name === "echo_veil_recall");
+    expect(JSON.stringify(recall?.parameters)).toContain('"direct"');
+    expect(JSON.stringify(recall?.parameters)).toContain('"supporting"');
+    expect(recall?.description).toContain("Supporting retrieval");
   });
 
   it("uses one signed canonical RPC and consumes it once", async () => {

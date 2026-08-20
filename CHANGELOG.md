@@ -7,6 +7,14 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Changed
 
+- Added an explicit, non-default `supporting` recall mode for indirect and
+  multi-hop evidence while preserving the existing `direct` answerability gate.
+  Supporting results are labeled non-authoritative, confidence gating remains
+  enforced, the optional operation argument is omitted by legacy consumers,
+  and every preflight-v2/runtime/evidence/telemetry identifier remains frozen.
+  A digest-pinned 50-question LoCoMo pilot reached 73.53% top-one and 90.20%
+  recall@5 on fully captured evidence while rejecting both hard negatives; it
+  is reported as retrieval-only rather than an end-to-end answer score.
 - Hardened the non-mutating `init local-production` guide so it closes its
   embedding transport, reports current backup, restore, and rollback evidence,
   emits stable path-free remediation codes, and blocks the unconfigured

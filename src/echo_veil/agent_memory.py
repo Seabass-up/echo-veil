@@ -157,6 +157,7 @@ MAX_PROFILE_WAL_BYTES = 256 * 1024 * 1024
 VACUUM_RECOMMENDATION_RATIO = 0.20
 DEFAULT_SEMANTIC_MIN_SCORE = 0.44
 DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
+SUPPORTING_ANSWERABILITY_MIN_SCORE = 0.25
 DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
 DEFAULT_HASHING_MIN_SCORE = 0.35
 OFFLINE_READ_ONLY_DISPLAY_NAME = "Offline Read-Only Recall"
@@ -203,6 +204,15 @@ LEGACY_PAYLOAD_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS = 30.0
 LEXICAL_BOOST = 0.35
 ANSWERABILITY_BOOST = 0.20
+SUPPORTING_ANSWERABILITY_WEIGHT = 0.35
+RETRIEVAL_MODE_DIRECT = "direct"
+RETRIEVAL_MODE_SUPPORTING = "supporting"
+RETRIEVAL_MODES = frozenset(
+    {
+        RETRIEVAL_MODE_DIRECT,
+        RETRIEVAL_MODE_SUPPORTING,
+    }
+)
 MIN_AVAILABILITY_FEATURES = 2
 AMBIGUOUS_RANKING_MARGIN = 0.05
 MMR_RELEVANCE_WEIGHT = 0.88
@@ -5395,6 +5405,7 @@ class AgentMemory:
         as_of: float | None = None,
         layers: list[str] | tuple[str, ...] | None = None,
         mutate_lifecycle: bool = False,
+        retrieval_mode: str = RETRIEVAL_MODE_DIRECT,
     ) -> dict[str, Any]:
         """Return semantic recall. Ordinary calls are lifecycle-neutral."""
 
@@ -5406,6 +5417,7 @@ class AgentMemory:
             as_of=as_of,
             layers=layers,
             mutate_lifecycle=mutate_lifecycle,
+            retrieval_mode=retrieval_mode,
         )
 
     @_serialized_operation
@@ -5418,6 +5430,7 @@ class AgentMemory:
         allow_inferential: bool = False,
         as_of: float | None = None,
         layers: list[str] | tuple[str, ...] | None = None,
+        retrieval_mode: str = RETRIEVAL_MODE_DIRECT,
     ) -> dict[str, Any]:
         """Return semantic recall without pruning, observation, or reinforcement."""
 
@@ -5429,6 +5442,7 @@ class AgentMemory:
             as_of=as_of,
             layers=layers,
             mutate_lifecycle=False,
+            retrieval_mode=retrieval_mode,
         )
 
     def _recall(
@@ -5441,6 +5455,7 @@ class AgentMemory:
         as_of: float | None,
         layers: list[str] | tuple[str, ...] | None,
         mutate_lifecycle: bool,
+        retrieval_mode: str,
     ) -> dict[str, Any]:
         if mutate_lifecycle:
             self._assert_storage_writable()
@@ -5467,6 +5482,7 @@ class AgentMemory:
             raise ValueError("min_score must be between 0 and 1")
         if not isinstance(allow_inferential, bool):
             raise TypeError("allow_inferential must be a bool")
+        clean_retrieval_mode = _validate_retrieval_mode(retrieval_mode)
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
         requested_layers = _validate_memory_layers(layers)
 
@@ -5481,11 +5497,20 @@ class AgentMemory:
                 if self._embedder.semantic and callable(answerability_embed)
                 else None
             )
-        answerability_threshold = (
-            DEFAULT_ANSWERABILITY_MIN_SCORE
-            if answerability_intent is not None
-            else None
-        )
+        if (
+            clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
+            and answerability_intent is None
+        ):
+            raise RuntimeError(
+                "supporting retrieval requires semantic answerability embeddings"
+            )
+        answerability_threshold = None
+        if answerability_intent is not None:
+            answerability_threshold = (
+                SUPPORTING_ANSWERABILITY_MIN_SCORE
+                if clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
+                else DEFAULT_ANSWERABILITY_MIN_SCORE
+            )
         lifecycle = (
             self.oracle.observe(intent)
             if mutate_lifecycle
@@ -5566,6 +5591,7 @@ class AgentMemory:
             relevance = _answerability_relevance(
                 base_relevance,
                 item.answerability_score,
+                retrieval_mode=clean_retrieval_mode,
             )
             candidates.append(
                 _RankedCandidate(
@@ -5619,6 +5645,12 @@ class AgentMemory:
                         "answerability_score": _round_optional(
                             candidate.answerability_score
                         ),
+                        "direct_answerability_passed": _direct_answerability_passed(
+                            candidate.answerability_score
+                        ),
+                        "supporting_evidence_only": (
+                            clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
+                        ),
                         "lexical_score": round(candidate.lexical_score, 6),
                         "lifecycle_score": _round_optional(candidate.lifecycle_score),
                         "source": candidate.source,
@@ -5654,6 +5686,12 @@ class AgentMemory:
                         "semantic_score": _round_optional(candidate.semantic_score),
                         "answerability_score": _round_optional(
                             candidate.answerability_score
+                        ),
+                        "direct_answerability_passed": _direct_answerability_passed(
+                            candidate.answerability_score
+                        ),
+                        "supporting_evidence_only": (
+                            clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
                         ),
                         "lexical_score": round(candidate.lexical_score, 6),
                         "lifecycle_score": _round_optional(candidate.lifecycle_score),
@@ -5719,6 +5757,11 @@ class AgentMemory:
         return {
             "query": clean_query,
             "as_of": point_in_time,
+            "retrieval_mode": clean_retrieval_mode,
+            "supporting_evidence_only": (
+                clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
+            ),
+            "authoritative_answer_claimed": False,
             "min_score": threshold,
             "answerability_min_score": answerability_threshold,
             "answerability_rejected_count": answerability_rejected_count,
@@ -7510,6 +7553,7 @@ class AlwaysAvailableMemory:
         allow_inferential: bool = False,
         as_of: float | None = None,
         layers: list[str] | tuple[str, ...] | None = None,
+        retrieval_mode: str = RETRIEVAL_MODE_DIRECT,
     ) -> dict[str, Any]:
         clean_query = _validate_text(query, "query", MAX_QUERY_CHARS)
         if isinstance(top_k, bool) or not isinstance(top_k, int):
@@ -7532,6 +7576,7 @@ class AlwaysAvailableMemory:
             raise ValueError(
                 "inferential recall is unavailable without semantic verification"
             )
+        requested_retrieval_mode = _validate_retrieval_mode(retrieval_mode)
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
         requested_layers = _validate_memory_layers(layers)
         candidates = _prioritize_competing_candidates(
@@ -7626,6 +7671,10 @@ class AlwaysAvailableMemory:
             "canonical_mode": OFFLINE_READ_ONLY_MODE,
             "display_name": OFFLINE_READ_ONLY_DISPLAY_NAME,
             "compatibility_aliases": [ALWAYS_AVAILABLE_COMPAT_MODE],
+            "requested_retrieval_mode": requested_retrieval_mode,
+            "retrieval_mode": OFFLINE_READ_ONLY_MODE,
+            "supporting_evidence_only": True,
+            "authoritative_answer_claimed": False,
             "degraded": True,
             "degraded_reason": self.reason,
             "semantic_available": False,
@@ -8164,16 +8213,30 @@ def _hybrid_relevance(semantic_score: float | None, lexical_score: float) -> flo
 def _answerability_relevance(
     relevance_score: float,
     answerability_score: float | None,
+    *,
+    retrieval_mode: str = RETRIEVAL_MODE_DIRECT,
 ) -> float:
-    """Add bounded confidence only after an independent answerability pass."""
+    """Rank direct answers or explicitly non-authoritative supporting evidence."""
     relevance = min(1.0, max(0.0, relevance_score))
     if answerability_score is None:
         return relevance
     answerability = min(1.0, max(0.0, answerability_score))
+    if retrieval_mode == RETRIEVAL_MODE_SUPPORTING:
+        return min(
+            1.0,
+            (1.0 - SUPPORTING_ANSWERABILITY_WEIGHT) * relevance
+            + SUPPORTING_ANSWERABILITY_WEIGHT * answerability,
+        )
     return min(
         1.0,
         relevance + ANSWERABILITY_BOOST * answerability * (1.0 - relevance),
     )
+
+
+def _direct_answerability_passed(answerability_score: float | None) -> bool | None:
+    if answerability_score is None:
+        return None
+    return answerability_score >= DEFAULT_ANSWERABILITY_MIN_SCORE
 
 
 def _availability_confidence(availability_score: float) -> float:
@@ -8612,6 +8675,15 @@ def _validate_optional_timestamp(value: float | None, name: str) -> float | None
     if value is None:
         return None
     return _validate_timestamp(value, name)
+
+
+def _validate_retrieval_mode(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("retrieval_mode must be a string")
+    if value not in RETRIEVAL_MODES:
+        choices = ", ".join(sorted(RETRIEVAL_MODES))
+        raise ValueError(f"retrieval_mode must be one of: {choices}")
+    return value
 
 
 def _validate_memory_layers(

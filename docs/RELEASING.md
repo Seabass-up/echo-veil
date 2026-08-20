@@ -143,6 +143,21 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    during a bounded write, and recover correctly from abrupt process exit on
    both sides of commit. This is a local index/storage gate, not a semantic,
    distributed-scale, or physical power-removal claim.
+   Run the digest-pinned LoCoMo retrieval gate against the separately obtained
+   official dataset:
+
+   ```bash
+   uv run --locked python scripts/locomo_benchmark.py \
+     --dataset ./benchmarks/locomo10.json \
+     --expected-sha256 79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4
+   ```
+
+   The script ingests only the upstream-generated observation database, never
+   raw transcripts, and reports capture coverage separately from retrieval.
+   Supporting mode must remain non-default, reject the hard negatives, and
+   retain its non-authoritative labels. This gate is retrieval-only until a
+   pinned reader and official answer judge are added; do not represent it as an
+   end-to-end LoCoMo score.
    OpenClaw must also block a hot-reload attempt to re-enable native
    session-memory. Hermes and normal Goose recipe mode should be smoke-tested in isolated
    temporary host profiles so release checks never mutate an operator's
