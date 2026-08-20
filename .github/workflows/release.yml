@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -44,6 +45,24 @@ jobs:
           test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           python scripts/release_check.py --tag "$RELEASE_TAG"
+
+      - name: Require successful CI for the exact tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          CI_SUCCESSES="$(
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$SOURCE_COMMIT" \
+              -f status=completed \
+              -f per_page=100 \
+              --jq '[.workflow_runs[] | select(
+                (.event == "push" or .event == "pull_request" or .event == "workflow_dispatch")
+                and .conclusion == "success"
+              )] | length'
+          )"
+          test "$CI_SUCCESSES" -ge 1
 
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2

@@ -54,6 +54,14 @@ summed, and only the scalar similarity is decrypted. CKKS ciphertexts are opaque
 outside the VM. Key IDs are bound into evidence and archived payloads so a
 restart under a different key fails rather than silently corrupting results.
 
+Enclave production qualification remains blocked until the serialized CKKS
+state is covered by an externally pinned authenticated manifest, the key ID is
+derived from the actual public key, the loaded parameter set is verified, and
+startup completes an encrypt/evaluate/decrypt self-test. The current origin
+does not yet provide that complete key-state proof, so its configured 128-bit
+and key-ID claims are deployment integration data rather than independently
+verified production evidence.
+
 The ZKP is a Schnorr proof of knowledge in the prime-order Ristretto255 group,
 made non-interactive with a Merlin transcript. It binds the one-time random
 challenge, provider ID, approved measurement, CKKS key ID, public key, and

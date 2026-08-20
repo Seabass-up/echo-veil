@@ -34,6 +34,7 @@
       "compatibility": "exact",
       "consumers": [
         "pi-0.84.1",
+        "pi-0.84.2",
         "echo-veil-shielded-run"
       ],
       "earliest_retirement_version": "0.10.0",
@@ -424,6 +425,7 @@
       "compatibility": "exact",
       "consumers": [
         "pi-0.84.1",
+        "pi-0.84.2",
         "receipt-verifiers"
       ],
       "earliest_retirement_version": "0.10.0",
@@ -469,6 +471,7 @@
       "compatibility": "fixed-required-fields-documented-unsigned-optionals",
       "consumers": [
         "pi-0.84.1",
+        "pi-0.84.2",
         "updated-v2-harnesses"
       ],
       "earliest_retirement_version": "0.10.0",

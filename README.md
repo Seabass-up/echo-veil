@@ -319,9 +319,9 @@ Run `python scripts/verify_host_authority.py --installed` for the digest-bound
 host evidence matrix. It never treats adapter presence or a matching executable
 as proof of a live host gate. Use `--require-current HOST` only after reviewing
 the exact qualified boundary, and rerun the release smokes after any source or
-host-version drift. The current Pi `0.84.1` and Codex `0.146.0` implementations
-are intentionally recorded as `runtime_release_stale` until these exact changes
-are committed, released as immutable artifacts, installed, and requalified.
+host-version drift. The source now binds Pi `0.84.2` and Codex `0.147.0`, but
+both remain release-pending until the final Echo wheel and integration artifacts
+are committed, built reproducibly, installed by exact hash, and requalified.
 
 Direct Codex plugin mode can provide protected Echo recall, but it is not a
 singular-memory claim when other mutable plugins are exposed, and direct
@@ -336,7 +336,7 @@ session state are not exposed. An `OPENAI_API_KEY` may supply auth when no
 Codex auth file exists. `--sandbox workspace-write` and `--allow-non-git` are
 explicit opt-ins. The launcher also supports an isolated interactive profile
 with `--codex-interactive`. Both modes require an out-of-band artifact authority
-ID produced by `--print-codex-artifact-receipt`; it binds Codex `0.146.0`, the
+ID produced by `--print-codex-artifact-receipt`; it binds Codex `0.147.0`, the
 wheel and entry points, plugin/hook/MCP files, model, configuration, and optional
 broker signing authority. One-byte drift blocks startup.
 
@@ -544,7 +544,10 @@ SBOM generation, and provenance requirements are documented in
   provider. Construction rejects expired evidence, CKKS security below 128 bits,
   missing hardware isolation, a missing ZKP gate, or non-homomorphic similarity.
   The included Azure origin uses the official OpenFHE CKKS implementation and
-  runs inside a deployment-provisioned SEV-SNP confidential VM.
+  runs inside a deployment-provisioned SEV-SNP confidential VM. Enclave
+  production promotion nevertheless remains blocked until its serialized key
+  state has an externally pinned authenticated manifest, public-key-derived key
+  ID, verified parameter set, and startup encrypt/evaluate/decrypt self-test.
 - **Custom shields are conservative by default.** Echo Veil validates the
   `protect()` / `similarity()` contract. Protected payloads must implement
   `to_json_bytes()`; Echo Veil no longer falls back to archiving plaintext when

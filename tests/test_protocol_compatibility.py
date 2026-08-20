@@ -248,6 +248,37 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
         )
 
 
+def test_runtime_and_harness_sources_do_not_introduce_preflight_v3() -> None:
+    root = Path(__file__).resolve().parents[1]
+    checked_roots = (
+        root / "src",
+        root / "integrations",
+        root / "protocol",
+        root / "scripts",
+        root / "hooks",
+        root / "skills",
+    )
+    ignored_parts = {".build", "__pycache__", "node_modules"}
+    negative_fixture = root / "protocol/fixtures/compatibility-v1.json"
+    checked_suffixes = {".js", ".json", ".mjs", ".py", ".sh", ".ts", ".yaml", ".yml"}
+    forbidden = (b"preflight_v3", b"echo-veil-preflight-v3")
+    violations: list[str] = []
+    for checked_root in checked_roots:
+        for path in checked_root.rglob("*"):
+            if (
+                not path.is_file()
+                or path.suffix not in checked_suffixes
+                or ignored_parts.intersection(path.parts)
+                or path == negative_fixture
+            ):
+                continue
+            encoded = path.read_bytes()
+            if any(value in encoded for value in forbidden):
+                violations.append(path.relative_to(root).as_posix())
+
+    assert violations == []
+
+
 def test_every_legacy_harness_fixture_keeps_the_pre_v2_bridge() -> None:
     cases = _fixture()["legacy_preflight_cases"]
     assert set(cases) == {

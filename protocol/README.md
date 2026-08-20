@@ -12,6 +12,8 @@ The compatibility rules are deliberately asymmetric:
 - `preflight_v2`, `echo-veil-preflight-v2`, and the existing v1 runtime,
   evidence-budget, telemetry, broker, and artifact contracts retain their
   identifiers;
+- CI rejects any runtime or harness source that introduces a `preflight_v3`
+  identifier; only the synthetic unknown-schema fixture may contain it;
 - the installed unsigned `preflight` compatibility RPC remains registered for
   harnesses that have not moved to signed receipt consumption;
 - `capabilities_v1` is a separate unsigned readiness surface and does not
