@@ -1852,7 +1852,15 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
     def record_envelope_write_version(self) -> int:
         if not self._secure_schema or not self._v3_schema:
             return RECORD_ENVELOPE_V2
-        return int(self.record_envelope_status()["write_version"])
+        status = self.record_envelope_status()
+        write_version = int(status["write_version"])
+        if (
+            self._keyring is not None
+            and self._keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE)
+            and write_version != RECORD_ENVELOPE_V3
+        ):
+            raise RuntimeError("record-envelope write-version downgrade detected")
+        return write_version
 
     def record_envelope_status(self) -> dict[str, Any]:
         """Return payload-free v3 migration state and record counts."""
@@ -1912,16 +1920,37 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
                 "FROM deletion_tombstones GROUP BY format_version"
             ).fetchall()
         }
+        v2_records = record_counts.get(RECORD_ENVELOPE_V2, 0)
+        v3_records = record_counts.get(RECORD_ENVELOPE_V3, 0)
+        v2_tombstones = tombstone_counts.get(RECORD_ENVELOPE_V2, 0)
+        v3_tombstones = tombstone_counts.get(RECORD_ENVELOPE_V3, 0)
+        state_is_consistent = (
+            (
+                migration_state == "prepared"
+                and write_version == RECORD_ENVELOPE_V2
+                and v3_records == 0
+                and v3_tombstones == 0
+            )
+            or (migration_state == "migrating" and write_version == RECORD_ENVELOPE_V3)
+            or (
+                migration_state == "verified"
+                and write_version == RECORD_ENVELOPE_V3
+                and v2_records == 0
+                and v2_tombstones == 0
+            )
+        )
+        if not state_is_consistent:
+            raise RuntimeError("record-envelope migration state is inconsistent")
         return {
             "schema": RECORD_ENVELOPE_STATE_SCHEMA,
             "activated": True,
             "write_version": write_version,
             "migration_state": migration_state,
             "generation": generation,
-            "v2_records": record_counts.get(RECORD_ENVELOPE_V2, 0),
-            "v3_records": record_counts.get(RECORD_ENVELOPE_V3, 0),
-            "v2_tombstones": tombstone_counts.get(RECORD_ENVELOPE_V2, 0),
-            "v3_tombstones": tombstone_counts.get(RECORD_ENVELOPE_V3, 0),
+            "v2_records": v2_records,
+            "v3_records": v3_records,
+            "v2_tombstones": v2_tombstones,
+            "v3_tombstones": v3_tombstones,
         }
 
     def prepare_record_envelope_v3(self) -> None:
@@ -4210,14 +4239,23 @@ class _EncryptedPayloadStore(_LegacyEncryptedPayloadStore):
             raise RuntimeError("record-envelope v3 is not activated")
         if status["v2_records"] or status["v2_tombstones"]:
             raise RuntimeError("record-envelope migration is incomplete")
-        self._connection.execute(
+        if status["migration_state"] == "verified":
+            return
+        if status["migration_state"] != "migrating":
+            raise RuntimeError("record-envelope migration cannot be verified")
+        result = self._connection.execute(
             """
             UPDATE record_envelope_state
             SET migration_state = 'verified', verified_at = ?, generation = generation + 1
             WHERE singleton = 1 AND write_version = 3
+              AND migration_state = 'migrating' AND generation = ?
             """,
-            (time.time(),),
+            (time.time(), int(status["generation"])),
         )
+        if result.rowcount != 1:
+            raise RuntimeError(
+                "record-envelope migration state changed during verification"
+            )
 
     def rotate_batch(
         self,
@@ -6811,11 +6849,29 @@ class AgentMemory:
         )
         effective_mode = self._deployment_mode if scoped else LEGACY_MIGRATION_MODE
         record_envelope = self._payloads.record_envelope_status()
+        v2_lifecycle_records = (
+            0
+            if self._keyring is None
+            else sum(
+                self._store.count_protected_payloads_for_key(
+                    key_id,
+                    schema_version=RECORD_ENVELOPE_V2,
+                )
+                for key_id in self._keyring.key_ids
+            )
+        )
+        record_envelope = {
+            **record_envelope,
+            "v2_lifecycle_records": v2_lifecycle_records,
+        }
         rotation_complete = rotation_state is None or (
             rotation_state["state"] == "verified" and rotation_remaining == 0
         )
         record_envelope_ready = (
             record_envelope["migration_state"] == "verified"
+            and record_envelope["v2_records"] == 0
+            and record_envelope["v2_tombstones"] == 0
+            and v2_lifecycle_records == 0
             if effective_mode == LOCAL_PRODUCTION_MODE
             else record_envelope["migration_state"]
             in {"inactive", "migrating", "verified"}

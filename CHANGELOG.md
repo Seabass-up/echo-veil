@@ -29,6 +29,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Made the authenticated v3 key-manifest feature a one-way write-version floor.
+  Record-envelope state now rejects impossible prepared/migrating/verified
+  combinations, false verification while v2 data remains, live attempts to
+  restore v2 writes, and cross-profile ciphertext transplantation. Local
+  readiness also counts remaining v2 lifecycle anchors rather than trusting a
+  mutable migration-state label.
 - Bound local-production host evidence to the actual invoking harness. A
   receipt qualified for one shared-profile caller no longer transfers host,
   backup, or restore readiness to another. Local production now blocks both
