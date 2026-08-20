@@ -261,7 +261,7 @@ working directories require the explicit `--sandbox workspace-write` and
 `--allow-non-git` opt-ins. It does not claim protected subagents because it
 prevents their creation.
 
-Codex `0.146.0` is checked before launch. First run the same command with
+Codex `0.147.0` is checked before launch. First run the same command with
 `--print-codex-artifact-receipt`, review the path-free receipt out of band, and
 pin its `artifact_authority_id` through
 `ECHO_VEIL_CODEX_ARTIFACT_AUTHORITY_ID` or
@@ -419,7 +419,7 @@ apparent `--no-profile` difference is intentional: the launcher supplies Echo
 directly through `--with-extension`, while the portable recipe relies on its
 recipe-defined extension. Only the reviewed `developer` builtin may be added.
 
-Pi `0.84.1` enforces one signed `preflight_v2` transaction in code. Its input
+Pi `0.84.2` enforces one signed `preflight_v2` transaction in code. Its input
 hook requests lifecycle-neutral doctor/recall/applicable Contextual Logic
 evidence; expanded skill/template prompts receive a replacement receipt. The
 receipt binds the query, session, turn, model, active tool manifest, Pi artifact
@@ -440,7 +440,7 @@ reindexing, and inferential access require a fresh one-use UI confirmation.
 `/echo-veil-availability` is the only degraded path and is manual, read-only,
 non-authoritative, and incapable of authorizing an agent or mutation.
 
-The Pi package is compiled against the real pinned `0.84.1` types and bound to
+The Pi package is compiled against the real pinned `0.84.2` types and bound to
 `integrations/pi/artifact-receipt.json`; both the extension and shielded launcher
 require its out-of-band authority ID. The isolated `echo-veil-shielded-run pi`
 mode disables sessions, ambient extensions/skills/templates/context files, and

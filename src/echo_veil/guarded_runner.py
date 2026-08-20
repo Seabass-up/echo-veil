@@ -77,7 +77,7 @@ _HERMES_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
 _PI_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
 _SHA256_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PI_ARTIFACT_SCHEMA = "echo-veil-pi-artifact-v1"
-PI_HOST_VERSION = "0.84.1"
+PI_HOST_VERSION = "0.84.2"
 PI_PACKAGE_VERSION = "0.7.0"
 PI_ARTIFACT_FILES = (
     "extensions/index.ts",
@@ -1098,6 +1098,41 @@ def _verify_codex_version(command: str) -> None:
         raise RuntimeError("Codex executable version is not qualified")
 
 
+def _verify_pi_version(command: str) -> None:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name
+        in {
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "PATH",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "WINDIR",
+        }
+    }
+    completed = subprocess.run(  # noqa: S603 -- validated absolute executable
+        [command, "--version"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        shell=False,
+        check=False,
+        timeout=10,
+    )
+    if (
+        completed.returncode != 0
+        or len(completed.stdout) > 16 * 1024
+        or completed.stdout.decode("utf-8", errors="replace").strip() != PI_HOST_VERSION
+    ):
+        raise RuntimeError("Pi executable version is not qualified")
+
+
 def _host_argv(args: argparse.Namespace) -> list[str]:
     command = _resolve_executable(args.host_command, args.host)
     if args.host == "codex":
@@ -1521,6 +1556,7 @@ def main(
                 Path(args.pi_extension_dir),
                 args.pi_artifact_authority_id,
             )
+            _verify_pi_version(_resolve_executable(args.host_command, "pi"))
             pi_preflight_authority_id = _preflight_authority_id(args)
         if args.host == "codex" and args.codex_interactive:
             protected_prompt = b""

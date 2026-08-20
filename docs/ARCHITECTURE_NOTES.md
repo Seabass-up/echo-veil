@@ -92,9 +92,9 @@ Implemented and tested:
   over child stdin. Codex ignores ambient user config, receives only the
   required Echo MCP server, receives an isolated owner-only auth view instead
   of ambient skills/cache/state, and disables native memory and parallel agents.
-  Its headless and interactive profiles bind Codex 0.146.0, the installed wheel,
+  Its headless and interactive profiles bind Codex 0.147.0, the installed wheel,
   entry points, plugin/configuration, model, and optional broker authority in one
-  out-of-band artifact receipt. Pi loads only its 0.84.1 receipt-bound extension;
+  out-of-band artifact receipt. Pi loads only its 0.84.2 receipt-bound extension;
   Goose suppresses its default profile/session; Droid disables its
   unpreflighted `Task` path. Hermes receives a temporary owner-only home with
   one digest-bound plugin, disabled native memory, a fixed loopback provider,
