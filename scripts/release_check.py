@@ -80,6 +80,7 @@ REQUIRED_SDIST_FILES = {
     "protocol/registry-v1.json",
     "scripts/memory_core_benchmark.py",
     "scripts/locomo_benchmark.py",
+    "scripts/longmemeval_benchmark.py",
     "scripts/build_openclaw_archive.py",
     "scripts/migrate_agent_profile.py",
     "scripts/migrate_host_memory.py",

@@ -143,6 +143,11 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    during a bounded write, and recover correctly from abrupt process exit on
    both sides of commit. This is a local index/storage gate, not a semantic,
    distributed-scale, or physical power-removal claim.
+   The same report must pass 365-day simulated lifecycle decay with locked
+   memory preserved and bounded v2-to-v3 record migration under scheduled
+   concurrent reads, followed by a verified restart. It does not replace a
+   wall-clock soak or physical power-loss test, and its reported harness
+   protocol must remain `preflight_v2`.
    Run the digest-pinned LoCoMo retrieval gate against the separately obtained
    official dataset:
 
@@ -158,6 +163,38 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    retain its non-authoritative labels. This gate is retrieval-only until a
    pinned reader and official answer judge are added; do not represent it as an
    end-to-end LoCoMo score.
+   Run the separately obtained, digest-pinned LongMemEval-S-cleaned pilot with
+   query-blind seed-crystal capture:
+
+   ```bash
+   uv run --locked python scripts/longmemeval_benchmark.py \
+     --dataset ./benchmarks/longmemeval_s_cleaned.json \
+     --capture-cache /tmp/echo-veil-longmemeval-capture-cache.json
+   ```
+
+   The default bounded pilot processes ten questions. Capture must never receive
+   the question, answer, gold-session IDs, or gold-turn markers, and Echo must
+   never ingest raw sessions. Capture partitions long sessions into bounded
+   contiguous message windows without consulting any evaluation label. The
+   default deterministic stratified sampler must cover all available question
+   types; sequential sampling is diagnostic only. Treat capture coverage,
+   gold-session provenance retrieval, and the optional explicitly authorized
+   local-reader score as separate results. A gold-session hit does not prove
+   that the answer-bearing fact was captured. The local reader is not comparable
+   to LongMemEval's official model judge, and a bounded pilot cannot satisfy a
+   full-dataset claim. The optional owner-only cache contains plaintext extracted
+   seed crystals, is for reviewed public benchmark data only, and must never be
+   committed or used for private operational data. It is bound to the partition
+   and structured-output recovery contracts as well as the
+   prompt/model/dataset. It checkpoints each completed bounded capture batch;
+   invalid structured output may be bisected and retried once per single unit,
+   while transport or model-identity failures remain fail-closed. Its checksum
+   is a corruption check, not an authenticity signature. Interactive progress
+   is payload-free stderr; stdout remains the single JSON evidence report.
+   Recorded gold-session provenance does not prove that the capture model
+   attributed each fact to the correct unit within a bounded multi-unit batch.
+   Exact cross-session deduplication must retain the first protected provenance
+   and must not multiply retrieval credit across later matching sessions.
    OpenClaw must also block a hot-reload attempt to re-enable native
    session-memory. Hermes and normal Goose recipe mode should be smoke-tested in isolated
    temporary host profiles so release checks never mutate an operator's
