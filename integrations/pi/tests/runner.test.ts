@@ -427,6 +427,15 @@ describe("shared protocol compatibility fixtures", () => {
         (cases.attested_enclave_ready as JsonObject).value,
       )?.production_ready,
     ).toBe(true);
+    for (const name of [
+      "both_production_classes_ready",
+      "local_ready_with_enclave_claims",
+      "enclave_ready_without_isolation",
+      "unready_with_ready_tier",
+    ]) {
+      expect(() => parseCapabilitiesV1((cases[name] as JsonObject).value))
+        .toThrow("capabilities_v1");
+    }
 
     const missing = structuredClone(
       (cases.missing_required as JsonObject).value,

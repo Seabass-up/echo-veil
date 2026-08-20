@@ -200,6 +200,7 @@ ANSWERABILITY_QUERY_INSTRUCTION = (
     "to the requested attribute or predicate. Ignore subject-only similarity."
 )
 _PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_RUNTIME_HOST_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 _MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 _EMBEDDER_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}\Z")
 _QWEN3_EMBEDDING_IDENTITY = re.compile(
@@ -4853,6 +4854,7 @@ class AgentMemory:
         embedder_id: str | None = None,
         profile_lock_timeout_seconds: float = DEFAULT_PROFILE_LOCK_TIMEOUT_SECONDS,
         deployment_mode: str = LOCAL_STAGING_MODE,
+        runtime_host: str | None = None,
     ) -> None:
         profile_name = _validate_profile(profile)
         if isinstance(capacity, bool) or not isinstance(capacity, int):
@@ -4870,6 +4872,7 @@ class AgentMemory:
         self.profile_dir = _secure_directory(base / profile_name)
         self._embedder = _coerce_embedder(embed, embedder_id)
         self._deployment_mode = deployment_mode
+        self._runtime_host = _validate_runtime_host(runtime_host)
         # Positive evidence is populated only by reviewed custody, artifact,
         # recovery, and host-boundary verifiers.  RPC input and environment
         # variables must never be able to self-assert these fields.
@@ -6148,15 +6151,26 @@ class AgentMemory:
             envelope_version=RECORD_ENVELOPE_V3,
         )
 
-    def _refresh_readiness_evidence(self) -> None:
+    def _refresh_readiness_evidence(
+        self,
+        runtime_host: str | None = None,
+    ) -> None:
         """Load authenticated readiness facts without granting new authority."""
 
+        selected_host = (
+            self._runtime_host
+            if runtime_host is None
+            else _validate_runtime_host(runtime_host)
+        )
         if self._readiness_store is None:
             self._readiness_evidence = LocalReadinessEvidence()
             self._readiness_evidence_error = None
             return
         try:
-            self._readiness_evidence = self._readiness_store.evidence()
+            self._readiness_evidence = self._readiness_store.evidence(
+                expected_host_id=selected_host,
+                require_host_match=True,
+            )
         except ReadinessEvidenceError:
             self._readiness_evidence = LocalReadinessEvidence()
             self._readiness_evidence_error = "EV-READINESS-EVIDENCE-INVALID"
@@ -6212,6 +6226,10 @@ class AgentMemory:
         self._assert_storage_writable()
         if confirm is not True:
             raise ValueError("host qualification requires confirm=true")
+        if self._runtime_host is not None and evidence.host_id != self._runtime_host:
+            raise RuntimeError(
+                "host qualification does not match the configured runtime host"
+            )
         if self._keyring is None:
             raise RuntimeError("host evidence requires record-envelope v3")
         readiness_store = self._ensure_readiness_store()
@@ -6672,10 +6690,14 @@ class AgentMemory:
 
         return self._deployment_mode
 
-    def capabilities_v1(self) -> dict[str, Any]:
+    def capabilities_v1(
+        self,
+        *,
+        runtime_host: str | None = None,
+    ) -> dict[str, Any]:
         """Return readiness diagnostics without changing preflight authority."""
 
-        capabilities = self.doctor().get("capabilities_v1")
+        capabilities = self.doctor(runtime_host=runtime_host).get("capabilities_v1")
         if not isinstance(capabilities, dict):
             raise RuntimeError("capabilities_v1 report is unavailable")
         return dict(capabilities)
@@ -6692,12 +6714,12 @@ class AgentMemory:
             keyring=self._keyring,
         )
 
-    def assert_operational_mode(self) -> None:
+    def assert_operational_mode(self, *, runtime_host: str | None = None) -> None:
         """Block an explicitly requested but unqualified production boundary."""
 
         if self._deployment_mode != LOCAL_PRODUCTION_MODE:
             return
-        capabilities = self.capabilities_v1()
+        capabilities = self.capabilities_v1(runtime_host=runtime_host)
         if capabilities.get("local_production_ready") is True:
             return
         codes = capabilities.get("remediation_codes", [])
@@ -6720,8 +6742,8 @@ class AgentMemory:
             and _QWEN3_EMBEDDING_IDENTITY.fullmatch(self._embedder.identity)
         )
 
-    def doctor(self) -> dict[str, Any]:
-        self._refresh_readiness_evidence()
+    def doctor(self, *, runtime_host: str | None = None) -> dict[str, Any]:
+        self._refresh_readiness_evidence(runtime_host)
         capability = self.oracle.capability_report().as_dict()
         indexed_count, unindexed_count = self._payloads.retrieval_index_counts()
         layer_counts = self._payloads.memory_contract_counts()
@@ -6828,6 +6850,12 @@ class AgentMemory:
             key_custody=qualified_custody,
             rollback_detection=self._readiness_evidence.rollback_detection,
         )
+        transport_status = getattr(self._embedder, "transport_status", None)
+        embedding_transport = transport_status() if callable(transport_status) else None
+        model_available = not (
+            isinstance(embedding_transport, dict)
+            and embedding_transport.get("circuit_state") in {"degraded", "open"}
+        )
         capabilities_v1 = build_capabilities_v1(
             LocalReadinessState(
                 configured_mode=effective_mode,
@@ -6840,7 +6868,7 @@ class AgentMemory:
                 quarantined_records=quarantine_count,
                 plaintext_fallback_attempts=0,
                 key_migration_complete=key_migration_complete,
-                model_available=True,
+                model_available=model_available,
                 evidence=readiness_evidence,
                 storage_healthy=storage_qos["healthy"] is True,
             )
@@ -6856,8 +6884,6 @@ class AgentMemory:
             effective_mode != LOCAL_PRODUCTION_MODE or local_production_ready
         )
         remediation_codes = list(capabilities_v1.get("remediation_codes", []))
-        transport_status = getattr(self._embedder, "transport_status", None)
-        embedding_transport = transport_status() if callable(transport_status) else None
         return {
             "adapter_ready": operational_healthy,
             "mode": effective_mode,
@@ -8501,6 +8527,16 @@ def _validate_profile(value: str) -> str:
         )
     if value in {".", ".."}:
         raise ValueError("profile must not be a relative path marker")
+    return value
+
+
+def _validate_runtime_host(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _RUNTIME_HOST_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "runtime_host must be a lowercase host identifier of at most 64 characters"
+        )
     return value
 
 

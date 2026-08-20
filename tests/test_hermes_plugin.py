@@ -62,6 +62,14 @@ def test_hermes_consumes_shared_legacy_and_capabilities_fixtures() -> None:
         ]
         is True
     )
+    for name in (
+        "both_production_classes_ready",
+        "local_ready_with_enclave_claims",
+        "enclave_ready_without_isolation",
+        "unready_with_ready_tier",
+    ):
+        with pytest.raises(ValueError, match="capabilities_v1"):
+            plugin.parse_capabilities_v1(cases[name]["value"])
     unknown = dict(cases["unknown_schema"]["value"])
     unknown["schema"] = "echo-veil-capabilities-v2"
     with pytest.raises(ValueError, match="capabilities_v1"):

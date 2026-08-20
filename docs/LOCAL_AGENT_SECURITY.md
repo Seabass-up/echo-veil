@@ -24,13 +24,18 @@ Current scoped profiles use `file-v1` key custody and therefore remain
 `local-staging`. `ECHO_VEIL_DEPLOYMENT_MODE=local-production` is fail-closed:
 it preserves that requested mode in diagnostics but blocks all non-diagnostic
 RPC actions until independent evidence qualifies every gate. It never silently
-downgrades to staging. Stable remediation codes map each failed gate to
-payload-free operator guidance.
+downgrades to staging or Offline Read-Only Recall. A failed Qwen3 startup or a
+degraded/open embedding circuit produces `EV-MODEL-UNAVAILABLE` and blocks the
+requested local-production operation. Stable remediation codes map each failed
+gate to payload-free operator guidance.
 
 Even after local qualification, the report remains explicit:
 `hardware_isolated=false`, `remotely_attested=false`, and
 `host_compromise_protected=false`. Only the separately verified enclave class
-may set `production_ready=true`.
+may set `production_ready=true`; the two readiness booleans are mutually
+exclusive. Every language adapter rejects reports that combine the classes,
+attach enclave claims to local readiness, or advertise a ready tier while both
+readiness booleans are false.
 
 Installed-artifact evidence is operator-confirmed and path-free. The verifier
 requires a retained local wheel with a matching PEP 610 SHA-256 receipt,
@@ -48,6 +53,10 @@ it. Qualification requires a healthy signed preflight-v2 run, a forced-outage
 run that blocks before any provider, model, agent, or tool activity, and no
 competing mutable memory. Its short-lived receipt binds the exact host artifact,
 Echo artifact, preflight authority, profile hash, scope ID, and boundary kind.
+Runtime evaluation additionally requires the receipt's `host_id` to equal the
+actual invoking caller. A Codex receipt on a shared profile therefore cannot
+qualify Pi, OpenClaw, or any other harness; dependent backup and restore
+readiness also remain false for the mismatched caller.
 The receipt remains diagnostic evidence only and never satisfies or modifies a
 turn receipt. Direct Codex collaboration and other documented soft boundaries
 remain excluded.

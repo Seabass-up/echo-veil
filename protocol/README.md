@@ -56,4 +56,12 @@ or filesystem paths.
 
 `production_ready` remains the separate attested-enclave class. Host-trusted
 local production never claims hardware isolation, remote attestation, or
-protection from a compromised host process.
+protection from a compromised host process. The two classes are mutually
+exclusive. Shared Python, TypeScript, and JavaScript parsers reject impossible
+class combinations, enclave claims attached to the local tier, incomplete
+enclave claims, and ready-tier names when neither readiness boolean is true.
+
+Host-boundary readiness is also caller-specific. A valid stored receipt must
+match the invoking harness ID before it or the dependent backup/restore
+evidence can be reported current. This diagnostic binding does not add fields
+to, or change the behavior of, `preflight_v2`.

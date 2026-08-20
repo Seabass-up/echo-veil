@@ -22,6 +22,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Bound local-production host evidence to the actual invoking harness. A
+  receipt qualified for one shared-profile caller no longer transfers host,
+  backup, or restore readiness to another. Local production now blocks both
+  startup and runtime embedding outages instead of entering Offline Read-Only
+  Recall, and all bundled `capabilities_v1` parsers reject mutually
+  contradictory local/enclave readiness claims.
 - Added path-free installed-artifact and short-lived host-boundary authority
   receipts for host-trusted local production. Artifact status is re-derived
   from a retained wheel, PEP 610 hash, installed package bytes, and all Echo

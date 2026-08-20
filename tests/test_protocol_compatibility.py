@@ -187,6 +187,12 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert contracts["capabilities_v1"]["wire_schema"] == CAPABILITIES_SCHEMA
     assert contracts["record_envelope_v3"]["status"] == ("dual-read-explicit-write")
     assert contracts["capabilities_v1"]["status"] == "emitted-rpc-only"
+    assert set(contracts["capabilities_v1"]["semantic_invariants"]) == {
+        "production-classes-mutually-exclusive",
+        "host-trusted-local-has-no-enclave-claims",
+        "attested-enclave-requires-complete-isolation-claims",
+        "unready-reports-cannot-use-ready-tiers",
+    }
     assert set(contracts["capabilities_v1"]["optional_fields"]) == {
         "generated_at_ms",
         "limitations",
@@ -369,7 +375,14 @@ def test_capabilities_v1_is_optional_and_uses_only_documented_additions() -> Non
     assert enclave_ready is not None
     assert enclave_ready["local_production_ready"] is False
     assert enclave_ready["production_ready"] is True
-    for case_name in ("missing_required", "unknown_schema"):
+    for case_name in (
+        "missing_required",
+        "unknown_schema",
+        "both_production_classes_ready",
+        "local_ready_with_enclave_claims",
+        "enclave_ready_without_isolation",
+        "unready_with_ready_tier",
+    ):
         case = cases[case_name]
         value = copy.deepcopy(case["value"])
         if "remove_path" in case:

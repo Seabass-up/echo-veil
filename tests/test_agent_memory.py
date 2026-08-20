@@ -1812,6 +1812,45 @@ def test_runtime_embedding_outage_transitions_to_read_only_availability(
             )
 
 
+def test_local_production_runtime_outage_cannot_enter_availability_mode(
+    tmp_path: Path,
+) -> None:
+    class RuntimeOutageEmbedder(_SemanticTestEmbedder):
+        identity = "test:local-production-runtime-outage:v1:dimension:32"
+
+        def __init__(self) -> None:
+            self.available = True
+
+        def embed_query(self, text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            if not self.available:
+                raise EmbeddingUnavailable("synthetic runtime outage")
+            return super().embed_query(text)
+
+    embedder = RuntimeOutageEmbedder()
+    primary = AgentMemory(
+        tmp_path,
+        embed=embedder,
+        deployment_mode="local-production",
+    )
+    with _RuntimeAvailabilityMemory(  # noqa: SLF001 - failover contract
+        primary,
+        tmp_path,
+        "default",
+    ) as memory:
+        memory.remember(
+            "protected production runbook",
+            "Use the protected production runbook during an outage.",
+        )
+        embedder.available = False
+
+        with pytest.raises(
+            EmbeddingUnavailable,
+            match="cannot enter offline read-only recall",
+        ):
+            memory.recall("protected production runbook")
+        assert memory.doctor()["runtime_failover_active"] is False
+
+
 def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1863,6 +1902,54 @@ def test_cli_uses_always_available_layer_only_for_embedding_unavailability(
         ]
     )
     assert disabled == 1
+
+    observed.clear()
+    local_production = agent_main(
+        [
+            "--state-dir",
+            str(tmp_path),
+            "--profile",
+            "semantic",
+            "--embedder",
+            "ollama",
+            "--deployment-mode",
+            "local-production",
+            "rpc",
+        ]
+    )
+    assert local_production == 1
+    assert "memory" not in observed
+
+
+def test_doctor_treats_open_embedding_circuit_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    class OpenCircuitEmbedder(_SemanticTestEmbedder):
+        identity = (
+            "ollama:qwen3-embedding:latest@sha256:"
+            + "a" * 64
+            + ":dimension:32:instruction:"
+            + "b" * 64
+        )
+
+        @staticmethod
+        def transport_status() -> dict[str, object]:
+            return {
+                "circuit_state": "open",
+                "payload_included": False,
+                "schema": "echo-veil-embedding-transport-v1",
+            }
+
+    with AgentMemory(
+        tmp_path,
+        embed=OpenCircuitEmbedder(),
+        deployment_mode="local-production",
+    ) as memory:
+        report = memory.doctor()
+
+    assert report["embedding"]["transport"]["circuit_state"] == "open"
+    assert report["capabilities_v1"]["local_production_ready"] is False
+    assert "EV-MODEL-UNAVAILABLE" in report["capabilities_v1"]["remediation_codes"]
 
 
 def test_agent_memory_persists_deduplicates_recalls_and_forgets(tmp_path: Path) -> None:

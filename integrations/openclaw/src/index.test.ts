@@ -50,6 +50,16 @@ describe("echo-veil OpenClaw plugin", () => {
       ?.local_production_ready).toBe(true);
     expect(parseCapabilitiesV1(cases.attested_enclave_ready?.value)
       ?.production_ready).toBe(true);
+    for (const name of [
+      "both_production_classes_ready",
+      "local_ready_with_enclave_claims",
+      "enclave_ready_without_isolation",
+      "unready_with_ready_tier",
+    ]) {
+      expect(() => parseCapabilitiesV1(cases[name]?.value)).toThrow(
+        "capabilities_v1",
+      );
+    }
     const unknown = structuredClone(
       cases.unknown_schema?.value,
     ) as Record<string, unknown>;

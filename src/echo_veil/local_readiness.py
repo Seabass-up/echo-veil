@@ -236,7 +236,7 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
     if not isinstance(state, LocalReadinessState):
         raise TypeError("state must be LocalReadinessState")
     failures = _readiness_failures(state)
-    local_ready = not failures
+    local_gate_ready = not failures
     enclave_ready = (
         state.enclave_production_ready
         and state.implementation_healthy
@@ -257,7 +257,12 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
         and state.hardware_isolated
         and state.remotely_attested
         and state.host_compromise_protected
+        and state.evidence.key_custody.startswith("attested-")
     )
+    # These are mutually exclusive active protection classes. An attested
+    # enclave may satisfy many local prerequisites, but it must not also report
+    # itself as the host-trusted local boundary.
+    local_ready = local_gate_ready and not enclave_ready
     if enclave_ready:
         protection_tier = "attested-enclave"
         runtime_exposure = "attested-enclave-boundary"
@@ -272,16 +277,20 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
         )
         runtime_exposure = "transient-process-memory"
 
+    active_hardware_isolated = enclave_ready
+    active_remotely_attested = enclave_ready
+    active_host_compromise_protected = enclave_ready
     limitations = []
-    if not state.hardware_isolated:
+    if not active_hardware_isolated:
         limitations.append("No hardware-isolated execution boundary is active.")
-    if not state.remotely_attested:
+    if not active_remotely_attested:
         limitations.append("No remote attestation is active.")
-    if not state.host_compromise_protected:
+    if not active_host_compromise_protected:
         limitations.append(
             "A compromised host account or process can access runtime plaintext."
         )
 
+    remediation_codes = [] if enclave_ready else failures
     report: dict[str, Any] = {
         "schema": CAPABILITIES_SCHEMA,
         "implementation_healthy": state.implementation_healthy,
@@ -290,9 +299,9 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
         "protection_tier": protection_tier,
         "at_rest_encrypted": state.at_rest_encrypted,
         "runtime_plaintext_exposure": runtime_exposure,
-        "hardware_isolated": state.hardware_isolated,
-        "remotely_attested": state.remotely_attested,
-        "host_compromise_protected": state.host_compromise_protected,
+        "hardware_isolated": active_hardware_isolated,
+        "remotely_attested": active_remotely_attested,
+        "host_compromise_protected": active_host_compromise_protected,
         "artifact_verified": state.evidence.artifact_verified,
         "backup_verified": state.evidence.backup_verified,
         "restore_verified": state.evidence.restore_verified,
@@ -300,7 +309,7 @@ def build_capabilities_v1(state: LocalReadinessState) -> dict[str, Any]:
         "host_boundary_verified": state.evidence.host_boundary_verified,
         "key_custody": state.evidence.key_custody,
         "embedding_identity_verified": state.embedding_identity_verified,
-        "remediation_codes": failures,
+        "remediation_codes": remediation_codes,
         "limitations": limitations,
     }
     # Import lazily because the receipt compatibility module intentionally
