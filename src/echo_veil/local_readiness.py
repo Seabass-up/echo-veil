@@ -94,6 +94,22 @@ REMEDIATIONS: dict[str, str] = {
         "Free profile-disk capacity, checkpoint oversized WAL state, or archive "
         "data before retrying protected mutations."
     ),
+    "EV-FILEVAULT-DISABLED": (
+        "Enable FileVault and confirm its status before selecting local production."
+    ),
+    "EV-BACKUP-DESTINATION-UNAVAILABLE": (
+        "Select a new backup destination whose private parent already exists."
+    ),
+    "EV-PORTABLE-RECOVERY-KEY-MISSING": (
+        "Provide a separate owner-only 32-byte recovery-key file for portable recovery."
+    ),
+    "EV-ROLLBACK-AUTHORITY-UNAVAILABLE": (
+        "Select none or local-best-effort rollback detection; the external "
+        "monotonic authority is not configured."
+    ),
+    "EV-PROFILE-MISSING": (
+        "Create and migrate the protected profile before running local-production setup."
+    ),
 }
 
 

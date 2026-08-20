@@ -113,12 +113,16 @@ def test_guided_setup_is_path_free_and_non_mutating(
         name = "ollama"
         model = "qwen3-embedding:latest"
         dimension = 1024
+        closed = False
         identity = (
             "ollama:qwen3-embedding:latest@sha256:"
             + ("1" * 64)
             + ":dimension:1024:instruction:"
             + ("2" * 64)
         )
+
+        def close(self) -> None:
+            type(self).closed = True
 
     assert hashing.identity != FakeQwen.identity
     monkeypatch.setattr(agent_cli, "_build_embedder", lambda _args: FakeQwen())
@@ -150,9 +154,47 @@ def test_guided_setup_is_path_free_and_non_mutating(
     report = json.loads(output)
     assert report["checks"]["filevault"] == "enabled"
     assert report["checks"]["embedding_profile_binding"] == "mismatched"
+    assert report["checks"]["backup_evidence"] == "unverified"
+    assert report["checks"]["restore_evidence"] == "unverified"
+    assert "EV-EMBEDDING-IDENTITY-UNVERIFIED" in report["remediation_codes"]
+    assert set(report["remediation_codes"]) == set(report["remediations"])
     assert report["mutations_performed"] is False
+    assert FakeQwen.closed is True
     assert str(tmp_path) not in output
     assert _profile_snapshot(profile) == before
+
+
+def test_guided_setup_rejects_unconfigured_external_monotonic_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    _v3_profile(state)
+    monkeypatch.setattr(
+        agent_cli,
+        "verify_current_echo_artifact",
+        _artifact_receipt,
+    )
+
+    result = agent_cli.main(
+        [
+            "--state-dir",
+            str(state),
+            "--destination",
+            str(tmp_path / "future-backup"),
+            "--rollback-detection",
+            "external-monotonic",
+            "init",
+            "local-production",
+        ]
+    )
+
+    assert result == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["checks"]["rollback_authority"] == "unconfigured"
+    assert "rollback_authority" in report["blocking_checks"]
+    assert "EV-ROLLBACK-AUTHORITY-UNAVAILABLE" in report["remediation_codes"]
 
 
 def test_backup_restore_operator_commands_round_trip(

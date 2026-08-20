@@ -5,7 +5,7 @@ installed embedding model as proof of quality.
 
 ## Current local result
 
-On 2026-07-24, `qwen3-embedding:latest` at 1,024 dimensions passed the committed
+On 2026-08-20, `qwen3-embedding:latest` at 1,024 dimensions passed the committed
 neutral suite with:
 
 - 42/42 correct top-1 results: 17 keyword, 19 paraphrase, 2 current-update,
@@ -22,14 +22,14 @@ neutral suite with:
 - 1/1 protected Live-refresh probe renewed unchanged state in place, created a
   shielded superseding version for changed content, survived restart and
   read-only reopen, and rejected a degraded write;
-- 200.69 ms mean and 213.80 ms p95 recall;
-- 1,979.00 ms for the cold first protected remember, including local model
-  startup;
-- 129.49 ms steady mean remember after that first operation;
-- 208.45 ms for the semantic protected-context trace;
-- 210.51 ms for the semantic competing-pair probe;
-- 91.72 ms for a changed-content protected Live refresh; and
-- 10.00 ms to reopen, authenticate the four-layer contracts, and restore the
+- 213.19 ms mean and 223.29 ms p95 recall;
+- 26.86 ms to resolve and verify the local model identity;
+- 192.59 ms for the first protected remember and 146.47 ms steady mean
+  remember after that operation;
+- 223.13 ms for the semantic protected-context trace;
+- 221.54 ms for the semantic competing-pair probe;
+- 109.89 ms for a changed-content protected Live refresh; and
+- 23.45 ms to reopen, authenticate the four-layer contracts, and restore the
   persisted profile.
 
 The same committed corpus, queried through the installed OpenClaw memory-core
@@ -431,7 +431,7 @@ retrieval cases finish.
 
 ## Pi/Codex broker and adversarial gate
 
-On 2026-08-19 the expanded real-Qwen3 gate repeated all 42 retrieval cases and
+On 2026-08-20 the expanded real-Qwen3 gate repeated all 42 retrieval cases and
 14 hard negatives, then exercised Pi and Codex concurrently against one
 owner-only serialized broker. It passed:
 
@@ -446,10 +446,10 @@ owner-only serialized broker. It passed:
   `trust=untrusted_memory_evidence`, with no mutation capability in the signed
   receipt;
 - payload-free preflight/broker telemetry and compact runtime ritual status;
-- 476.55 ms concurrent warm preflight p95, below the 500 ms target;
+- 478.17 ms concurrent warm preflight p95, below the 500 ms target;
 - a bounded one-slot saturation gate that rejected the third request before
   dispatcher, provider, model, agent, or tool execution, with payload-free
-  queue telemetry and a 7.27 ms queue-wait p95; and
+  queue telemetry and a 7.642 ms queue-wait p95; and
 - forced Pi/Codex semantic-gate failure with zero provider calls, zero agent
   starts, zero tool executions, a blocked write, and a still-manual degraded
   read-only availability query.

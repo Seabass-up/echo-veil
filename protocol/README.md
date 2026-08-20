@@ -89,3 +89,10 @@ Host-boundary readiness is also caller-specific. A valid stored receipt must
 match the invoking harness ID before it or the dependent backup/restore
 evidence can be reported current. This diagnostic binding does not add fields
 to, or change the behavior of, `preflight_v2`.
+
+Doctor is an unsigned diagnostic surface. Its optional
+`in_process_operation_serialization` field reports the one-profile reentrant
+lock used to keep local operations and two-database backup snapshots coherent.
+The field is explicitly inventoried in `registry-v1.json`; it does not change a
+signed receipt, broker telemetry, evidence budget, runtime status, or harness
+authorization contract.

@@ -308,6 +308,7 @@
       "optional_fields": [
         "capabilities_v1",
         "crypto_environment",
+        "in_process_operation_serialization",
         "local_production_ready",
         "mode_alias",
         "record_envelope",
