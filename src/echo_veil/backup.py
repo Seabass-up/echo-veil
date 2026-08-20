@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ._json import strict_json_loads
 from .record_envelope import (
+    KEY_PURPOSE_BACKUP_MANIFEST,
     RECORD_ENVELOPE_V2,
     SUPPORTED_RECORD_ENVELOPES,
 )
@@ -757,6 +758,47 @@ class BackupArchive:
         return version
 
     @staticmethod
+    def verify_profile_binding(
+        archive: Path,
+        *,
+        profile_key: bytes,
+    ) -> None:
+        """Authenticate the manifest with the restored profile key.
+
+        A portable archive is initially authenticated with the separately held
+        recovery key so its encrypted members can be restored.  Once the root
+        has been imported into the destination custody provider, this second
+        check proves that the imported root is the same profile authority that
+        created the archive.  Recovery-key authentication alone must never be
+        allowed to substitute for that profile-root binding.
+        """
+
+        root = Path(os.path.abspath(os.fspath(archive)))
+        manifest, raw = BackupArchive._load_manifest(root)
+        backup_id = str(manifest["backup_id"])
+        _unused_encryption_key, profile_mac_key = _derive_keys(
+            profile_key,
+            backup_id,
+            "profile",
+        )
+        stored_tag = _read_bounded(root / "profile.mac", 64).decode(
+            "ascii",
+            errors="strict",
+        )
+        expected_tag = hmac.new(profile_mac_key, raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(stored_tag, expected_tag):
+            raise BackupError("backup profile-root authentication failed")
+        expected_profile_hash = profile_hash_for(
+            profile_key,
+            str(manifest["scope_id"]),
+        )
+        if not hmac.compare_digest(
+            expected_profile_hash,
+            str(manifest["profile_hash"]),
+        ):
+            raise BackupError("backup profile-root binding is invalid")
+
+    @staticmethod
     def verify(
         archive: Path,
         *,
@@ -1235,6 +1277,21 @@ class BackupArchive:
             try:
                 if restored_keyring.active_key_id != receipt.key_id:
                     raise BackupError("restored key identity does not reconcile")
+                if receipt.record_envelope_version != RECORD_ENVELOPE_V2:
+                    if restored_keyring.key_epoch(
+                        restored_keyring.active_key_id
+                    ) != int(manifest["key_epoch"]):
+                        raise BackupError("restored key epoch does not reconcile")
+                if receipt.recovery_mode == PORTABLE_RECOVERY:
+                    profile_backup_key = restored_keyring.key_for_envelope(
+                        restored_keyring.active_key_id,
+                        purpose=KEY_PURPOSE_BACKUP_MANIFEST,
+                        envelope_version=receipt.record_envelope_version,
+                    )
+                    BackupArchive.verify_profile_binding(
+                        archive,
+                        profile_key=profile_backup_key,
+                    )
                 PreflightReceiptAuthority(stage, keyring=restored_keyring)
             finally:
                 restored_keyring.close()

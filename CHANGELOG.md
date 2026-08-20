@@ -29,6 +29,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Serialized every same-profile AgentMemory operation so the two writer-locked
+  SQLite snapshots cannot straddle a concurrent in-process mutation. Portable
+  restore now requires both recovery-key authentication and an independent
+  profile-root MAC/hash check after custody import; prior readiness receipts
+  are retained only under inactive recovery evidence and never transfer host or
+  artifact authority to the restored runtime.
 - Made recovery a prerequisite for the first nonempty record-envelope v3
   activation. The exact backup-v1 manifest now authenticates either an
   envelope-v2 device-bound recovery set or an envelope-v3 readiness set without
