@@ -3,6 +3,13 @@
 This runbook is ordered so no production trust claim is enabled before its
 verification material exists.
 
+> **Current enclave blocker:** do not complete a production promotion with the
+> present origin until an externally pinned authenticated CKKS state manifest,
+> public-key-derived key ID, verified parameter set, and startup
+> encrypt/evaluate/decrypt self-test are implemented and independently reviewed.
+> This runbook remains deployable staging guidance, not evidence that the
+> blocker has been closed.
+
 ## 1. Build and review
 
 1. Run the Python, Rust, Worker, Bicep, and OpenTofu validation commands from CI.

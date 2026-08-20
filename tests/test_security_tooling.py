@@ -191,6 +191,44 @@ def test_release_workflows_build_reproducible_openclaw_archives() -> None:
     assert "scripts/build_openclaw_archive.py --output-dir release" in release
 
 
+def test_ci_runs_the_full_local_qualification_gate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "local-qualification:" in workflow
+    assert "scripts/qualification_benchmark.py" in workflow
+    assert "--sizes 1000 10000 100000" in workflow
+    assert "--dimension 1024" in workflow
+    assert "--queries 12" in workflow
+
+
+def test_release_requires_green_ci_for_the_exact_tagged_commit() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "actions: read" in workflow
+    assert 'SOURCE_COMMIT="$(git rev-parse HEAD)"' in workflow
+    assert '-f head_sha="$SOURCE_COMMIT"' in workflow
+    assert "-f status=completed" in workflow
+    assert '.conclusion == "success"' in workflow
+
+
+def test_enclave_docs_keep_the_ckks_key_state_blocker_visible() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "README.md",
+        "docs/DEPLOYMENT_RUNBOOK.md",
+        "docs/DEPLOYMENT_THREAT_MODEL.md",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        assert "externally pinned authenticated" in normalized
+        assert "public-key-derived" in normalized or "actual public key" in normalized
+        assert "key ID" in normalized
+        assert "startup" in normalized
+        assert "encrypt/evaluate/decrypt self-test" in normalized
+
+
 def test_release_archive_policy_rejects_secrets_and_traversal() -> None:
     assert _unsafe_member("echo-veil/.env") is not None
     assert _unsafe_member("../secret.txt") is not None
