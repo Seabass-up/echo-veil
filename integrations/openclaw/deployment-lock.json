@@ -6,8 +6,8 @@
   "plugin": {
     "id": "echo-veil",
     "version": "0.7.0",
-    "archive_sha256": "9a4e07156ad8f64050ecebd8fe9caf0cf29fbcd383081b8e744289a664ee7842",
-    "entrypoint_sha256": "8ad40151c799ea0e0129f4714c5344aff61ef0224570671d3347324e88e0fcae"
+    "archive_sha256": "d982b33f6f7d0eec11c2110e9d11c7ff01a274122bec2d29059c45b54c31a141",
+    "entrypoint_sha256": "36b49d00c4fa54e5ebb127908e168f7189d1992c0944e17307d36c228f6a2a24"
   },
   "python": {
     "distribution": "echo-veil",

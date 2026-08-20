@@ -65,6 +65,19 @@ test("consumes the shared legacy and capabilities compatibility fixtures", () =>
   assert.equal(parseCapabilitiesV1(
     protocolFixture.capabilities_cases.attested_enclave_ready.value,
   ).production_ready, true)
+  for (const name of [
+    "both_production_classes_ready",
+    "local_ready_with_enclave_claims",
+    "enclave_ready_without_isolation",
+    "unready_with_ready_tier",
+  ]) {
+    assert.throws(
+      () => parseCapabilitiesV1(
+        protocolFixture.capabilities_cases[name].value,
+      ),
+      /capabilities_v1/,
+    )
+  }
   const unknown = structuredClone(
     protocolFixture.capabilities_cases.unknown_schema.value,
   )

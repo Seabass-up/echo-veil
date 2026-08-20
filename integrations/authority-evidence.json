@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:19eb3b8371c7ee58b8c87bd7c518a3ffaddd771defa2f26bfe17db45d108f91b",
+  "shared_source_digest": "sha256:3f866065e3331c4dbee3fa89eee86683c33bc289ba75450c2a1ed49a0108cb8b",
   "hosts": [
     {
       "id": "algo-cli",
@@ -104,7 +104,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:8dcd309816c7760477cf289de5c39ffe300df79d46a687821041c2e16a4de42a",
+      "source_digest": "sha256:be20dc9be011e3d1ff3ef3090e4fef9fed412cb1a6cdb999f8691816cfab5711",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -138,7 +138,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:770dec250765514a674331bb6e168b35fca050e60049ae080af20cae3a956c7d",
+      "source_digest": "sha256:990f5bb3b26797d215af119ee90f16c99975cba724e75ca10b46d2b9f8cb476c",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -175,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:e4df416747bdf1427cbb1f471482037af72253d22da8a22ad46088c607af8822",
+      "source_digest": "sha256:b91430de3c764c31be2a37e1e737d13b69efd512888110173ed96d92127745d1",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -246,7 +246,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:2acb55dae510877ad21ece9fe6603242db15758f5815049e0d5ce6ca4987142b",
+      "source_digest": "sha256:3005900b491dfb0eb6115393e7e682d0283c92546f9965297a121c24dc7cfa08",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -281,7 +281,7 @@
         "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
         "integrations/opencode/tests/echo-veil-shield.test.mjs"
       ],
-      "source_digest": "sha256:100fd8fac44053777a170fabbe2f99694aae8678cb214ecc9de5908b727bb688",
+      "source_digest": "sha256:0f4e468d2d89d98fca00991aecd1244d8f58efe0748660e0f290c41a7e5dfbf7",
       "checks": [
         "Installed root-turn protected marker",
         "Forced-outage zero-assistant-message, zero-token, and zero-cost result",

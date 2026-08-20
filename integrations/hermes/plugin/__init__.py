@@ -55,9 +55,7 @@ _REQUEST_BINDING_INVALID = "invalid_request"
 _REQUEST_BINDING_MISSING = "protected_context_missing"
 _REQUEST_BINDING_NODE_LIMIT = "message_scan_node_limit"
 _REQUEST_BINDING_CHAR_LIMIT = "message_scan_character_limit"
-_PREFLIGHT_QUERY_OMISSION = (
-    "\n\n[ECHO_VEIL_HERMES_PREFLIGHT_QUERY_MIDDLE_OMITTED]\n\n"
-)
+_PREFLIGHT_QUERY_OMISSION = "\n\n[ECHO_VEIL_HERMES_PREFLIGHT_QUERY_MIDDLE_OMITTED]\n\n"
 CAPABILITIES_SCHEMA = "echo-veil-capabilities-v1"
 _CAPABILITY_REQUIRED_FIELDS = frozenset(
     {
@@ -321,6 +319,57 @@ def parse_capabilities_v1(value: object | None) -> dict[str, Any] | None:
             )
         ):
             raise ValueError("capabilities_v1 response is invalid")
+    local_ready = capabilities["local_production_ready"] is True
+    enclave_ready = capabilities["production_ready"] is True
+    common_ready = all(
+        capabilities[field] is True
+        for field in (
+            "artifact_verified",
+            "at_rest_encrypted",
+            "backup_verified",
+            "embedding_identity_verified",
+            "host_boundary_verified",
+            "implementation_healthy",
+            "restore_verified",
+        )
+    )
+    remediation_codes = capabilities.get("remediation_codes")
+    no_remediations = remediation_codes is None or remediation_codes == []
+    if local_ready and enclave_ready:
+        raise ValueError("capabilities_v1 response is inconsistent")
+    if local_ready:
+        consistent = bool(
+            common_ready
+            and capabilities["protection_tier"] == "host-trusted-local"
+            and capabilities["runtime_plaintext_exposure"] == "transient-process-memory"
+            and capabilities["key_custody"] == "macos-secure-enclave-v1"
+            and capabilities["hardware_isolated"] is False
+            and capabilities["remotely_attested"] is False
+            and capabilities["host_compromise_protected"] is False
+            and no_remediations
+        )
+    elif enclave_ready:
+        consistent = bool(
+            common_ready
+            and capabilities["protection_tier"] == "attested-enclave"
+            and capabilities["runtime_plaintext_exposure"]
+            == "attested-enclave-boundary"
+            and capabilities["key_custody"].startswith("attested-")
+            and capabilities["hardware_isolated"] is True
+            and capabilities["remotely_attested"] is True
+            and capabilities["host_compromise_protected"] is True
+            and no_remediations
+        )
+    else:
+        consistent = bool(
+            capabilities["protection_tier"]
+            not in {"host-trusted-local", "attested-enclave"}
+            and capabilities["hardware_isolated"] is False
+            and capabilities["remotely_attested"] is False
+            and capabilities["host_compromise_protected"] is False
+        )
+    if not consistent:
+        raise ValueError("capabilities_v1 response is inconsistent")
     return capabilities
 
 
@@ -565,10 +614,7 @@ def on_pre_llm_call(
                 "(reason=forced_outage_control)"
             )
             return None
-        if (
-            not isinstance(user_message, str)
-            or not user_message.strip()
-        ):
+        if not isinstance(user_message, str) or not user_message.strip():
             logger.warning(
                 "Echo Veil Hermes preflight denied before provider preparation "
                 "(reason=invalid_user_message)"
@@ -600,8 +646,7 @@ def on_pre_llm_call(
         if key is not None:
             _clear_turn(key)
         logger.warning(
-            "Echo Veil Hermes preflight denied before provider preparation "
-            "(reason=%s)",
+            "Echo Veil Hermes preflight denied before provider preparation (reason=%s)",
             failure_reason,
         )
         return None

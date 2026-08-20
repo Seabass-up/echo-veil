@@ -276,6 +276,12 @@
         "runtime_plaintext_exposure",
         "schema"
       ],
+      "semantic_invariants": [
+        "production-classes-mutually-exclusive",
+        "host-trusted-local-has-no-enclave-claims",
+        "attested-enclave-requires-complete-isolation-claims",
+        "unready-reports-cannot-use-ready-tiers"
+      ],
       "signed": false,
       "status": "emitted-rpc-only",
       "surface": "capabilities-rpc",

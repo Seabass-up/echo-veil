@@ -101,6 +101,71 @@ def _bounded_string_list(value: object, label: str) -> list[str]:
     return list(value)
 
 
+def _capabilities_semantically_consistent(capabilities: Mapping[str, Any]) -> bool:
+    """Reject contradictory readiness claims on the diagnostic surface.
+
+    ``capabilities_v1`` never grants turn authority, but consumers still need
+    one shared interpretation of its two mutually exclusive production
+    classes.  Keeping this validation here prevents a malformed report from
+    being rendered as both host-trusted and enclave-protected.
+    """
+
+    local_ready = capabilities.get("local_production_ready") is True
+    enclave_ready = capabilities.get("production_ready") is True
+    if local_ready and enclave_ready:
+        return False
+
+    common_ready = all(
+        capabilities.get(field) is True
+        for field in (
+            "artifact_verified",
+            "at_rest_encrypted",
+            "backup_verified",
+            "embedding_identity_verified",
+            "host_boundary_verified",
+            "implementation_healthy",
+            "restore_verified",
+        )
+    )
+    remediation_codes = capabilities.get("remediation_codes")
+    no_remediations = remediation_codes is None or remediation_codes == []
+
+    if local_ready:
+        return bool(
+            common_ready
+            and capabilities.get("protection_tier") == "host-trusted-local"
+            and capabilities.get("runtime_plaintext_exposure")
+            == "transient-process-memory"
+            and capabilities.get("key_custody") == "macos-secure-enclave-v1"
+            and capabilities.get("hardware_isolated") is False
+            and capabilities.get("remotely_attested") is False
+            and capabilities.get("host_compromise_protected") is False
+            and no_remediations
+        )
+    if enclave_ready:
+        key_custody = capabilities.get("key_custody")
+        return bool(
+            common_ready
+            and capabilities.get("protection_tier") == "attested-enclave"
+            and capabilities.get("runtime_plaintext_exposure")
+            == "attested-enclave-boundary"
+            and isinstance(key_custody, str)
+            and key_custody.startswith("attested-")
+            and capabilities.get("hardware_isolated") is True
+            and capabilities.get("remotely_attested") is True
+            and capabilities.get("host_compromise_protected") is True
+            and no_remediations
+        )
+
+    return bool(
+        capabilities.get("protection_tier")
+        not in {"host-trusted-local", "attested-enclave"}
+        and capabilities.get("hardware_isolated") is False
+        and capabilities.get("remotely_attested") is False
+        and capabilities.get("host_compromise_protected") is False
+    )
+
+
 def parse_capabilities_v1(value: object | None) -> dict[str, Any] | None:
     """Parse the optional readiness surface without granting turn authority."""
 
@@ -139,6 +204,8 @@ def parse_capabilities_v1(value: object | None) -> dict[str, Any] | None:
     for field in ("limitations", "remediation_codes"):
         if field in capabilities:
             _bounded_string_list(capabilities[field], f"capabilities_v1 {field}")
+    if not _capabilities_semantically_consistent(capabilities):
+        raise ValueError("capabilities_v1 response is inconsistent")
     return capabilities
 
 

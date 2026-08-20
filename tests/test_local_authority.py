@@ -9,6 +9,7 @@ import pytest
 
 from echo_veil import agent_memory as agent_memory_module
 from echo_veil import local_authority
+from echo_veil.agent_cli import dispatch
 from echo_veil.agent_memory import AgentMemory
 
 
@@ -67,6 +68,14 @@ def _enable_v3(memory: AgentMemory) -> None:
         pass
 
 
+def test_runtime_host_identifier_is_bounded_and_canonical(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="runtime_host"):
+        AgentMemory(tmp_path, runtime_host="Codex")
+    with AgentMemory(tmp_path, runtime_host="codex") as memory:
+        with pytest.raises(ValueError, match="runtime_host"):
+            memory.doctor(runtime_host="codex/child")
+
+
 def test_installed_artifact_receipt_is_path_free_and_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -106,7 +115,7 @@ def test_artifact_host_and_backup_authority_evidence_is_fail_closed(
     archive = tmp_path / "backup"
     now = int(time.time())
 
-    with AgentMemory(state) as memory:
+    with AgentMemory(state, runtime_host="codex") as memory:
         memory.remember("authority", "Artifact and host evidence are bound.")
         _enable_v3(memory)
         recorded = memory.qualify_installed_artifact(confirm=True)
@@ -140,6 +149,15 @@ def test_artifact_host_and_backup_authority_evidence_is_fail_closed(
         qualified = memory.doctor()["capabilities_v1"]
         assert qualified["artifact_verified"] is True
         assert qualified["host_boundary_verified"] is True
+        wrong_caller = dispatch(memory, "doctor", {}, caller="pi")["capabilities_v1"]
+        assert wrong_caller["artifact_verified"] is True
+        assert wrong_caller["host_boundary_verified"] is False
+        with pytest.raises(RuntimeError, match="configured runtime host"):
+            memory.qualify_host_boundary(
+                replace(evidence, host_id="pi"),
+                confirm=True,
+                lifetime_seconds=3_600,
+            )
         backup = memory.backup_create(archive)
         qualified = memory.doctor()["capabilities_v1"]
         assert qualified["backup_verified"] is True
@@ -151,10 +169,17 @@ def test_artifact_host_and_backup_authority_evidence_is_fail_closed(
     assert manifest["host_authority_digest"] == host.authority_id
     assert str(tmp_path) not in json.dumps(manifest)
 
-    with AgentMemory(state) as restarted:
+    with AgentMemory(state, runtime_host="codex") as restarted:
         qualified = restarted.doctor()["capabilities_v1"]
         assert qualified["artifact_verified"] is True
         assert qualified["host_boundary_verified"] is True
+
+    with AgentMemory(state, runtime_host="pi") as wrong_host:
+        qualified = wrong_host.doctor()["capabilities_v1"]
+        assert qualified["artifact_verified"] is True
+        assert qualified["host_boundary_verified"] is False
+        assert qualified["backup_verified"] is False
+        assert qualified["restore_verified"] is False
 
     drifted = replace(receipt, authority_id="sha256:" + "0" * 64)
     monkeypatch.setattr(
@@ -162,7 +187,7 @@ def test_artifact_host_and_backup_authority_evidence_is_fail_closed(
         "verify_current_echo_artifact",
         lambda: drifted,
     )
-    with AgentMemory(state) as drifted_open:
+    with AgentMemory(state, runtime_host="codex") as drifted_open:
         report = drifted_open.doctor()["capabilities_v1"]
         assert report["artifact_verified"] is False
         assert report["host_boundary_verified"] is False

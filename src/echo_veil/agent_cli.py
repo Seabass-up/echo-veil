@@ -95,6 +95,10 @@ class _RuntimeAvailabilityMemory:
     def _degrade(self) -> AlwaysAvailableMemory:
         if isinstance(self._memory, AlwaysAvailableMemory):
             return self._memory
+        if self._memory.deployment_mode == LOCAL_PRODUCTION_MODE:
+            raise EmbeddingUnavailable(
+                "local-production mode cannot enter offline read-only recall"
+            )
         self._memory.close()
         self._memory = AlwaysAvailableMemory(
             self._state_dir,
@@ -382,8 +386,12 @@ class _RuntimeAvailabilityMemory:
         except EmbeddingUnavailable:
             return self._degrade().reindex()
 
-    def doctor(self) -> dict[str, Any]:
-        report = dict(self._memory.doctor())
+    def doctor(self, *, runtime_host: str | None = None) -> dict[str, Any]:
+        report = dict(
+            self._memory.doctor(runtime_host=runtime_host)
+            if isinstance(self._memory, AgentMemory)
+            else self._memory.doctor()
+        )
         report["runtime_failover_enabled"] = True
         report["runtime_failover_active"] = isinstance(
             self._memory,
@@ -391,19 +399,27 @@ class _RuntimeAvailabilityMemory:
         )
         return report
 
-    def capabilities_v1(self) -> dict[str, Any]:
+    def capabilities_v1(
+        self,
+        *,
+        runtime_host: str | None = None,
+    ) -> dict[str, Any]:
         capabilities = getattr(self._memory, "capabilities_v1", None)
         if not callable(capabilities):
             raise RuntimeError("capabilities_v1 report is unavailable")
-        report = capabilities()
+        report = (
+            capabilities(runtime_host=runtime_host)
+            if isinstance(self._memory, AgentMemory)
+            else capabilities()
+        )
         if not isinstance(report, dict):
             raise RuntimeError("capabilities_v1 report is invalid")
         return report
 
-    def assert_operational_mode(self) -> None:
+    def assert_operational_mode(self, *, runtime_host: str | None = None) -> None:
         assertion = getattr(self._memory, "assert_operational_mode", None)
         if callable(assertion):
-            assertion()
+            assertion(runtime_host=runtime_host)
 
     def rotate_key(
         self,
@@ -948,7 +964,11 @@ def dispatch(
         capabilities = getattr(memory, "capabilities_v1", None)
         if not callable(capabilities):
             raise RuntimeError("capabilities_v1 report is unavailable")
-        report = capabilities()
+        report = (
+            capabilities(runtime_host=caller)
+            if isinstance(memory, (AgentMemory, _RuntimeAvailabilityMemory))
+            else capabilities()
+        )
         if not isinstance(report, dict):
             raise RuntimeError("capabilities_v1 report is invalid")
         return report
@@ -966,7 +986,10 @@ def dispatch(
     if action not in {"doctor", "echo_veil_doctor"}:
         assertion = getattr(memory, "assert_operational_mode", None)
         if callable(assertion):
-            assertion()
+            if isinstance(memory, (AgentMemory, _RuntimeAvailabilityMemory)):
+                assertion(runtime_host=caller)
+            else:
+                assertion()
     if action in {"remember", "echo_veil_remember"}:
         _require_only(
             supplied,
@@ -1323,7 +1346,11 @@ def dispatch(
         }
     if action in {"doctor", "echo_veil_doctor"}:
         _require_only(supplied, set())
-        return memory.doctor()
+        return (
+            memory.doctor(runtime_host=caller)
+            if isinstance(memory, (AgentMemory, _RuntimeAvailabilityMemory))
+            else memory.doctor()
+        )
     if action in {"reindex", "echo_veil_reindex"}:
         _require_only(supplied, {"confirm"})
         if supplied.get("confirm") is not True:
@@ -2190,9 +2217,14 @@ def _open_memory(args: argparse.Namespace) -> MemoryAdapter:
             embed=embedder,
             profile_lock_timeout_seconds=args.profile_lock_timeout,
             deployment_mode=args.deployment_mode,
+            runtime_host=args.caller,
         )
     except EmbeddingUnavailable:
-        if args.embedder != "ollama" or not args.availability_layer:
+        if (
+            args.embedder != "ollama"
+            or not args.availability_layer
+            or args.deployment_mode == LOCAL_PRODUCTION_MODE
+        ):
             raise
         primary = AlwaysAvailableMemory(
             args.state_dir,

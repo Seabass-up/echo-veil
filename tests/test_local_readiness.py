@@ -176,13 +176,41 @@ def test_enclave_production_is_a_separate_stricter_class() -> None:
             hardware_isolated=True,
             remotely_attested=True,
             host_compromise_protected=True,
+            evidence=replace(
+                _qualified_state().evidence,
+                key_custody="attested-enclave-v1",
+                rollback_detection="external-monotonic",
+            ),
+        )
+    )
+
+    assert report["local_production_ready"] is False
+    assert report["production_ready"] is True
+    assert report["protection_tier"] == "attested-enclave"
+    assert report["runtime_plaintext_exposure"] == "attested-enclave-boundary"
+    assert report["hardware_isolated"] is True
+    assert report["remotely_attested"] is True
+    assert report["host_compromise_protected"] is True
+    assert report["remediation_codes"] == []
+    assert parse_capabilities_v1(report) == report
+
+
+def test_inactive_enclave_inputs_cannot_leak_into_local_claims() -> None:
+    report = build_capabilities_v1(
+        replace(
+            _qualified_state(),
+            hardware_isolated=True,
+            remotely_attested=True,
+            host_compromise_protected=True,
         )
     )
 
     assert report["local_production_ready"] is True
-    assert report["production_ready"] is True
-    assert report["protection_tier"] == "attested-enclave"
-    assert report["runtime_plaintext_exposure"] == "attested-enclave-boundary"
+    assert report["production_ready"] is False
+    assert report["protection_tier"] == "host-trusted-local"
+    assert report["hardware_isolated"] is False
+    assert report["remotely_attested"] is False
+    assert report["host_compromise_protected"] is False
 
 
 def test_untrusted_strings_cannot_self_assert_readiness_evidence() -> None:

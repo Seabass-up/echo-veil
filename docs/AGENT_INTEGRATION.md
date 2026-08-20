@@ -361,13 +361,18 @@ and key rotation have all been verified.
 implementation health, host-trusted local-production readiness, and attested
 enclave production readiness. Existing harnesses do not need to call it and
 must continue to authorize turns only through the exact preflight-v2 receipt.
+The two production classes are mutually exclusive, and every bundled parser
+rejects contradictory class, isolation, custody, or ready-tier combinations.
 The current file-backed scoped AES profile remains `local-staging`: setting
 `ECHO_VEIL_DEPLOYMENT_MODE=local-production` cannot manufacture evidence and
 instead blocks all non-diagnostic actions until artifact, Secure Enclave key
 custody, backup, restore, host-boundary, Qwen3 identity, and profile-health
 checks are verified. A local-ready report still states
 `hardware_isolated=false`, `remotely_attested=false`, and
-`host_compromise_protected=false`.
+`host_compromise_protected=false`. Host evidence must match the caller on each
+runtime check; it is not transferable between harnesses sharing a profile.
+Local-production startup and runtime embedding outages block rather than enter
+the manual Offline Read-Only Recall path.
 
 Goose's recipe prompt explicitly calls doctor and a two-slot minimal recall
 before waiting for a separate mutation request. Do not launch the recipe with

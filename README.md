@@ -117,7 +117,11 @@ backup, restore, profile-access, and host-enforcement gate passes. Current
 `file-v1` profiles do not qualify. Even a qualified local profile exposes
 plaintext to the authorized process and embedding service and does not protect
 against host compromise; hardware-isolated, remotely attested production
-remains a distinct enclave class.
+remains a distinct, mutually exclusive enclave class. Host-boundary evidence
+is evaluated against the invoking harness, so one qualified shared-profile
+caller cannot qualify another. Local production also never enters Offline
+Read-Only Recall: an unavailable or open Qwen3 transport blocks the operation
+with `EV-MODEL-UNAVAILABLE` instead of weakening the requested boundary.
 
 Record-envelope v3 is available as an explicit, internal profile migration.
 It retains the `scoped-v2` database contract and every harness-facing v2/v1

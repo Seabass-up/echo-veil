@@ -402,7 +402,26 @@ class ReadinessEvidenceStore:
         record["restore"] = None
         self._write_record(record)
 
-    def evidence(self) -> LocalReadinessEvidence:
+    def evidence(
+        self,
+        *,
+        expected_host_id: str | None = None,
+        require_host_match: bool = False,
+    ) -> LocalReadinessEvidence:
+        """Return current evidence, optionally bound to the invoking host.
+
+        Internal backup bookkeeping may inspect the stored boundary without a
+        caller. Runtime readiness must set ``require_host_match`` so one shared
+        profile cannot transfer a qualified host receipt to another harness.
+        """
+
+        if not isinstance(require_host_match, bool):
+            raise TypeError("require_host_match must be a boolean")
+        if expected_host_id is not None and (
+            not isinstance(expected_host_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", expected_host_id) is None
+        ):
+            raise ValueError("expected host ID is invalid")
         record = self.load_record()
         artifact = record.get("artifact")
         host_boundary = record.get("host_boundary")
@@ -435,6 +454,12 @@ class ReadinessEvidenceStore:
                     profile_hash=bindings["profile_hash"],
                     scope_id=bindings["scope_id"],
                 )
+                if require_host_match:
+                    host_valid = bool(
+                        host_valid
+                        and expected_host_id is not None
+                        and host_boundary.get("host_id") == expected_host_id
+                    )
         current_artifact_id = (
             artifact.get("authority_id")
             if artifact_valid and isinstance(artifact, dict)

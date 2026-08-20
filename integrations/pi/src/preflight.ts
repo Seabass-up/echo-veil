@@ -350,6 +350,51 @@ function boundedStringList(value: unknown, label: string): string[] {
   return value as string[];
 }
 
+function capabilitiesSemanticallyConsistent(capabilities: JsonObject): boolean {
+  const localReady = capabilities.local_production_ready === true;
+  const enclaveReady = capabilities.production_ready === true;
+  if (localReady && enclaveReady) return false;
+  const commonReady = [
+    "artifact_verified",
+    "at_rest_encrypted",
+    "backup_verified",
+    "embedding_identity_verified",
+    "host_boundary_verified",
+    "implementation_healthy",
+    "restore_verified",
+  ].every((field) => capabilities[field] === true);
+  const remediationCodes = capabilities.remediation_codes;
+  const noRemediations = remediationCodes === undefined ||
+    (Array.isArray(remediationCodes) && remediationCodes.length === 0);
+
+  if (localReady) {
+    return commonReady &&
+      capabilities.protection_tier === "host-trusted-local" &&
+      capabilities.runtime_plaintext_exposure === "transient-process-memory" &&
+      capabilities.key_custody === "macos-secure-enclave-v1" &&
+      capabilities.hardware_isolated === false &&
+      capabilities.remotely_attested === false &&
+      capabilities.host_compromise_protected === false &&
+      noRemediations;
+  }
+  if (enclaveReady) {
+    return commonReady &&
+      capabilities.protection_tier === "attested-enclave" &&
+      capabilities.runtime_plaintext_exposure === "attested-enclave-boundary" &&
+      typeof capabilities.key_custody === "string" &&
+      capabilities.key_custody.startsWith("attested-") &&
+      capabilities.hardware_isolated === true &&
+      capabilities.remotely_attested === true &&
+      capabilities.host_compromise_protected === true &&
+      noRemediations;
+  }
+  return capabilities.protection_tier !== "host-trusted-local" &&
+    capabilities.protection_tier !== "attested-enclave" &&
+    capabilities.hardware_isolated === false &&
+    capabilities.remotely_attested === false &&
+    capabilities.host_compromise_protected === false;
+}
+
 export function parseCapabilitiesV1(value: unknown): JsonObject | null {
   if (value === null || value === undefined) return null;
   const capabilities = objectValue(value, "capabilities_v1 response");
@@ -387,6 +432,9 @@ export function parseCapabilitiesV1(value: unknown): JsonObject | null {
     if (Object.hasOwn(capabilities, field)) {
       boundedStringList(capabilities[field], `capabilities_v1 ${field}`);
     }
+  }
+  if (!capabilitiesSemanticallyConsistent(capabilities)) {
+    throw new Error("capabilities_v1 response is inconsistent");
   }
   return capabilities;
 }
