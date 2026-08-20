@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 build/
+.build/
 dist/
 !integrations/openclaw/dist/
 !integrations/openclaw/dist/**

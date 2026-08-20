@@ -8,6 +8,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 from collections.abc import Callable, Mapping
@@ -31,6 +32,7 @@ from .agent_memory import (
     MAX_AGENT_MEMORY_WRITE_CHARS,
     OllamaTextEmbedder,
     TextEmbedder,
+    default_state_dir,
 )
 from .memory_layers import LogicKind, MemoryLayer
 from .local_readiness import LOCAL_PRODUCTION_MODE, LOCAL_STAGING_MODE
@@ -101,6 +103,12 @@ class _RuntimeAvailabilityMemory:
     @property
     def scope(self) -> str:
         return self._memory.scope
+
+    def preflight_receipt_authority(self) -> Any:
+        authority = getattr(self._memory, "preflight_receipt_authority", None)
+        if not callable(authority):
+            raise RuntimeError("preflight receipt authority is unavailable")
+        return authority()
 
     def remember(
         self,
@@ -1153,7 +1161,12 @@ def dispatch(
         query_source = supplied.get("query_source", "current_user_prompt")
         if not isinstance(query_source, str):
             raise TypeError("query_source must be a string")
-        authority = PreflightReceiptAuthority(memory.profile_dir)
+        authority_factory = getattr(memory, "preflight_receipt_authority", None)
+        authority = (
+            authority_factory()
+            if callable(authority_factory)
+            else PreflightReceiptAuthority(memory.profile_dir)
+        )
         return prepare_preflight_v2(
             cast(PreflightV2Memory, memory),
             _required_string(supplied, "query"),
@@ -1648,7 +1661,50 @@ def build_parser() -> argparse.ArgumentParser:
             "default so ordinary agent hosts receive only the nine memory tools"
         ),
     )
-    parser.add_argument("mode", choices=("rpc", "mcp", "doctor", "broker"))
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--destination", type=Path)
+    parser.add_argument("--target-state-dir", type=Path)
+    parser.add_argument("--target-profile", default="restored")
+    parser.add_argument(
+        "--recovery-mode",
+        choices=("device-bound", "portable"),
+        default="device-bound",
+    )
+    parser.add_argument(
+        "--recovery-key-file",
+        type=Path,
+        help="owner-only file containing exactly 32 random recovery-key bytes",
+    )
+    parser.add_argument(
+        "--rollback-detection",
+        choices=("none", "local-best-effort", "external-monotonic"),
+        default="none",
+    )
+    parser.add_argument("--helper-path", type=Path)
+    parser.add_argument(
+        "--custody-provider",
+        choices=("macos-keychain-v1", "macos-secure-enclave-v1"),
+        default="macos-secure-enclave-v1",
+    )
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "mode",
+        choices=(
+            "rpc",
+            "mcp",
+            "doctor",
+            "broker",
+            "backup",
+            "restore",
+            "restore-drill",
+            "key-custody",
+            "init",
+            "repair",
+            "maintain",
+        ),
+    )
+    parser.add_argument("command", nargs="?")
     return parser
 
 
@@ -1656,6 +1712,16 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         caller = _validate_caller(args.caller)
+        if args.mode in {
+            "backup",
+            "restore",
+            "restore-drill",
+            "key-custody",
+            "init",
+            "repair",
+            "maintain",
+        }:
+            return _run_operator_command(args)
         if args.mode == "broker":
             with _open_memory(args) as broker_memory:
                 socket_path = (
@@ -1708,7 +1774,17 @@ def main(argv: list[str] | None = None) -> int:
                 caller=caller,
                 operator_tools=args.operator_tools,
             )
-        memory = _open_memory(args)
+        memory: MemoryAdapter
+        if args.mode == "doctor":
+            memory = AlwaysAvailableMemory(
+                args.state_dir,
+                profile=args.profile,
+                scope=args.scope,
+                reason="observational_doctor",
+                configured_mode=args.deployment_mode,
+            )
+        else:
+            memory = _open_memory(args)
         with memory:
             if args.mode == "rpc":
                 return run_rpc(memory, caller=caller)
@@ -1719,6 +1795,268 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(_json(_public_error(exc)), file=sys.stderr)
         return 1
+
+
+def _required_path(value: Path | None, label: str) -> Path:
+    if value is None:
+        raise ValueError(f"{label} is required")
+    return value.expanduser().absolute()
+
+
+def _load_recovery_key(path: Path | None) -> bytes | None:
+    if path is None:
+        return None
+    from .agent_security import _read_private_file_bytes
+
+    raw = _read_private_file_bytes(
+        path.expanduser().absolute(),
+        label="portable recovery key",
+        maximum=32,
+    )
+    if len(raw) != 32:
+        raise ValueError("portable recovery key must contain exactly 32 bytes")
+    return raw
+
+
+def _run_operator_command(args: argparse.Namespace) -> int:
+    """Run explicit mutating or recovery commands outside the agent tool set."""
+
+    recovery_key = _load_recovery_key(args.recovery_key_file)
+    if args.mode == "init":
+        if args.command != "local-production":
+            raise ValueError("init requires the local-production command")
+        return _run_local_production_init(args)
+    if args.mode in {"repair", "maintain"}:
+        return _run_explicit_maintenance(args)
+    with _open_memory(args) as memory:
+        if not isinstance(memory, AgentMemory):
+            raise RuntimeError("operator command requires the semantic profile")
+        if args.mode == "backup":
+            if args.command == "create":
+                receipt = memory.backup_create(
+                    _required_path(args.destination, "--destination"),
+                    recovery_mode=args.recovery_mode,
+                    recovery_key=recovery_key,
+                    rollback_detection=args.rollback_detection,
+                )
+                print(_json(receipt.as_dict()))
+                return 0
+            if args.command == "verify":
+                receipt = memory.backup_verify(
+                    _required_path(args.archive, "--archive"),
+                    recovery_key=recovery_key,
+                )
+                print(_json(receipt.as_dict()))
+                return 0
+            raise ValueError("backup requires create or verify")
+        if args.mode == "restore-drill":
+            if args.command is not None:
+                raise ValueError("restore-drill does not accept a subcommand")
+            result = memory.restore_drill(
+                _required_path(args.archive, "--archive"),
+                recovery_key=recovery_key,
+                helper_path=args.helper_path,
+                custody_provider=args.custody_provider,
+            )
+            print(_json(result))
+            return 0
+        if args.mode == "restore":
+            archive = _required_path(args.archive, "--archive")
+            if args.dry_run:
+                print(_json(memory.restore_dry_run(archive, recovery_key=recovery_key)))
+                return 0
+            receipt = memory.restore(
+                archive,
+                _required_path(args.target_state_dir, "--target-state-dir"),
+                target_profile=args.target_profile,
+                recovery_key=recovery_key,
+                helper_path=args.helper_path,
+                custody_provider=args.custody_provider,
+                confirm=args.confirm,
+            )
+            print(_json(receipt.as_dict()))
+            return 0
+        if args.mode == "key-custody":
+            if args.command == "migrate":
+                verified = memory.backup_verify(
+                    _required_path(args.archive, "--archive"),
+                    recovery_key=recovery_key,
+                )
+                result = memory.migrate_key_custody(
+                    provider=args.custody_provider,
+                    helper_path=_required_path(args.helper_path, "--helper-path"),
+                    verified_backup=verified,
+                    confirm=args.confirm,
+                )
+                print(_json(result))
+                return 0
+            if args.command == "retire-file":
+                print(_json(memory.retire_file_key_custody(confirm=args.confirm)))
+                return 0
+            raise ValueError("key-custody requires migrate or retire-file")
+    raise RuntimeError("operator command was not handled")
+
+
+def _run_local_production_init(args: argparse.Namespace) -> int:
+    """Run the guided local boundary check without manufacturing evidence."""
+
+    filevault = "not-applicable"
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["/usr/bin/fdesetup", "status"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5.0,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"},
+        )
+        output = result.stdout.decode("utf-8", errors="replace")
+        filevault = "enabled" if "FileVault is On" in output else "disabled"
+    backup_destination = "missing"
+    if args.destination is not None:
+        target = args.destination.expanduser().absolute()
+        if target.exists() or target.is_symlink():
+            backup_destination = "occupied"
+        elif target.parent.is_dir():
+            backup_destination = "available"
+        else:
+            backup_destination = "parent-missing"
+    checks: dict[str, object] = {
+        "artifact_identity": "unverified",
+        "backup_destination": backup_destination,
+        "filevault": filevault,
+        "host_compatibility": "unverified",
+        "recovery_mode": args.recovery_mode,
+        "recovery_key": (
+            "not-required"
+            if args.recovery_mode == "device-bound"
+            else ("configured" if args.recovery_key_file is not None else "missing")
+        ),
+        "rollback_detection": args.rollback_detection,
+    }
+    requested_embedding_identity: str | None = None
+    try:
+        embedder = _build_embedder(args)
+    except Exception:
+        checks["qwen3_model"] = "unavailable-or-mismatched"
+        checks["embedding_dimension"] = args.embedding_dimension
+    else:
+        requested_embedding_identity = embedder.identity
+        checks["qwen3_model"] = (
+            "digest-verified"
+            if embedder.name == "ollama"
+            and embedder.model.startswith("qwen3-embedding:")
+            else "unsupported"
+        )
+        checks["embedding_dimension"] = embedder.dimension
+    profile_exists = (
+        (default_state_dir() if args.state_dir is None else args.state_dir)
+        / args.profile
+    ).exists()
+    if profile_exists:
+        with AlwaysAvailableMemory(
+            args.state_dir,
+            profile=args.profile,
+            scope=args.scope,
+            reason="guided_local_production_setup",
+        ) as inspector:
+            report = inspector.doctor()
+        checks["profile_permissions"] = (
+            "valid" if report["key_owner_only"] else "invalid"
+        )
+        custody = report.get("key_custody")
+        checks["key_custody"] = (
+            "qualified"
+            if isinstance(custody, dict)
+            and custody.get("provider") == "macos-secure-enclave-v1"
+            and custody.get("state") == "active"
+            and custody.get("raw_key_files_present") is False
+            else "unqualified"
+        )
+        envelope = report.get("record_envelope")
+        checks["record_envelope"] = (
+            "verified-v3"
+            if isinstance(envelope, dict)
+            and envelope.get("migration_state") == "verified"
+            and envelope.get("v2_records") == 0
+            and envelope.get("v2_tombstones") == 0
+            else "incomplete"
+        )
+        stored_identity = report.get("embedding_identity")
+        configured_identity = (
+            stored_identity.get("configured")
+            if isinstance(stored_identity, dict)
+            else None
+        )
+        checks["embedding_profile_binding"] = (
+            "verified"
+            if requested_embedding_identity is not None
+            and configured_identity == requested_embedding_identity
+            else "mismatched"
+        )
+    else:
+        checks["profile_permissions"] = "profile-missing"
+        checks["key_custody"] = "unconfigured"
+        checks["record_envelope"] = "unconfigured"
+    blocking = sorted(
+        name
+        for name, value in checks.items()
+        if value
+        in {
+            "disabled",
+            "invalid",
+            "missing",
+            "mismatched",
+            "occupied",
+            "parent-missing",
+            "profile-missing",
+            "unavailable-or-mismatched",
+            "unconfigured",
+            "unqualified",
+            "unsupported",
+            "unverified",
+            "incomplete",
+        }
+    )
+    print(
+        _json(
+            {
+                "command": "init local-production",
+                "checks": checks,
+                "ready_to_activate": not blocking,
+                "blocking_checks": blocking,
+                "mutations_performed": False,
+                "next": (
+                    "Run the listed remediations, then repeat this command."
+                    if blocking
+                    else "Run with reviewed artifact and host receipts before activation."
+                ),
+            }
+        )
+    )
+    return 0 if not blocking else 2
+
+
+def _run_explicit_maintenance(args: argparse.Namespace) -> int:
+    if args.command is None:
+        raise ValueError(f"{args.mode} requires an explicit subcommand")
+    with _open_memory(args) as memory:
+        if not isinstance(memory, AgentMemory):
+            raise RuntimeError("maintenance requires the semantic profile")
+        if args.mode == "repair" and args.command == "migrate-v3":
+            result = memory.migrate_record_envelope_v3(
+                confirm=args.confirm,
+                batch_size=100,
+            )
+        elif args.mode == "maintain" and args.command == "prune-expired-live":
+            if args.confirm is not True:
+                raise ValueError("Live pruning requires --confirm")
+            result = {"expired_live_pruned": memory._prune_expired_live_memory()}
+        else:
+            raise ValueError(f"unsupported {args.mode} subcommand")
+    print(_json(result))
+    return 0
 
 
 def _run_broker(memory: MemoryAdapter, socket_path: Path) -> int:

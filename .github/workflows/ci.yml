@@ -133,6 +133,40 @@ jobs:
             /tmp/echo-veil-release-smoke/bin/python -c \
             'import os, echo_veil; assert echo_veil.__version__ == os.environ["ECHO_VEIL_EXPECTED_VERSION"]'
 
+  macos-key-custody:
+    name: macOS key custody
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.26
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked Python environment
+        run: uv sync --locked --extra dev
+
+      - name: Check and build the native helper
+        run: |
+          swift format lint --strict --recursive native/macos-key-custody
+          swift build --package-path native/macos-key-custody -c release
+          HELPER="native/macos-key-custody/.build/release/echo-veil-key-custody"
+          codesign --verify --strict --verbose=2 "$HELPER"
+
+      - name: Test custody, migration, and recovery contracts
+        run: >-
+          uv run --locked pytest -q
+          tests/test_key_custody.py
+          tests/test_backup_restore.py
+          tests/test_macos_key_custody_native.py
+
   agent-adapters:
     name: Agent adapters
     runs-on: ubuntu-latest

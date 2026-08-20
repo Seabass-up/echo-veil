@@ -12,7 +12,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from echo_veil.agent_cli import dispatch
 from echo_veil.agent_memory import AgentMemory, AlwaysAvailableMemory
 from echo_veil.agent_security import ProfileKeyring, scoped_aad
-from echo_veil.preflight_receipt import PREFLIGHT_RECEIPT_SCHEMA
+from echo_veil.preflight_receipt import (
+    PREFLIGHT_RECEIPT_SCHEMA,
+    PREFLIGHT_SIGNING_KEY_SCHEMA,
+    preflight_signing_key_status,
+)
 from echo_veil.record_envelope import (
     KEY_PURPOSE_PAYLOAD,
     KEY_PURPOSE_VECTOR,
@@ -111,6 +115,35 @@ def test_v3_hkdf_domains_bind_scope_epoch_purpose_version_and_algorithm() -> Non
         key_epoch=2,
         purpose=KEY_PURPOSE_PAYLOAD,
     )
+
+
+def test_v3_protects_and_rotates_the_preflight_signing_key(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(tmp_path, embed=_SemanticEmbedder()) as memory:
+        authority_before = memory.preflight_receipt_authority().authority_id
+        raw_before = (memory.profile_dir / "preflight-ed25519.key").read_bytes()
+        assert len(raw_before) == 32
+
+        assert (
+            memory.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
+            == "verified"
+        )
+        protected = json.loads(
+            (memory.profile_dir / "preflight-ed25519.key").read_text(encoding="utf-8")
+        )
+        assert protected["schema"] == PREFLIGHT_SIGNING_KEY_SCHEMA
+        assert raw_before not in json.dumps(protected, sort_keys=True).encode("utf-8")
+        assert (
+            preflight_signing_key_status(memory.profile_dir, memory._keyring)
+            == "v3-purpose-protected"
+        )
+        assert memory.preflight_receipt_authority().authority_id == authority_before
+
+        while memory.rotate_key(confirm=True, batch_size=100)["state"] != "verified":
+            pass
+        memory.retire_previous_key(confirm_backups_accounted_for=True)
+        assert memory.preflight_receipt_authority().authority_id == authority_before
 
 
 def test_v3_activation_is_explicit_and_persists_a_downgrade_barrier(

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Callable
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -22,10 +24,22 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from ._json import strict_json_loads
-from .agent_memory import _load_existing_key, _load_or_create_key
+from .agent_security import (
+    AES_GCM_NONCE_BYTES,
+    ProfileKeyring,
+    _atomic_write_json,
+    _read_private_file_bytes,
+    _write_new_key,
+)
+from .record_envelope import (
+    KEY_PURPOSE_PREFLIGHT_SIGNING,
+    RECORD_ENVELOPE_V3,
+    RECORD_ENVELOPE_V3_FEATURE,
+)
 
 PREFLIGHT_RECEIPT_SCHEMA = "echo-veil-preflight-v2"
 PREFLIGHT_SIGNING_KEY_FILE = "preflight-ed25519.key"
+PREFLIGHT_SIGNING_KEY_SCHEMA = "echo-veil-preflight-signing-key-v1"
 DEFAULT_RECEIPT_LIFETIME_SECONDS = 90.0
 MAX_RECEIPT_LIFETIME_SECONDS = 120.0
 MAX_RECEIPT_BYTES = 32_768
@@ -66,6 +80,148 @@ _CLAIM_FIELDS = {
     "tool_manifest_digest",
     "turn_id",
 }
+
+
+def _signing_key_aad(
+    *,
+    key_id: str,
+    scope_id: str,
+    envelope_version: int,
+) -> bytes:
+    return canonical_json(
+        {
+            "envelope_version": envelope_version,
+            "key_id": key_id,
+            "schema": PREFLIGHT_SIGNING_KEY_SCHEMA,
+            "scope_id": scope_id,
+        }
+    )
+
+
+def _protect_signing_key(keyring: ProfileKeyring, raw: bytes) -> dict[str, object]:
+    if not isinstance(raw, bytes) or len(raw) != 32:
+        raise ValueError("preflight signing key has an invalid size")
+    if not keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
+        raise RuntimeError("preflight signing-key protection requires envelope v3")
+    key_id = keyring.active_key_id
+    nonce = os.urandom(AES_GCM_NONCE_BYTES)
+    aad = _signing_key_aad(
+        key_id=key_id,
+        scope_id=keyring.scope_id,
+        envelope_version=RECORD_ENVELOPE_V3,
+    )
+    ciphertext = AESGCM(
+        keyring.key_for_envelope(
+            key_id,
+            purpose=KEY_PURPOSE_PREFLIGHT_SIGNING,
+            envelope_version=RECORD_ENVELOPE_V3,
+        )
+    ).encrypt(nonce, raw, aad)
+    return {
+        "ciphertext_b64": _b64(ciphertext),
+        "envelope_version": RECORD_ENVELOPE_V3,
+        "key_id": key_id,
+        "nonce_b64": _b64(nonce),
+        "schema": PREFLIGHT_SIGNING_KEY_SCHEMA,
+        "scope_id": keyring.scope_id,
+    }
+
+
+def _reveal_signing_key(keyring: ProfileKeyring, value: object) -> bytes:
+    if not isinstance(value, dict) or set(value) != {
+        "ciphertext_b64",
+        "envelope_version",
+        "key_id",
+        "nonce_b64",
+        "schema",
+        "scope_id",
+    }:
+        raise ValueError("protected preflight signing key is invalid")
+    if (
+        value["schema"] != PREFLIGHT_SIGNING_KEY_SCHEMA
+        or value["envelope_version"] != RECORD_ENVELOPE_V3
+        or value["scope_id"] != keyring.scope_id
+        or value["key_id"] not in keyring.key_ids
+    ):
+        raise ValueError("protected preflight signing key binding is invalid")
+    key_id = str(value["key_id"])
+    nonce = _decode_b64(value["nonce_b64"], "preflight signing nonce", 12)
+    ciphertext = _decode_b64(
+        value["ciphertext_b64"],
+        "protected preflight signing key",
+        48,
+    )
+    try:
+        raw = AESGCM(
+            keyring.key_for_envelope(
+                key_id,
+                purpose=KEY_PURPOSE_PREFLIGHT_SIGNING,
+                envelope_version=RECORD_ENVELOPE_V3,
+            )
+        ).decrypt(
+            nonce,
+            ciphertext,
+            _signing_key_aad(
+                key_id=key_id,
+                scope_id=keyring.scope_id,
+                envelope_version=RECORD_ENVELOPE_V3,
+            ),
+        )
+    except InvalidTag as exc:
+        raise ValueError(
+            "protected preflight signing key authentication failed"
+        ) from exc
+    if len(raw) != 32:
+        raise ValueError("protected preflight signing key size is invalid")
+    return raw
+
+
+def protect_preflight_signing_key(
+    profile_dir: str | os.PathLike[str],
+    keyring: ProfileKeyring,
+) -> bool:
+    """Migrate or rewrap the receipt key under the active v3 purpose key."""
+
+    path = Path(profile_dir).absolute() / PREFLIGHT_SIGNING_KEY_FILE
+    raw_file = _read_private_file_bytes(
+        path,
+        label="preflight signing key",
+        maximum=2_048,
+    )
+    try:
+        decoded = strict_json_loads(raw_file)
+    except Exception:
+        decoded = None
+    if isinstance(decoded, dict):
+        raw = _reveal_signing_key(keyring, decoded)
+        if decoded.get("key_id") == keyring.active_key_id:
+            return False
+    elif len(raw_file) == 32:
+        raw = raw_file
+    else:
+        raise ValueError("preflight signing key is invalid")
+    _atomic_write_json(path, _protect_signing_key(keyring, raw))
+    return True
+
+
+def preflight_signing_key_status(
+    profile_dir: str | os.PathLike[str],
+    keyring: ProfileKeyring | None,
+) -> str:
+    path = Path(profile_dir).absolute() / PREFLIGHT_SIGNING_KEY_FILE
+    raw = _read_private_file_bytes(
+        path,
+        label="preflight signing key",
+        maximum=2_048,
+    )
+    try:
+        decoded = strict_json_loads(raw)
+    except Exception:
+        return "legacy-raw" if len(raw) == 32 else "invalid"
+    if keyring is None:
+        return "protected-unavailable"
+    _reveal_signing_key(keyring, decoded)
+    return "v3-purpose-protected"
 
 
 def canonical_json(value: object) -> bytes:
@@ -148,10 +304,54 @@ class PreflightReceiptAuthority:
         profile_dir: str | os.PathLike[str],
         *,
         create: bool = False,
+        keyring: ProfileKeyring | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         path = Path(profile_dir).absolute() / PREFLIGHT_SIGNING_KEY_FILE
-        raw = _load_or_create_key(path) if create else _load_existing_key(path)
+        try:
+            stored = _read_private_file_bytes(
+                path,
+                label="preflight signing key",
+                maximum=2_048,
+            )
+        except Exception:
+            if not create:
+                raise
+            raw_new = Ed25519PrivateKey.generate().private_bytes(
+                serialization.Encoding.Raw,
+                serialization.PrivateFormat.Raw,
+                serialization.NoEncryption(),
+            )
+            if keyring is not None and keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE):
+                _atomic_write_json(path, _protect_signing_key(keyring, raw_new))
+                stored = _read_private_file_bytes(
+                    path,
+                    label="preflight signing key",
+                    maximum=2_048,
+                )
+            else:
+                _write_new_key(path, raw_new)
+                stored = raw_new
+        try:
+            decoded = strict_json_loads(stored)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, dict):
+            if keyring is None:
+                raise RuntimeError(
+                    "protected preflight signing key requires the profile keyring"
+                )
+            raw = _reveal_signing_key(keyring, decoded)
+        elif len(stored) == 32:
+            raw = stored
+            if (
+                create
+                and keyring is not None
+                and keyring.has_feature(RECORD_ENVELOPE_V3_FEATURE)
+            ):
+                _atomic_write_json(path, _protect_signing_key(keyring, raw))
+        else:
+            raise ValueError("preflight signing key is invalid")
         self._private_key = Ed25519PrivateKey.from_private_bytes(raw)
         self._public_bytes = self._private_key.public_key().public_bytes(
             serialization.Encoding.Raw,

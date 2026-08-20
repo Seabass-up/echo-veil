@@ -27,7 +27,7 @@ import secrets
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +37,20 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from numpy.typing import NDArray
 
 from ._json import strict_json_loads
+from .key_custody import (
+    FILE_CUSTODY_V1,
+    OPAQUE_KEY_CUSTODY,
+    CustodyClient,
+    CustodyDescriptor,
+    MacOSKeyCustodyClient,
+    executable_cdhash,
+    helper_identity,
+)
 from .record_envelope import (
     KEY_PURPOSE_LSH_INDEX,
     KEY_PURPOSE_SEMANTIC_CONTRACT,
     KEY_PURPOSE_VECTOR,
+    RECORD_ENVELOPE_KEY_PURPOSES,
     RECORD_ENVELOPE_V2,
     RECORD_ENVELOPE_V3,
     RECORD_ENVELOPE_V3_ALGORITHM,
@@ -73,6 +83,7 @@ _KEY_ID_RE = re.compile(r"ev-[0-9a-f]{16}\Z")
 _RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SCOPE_ID_RE = re.compile(r"scope-[0-9a-f]{32}\Z")
 _KEY_REF_RE = re.compile(r"(?:agent\.key|keys/ev-[0-9a-f]{16}\.key)\Z")
+_CUSTODY_REF_RE = re.compile(r"evkc-[0-9a-f]{32}\Z")
 
 
 class KeyUnavailable(RuntimeError):
@@ -118,6 +129,28 @@ def key_id_for(key: bytes) -> str:
     return f"{KEY_ID_PREFIX}{digest[:16]}"
 
 
+def _scope_binding_message(
+    scope: str,
+    scope_id: str,
+    *,
+    features: tuple[str, ...] = (),
+    key_epochs: tuple[tuple[str, int], ...] = (),
+) -> bytes:
+    message = bytearray(b"echo-veil-scope-binding-v1\0")
+    message.extend(scope_id.encode("ascii"))
+    message.extend(b"\0")
+    message.extend(scope.encode("utf-8"))
+    for feature in features:
+        message.extend(b"\0feature\0")
+        message.extend(feature.encode("ascii"))
+    for key_id, epoch in key_epochs:
+        message.extend(b"\0key-epoch\0")
+        message.extend(key_id.encode("ascii"))
+        message.extend(b"\0")
+        message.extend(str(epoch).encode("ascii"))
+    return bytes(message)
+
+
 def _scope_binding(
     key: bytes,
     scope: str,
@@ -126,20 +159,16 @@ def _scope_binding(
     features: tuple[str, ...] = (),
     key_epochs: tuple[tuple[str, int], ...] = (),
 ) -> str:
-    digest = hmac.new(key, digestmod=hashlib.sha256)
-    digest.update(b"echo-veil-scope-binding-v1\0")
-    digest.update(scope_id.encode("ascii"))
-    digest.update(b"\0")
-    digest.update(scope.encode("utf-8"))
-    for feature in features:
-        digest.update(b"\0feature\0")
-        digest.update(feature.encode("ascii"))
-    for key_id, epoch in key_epochs:
-        digest.update(b"\0key-epoch\0")
-        digest.update(key_id.encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(epoch).encode("ascii"))
-    return digest.hexdigest()
+    return hmac.new(
+        key,
+        _scope_binding_message(
+            scope,
+            scope_id,
+            features=features,
+            key_epochs=key_epochs,
+        ),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _validate_key_id(value: object) -> str:
@@ -2249,7 +2278,9 @@ class ProfileKeyring:
         self.profile_dir = _secure_directory(profile_dir)
         self.scope = normalize_scope(scope)
         self.manifest_path = self.profile_dir / "keyring.json"
-        self._keys: dict[str, bytes] = {}
+        self._keys: dict[str, bytes | CustodyDescriptor] = {}
+        self._custody_clients: dict[str, CustodyClient] = {}
+        self._derived_keys: dict[tuple[str, str, int], bytes] = {}
         self._manifest: dict[str, Any]
         if self.manifest_path.exists():
             self._manifest = self._load_manifest()
@@ -2287,6 +2318,81 @@ class ProfileKeyring:
         return tuple(sorted(self._keys))
 
     @property
+    def custody_provider(self) -> str:
+        """Return the active root's real provider without inferring readiness."""
+
+        value = self._keys.get(self.active_key_id)
+        return (
+            value.provider if isinstance(value, CustodyDescriptor) else FILE_CUSTODY_V1
+        )
+
+    @property
+    def raw_active_key_present(self) -> bool:
+        """Report whether normal profile files still contain the active root."""
+
+        keys_dir = self.profile_dir / "keys"
+        return (
+            any(
+                path.is_file() and path.name.endswith(".key")
+                for path in keys_dir.glob("*.key")
+            )
+            if keys_dir.is_dir()
+            else False
+        )
+
+    def _custody_descriptor_path(self, reference: str) -> Path:
+        if _CUSTODY_REF_RE.fullmatch(reference) is None:
+            raise KeyUnavailable("key-custody reference is invalid")
+        return self.profile_dir / "custody" / f"{reference}.json"
+
+    @staticmethod
+    def _custody_authentication_message(descriptor: CustodyDescriptor) -> bytes:
+        return (
+            b"echo-veil-key-custody-descriptor-v1\0"
+            + descriptor.authentication_message()
+        )
+
+    def _client_for(self, key_id: str) -> CustodyClient:
+        clean_id = _validate_key_id(key_id)
+        existing = self._custody_clients.get(clean_id)
+        if existing is not None:
+            return existing
+        value = self._keys.get(clean_id)
+        if not isinstance(value, CustodyDescriptor):
+            raise KeyUnavailable("profile key does not use opaque custody")
+        try:
+            client: CustodyClient = MacOSKeyCustodyClient(value, self.profile_dir)
+            probe = client.probe()
+        except Exception as exc:
+            raise KeyUnavailable("opaque profile key is unavailable") from exc
+        if probe.get("key_id") != clean_id:
+            client.close()
+            raise KeyUnavailable("opaque profile key identity changed")
+        self._custody_clients[clean_id] = client
+        return client
+
+    def _root_hmac(self, key_id: str, message: bytes) -> bytes:
+        value = self._keys.get(_validate_key_id(key_id))
+        if isinstance(value, bytes):
+            return hmac.new(value, message, hashlib.sha256).digest()
+        if isinstance(value, CustodyDescriptor):
+            return self._client_for(key_id).root_hmac(message)
+        raise KeyUnavailable("required profile key is unavailable")
+
+    def _scope_binding_for_manifest(
+        self,
+        key_id: str,
+        manifest: dict[str, Any],
+    ) -> str:
+        message = _scope_binding_message(
+            self.scope,
+            _validate_scope_id(manifest["scope_id"]),
+            features=tuple(str(item) for item in manifest.get("features", [])),
+            key_epochs=self._key_epochs_from_manifest(manifest),
+        )
+        return self._root_hmac(key_id, message).hex()
+
+    @property
     def features(self) -> tuple[str, ...]:
         raw = self._manifest.get("features", [])
         if not isinstance(raw, list):
@@ -2319,12 +2425,9 @@ class ProfileKeyring:
         features = tuple(sorted((*self.features, feature)))
         manifest = copy.deepcopy(self._manifest)
         manifest["features"] = list(features)
-        manifest["scope_binding"] = _scope_binding(
-            self.active_key(),
-            self.scope,
-            self.scope_id,
-            features=features,
-            key_epochs=self._key_epochs_from_manifest(manifest),
+        manifest["scope_binding"] = self._scope_binding_for_manifest(
+            self.active_key_id,
+            manifest,
         )
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
@@ -2350,12 +2453,9 @@ class ProfileKeyring:
         entry["epoch"] = 1
         features = tuple(sorted((*self.features, RECORD_ENVELOPE_V3_FEATURE)))
         manifest["features"] = list(features)
-        manifest["scope_binding"] = _scope_binding(
-            self.active_key(),
-            self.scope,
-            self.scope_id,
-            features=features,
-            key_epochs=self._key_epochs_from_manifest(manifest),
+        manifest["scope_binding"] = self._scope_binding_for_manifest(
+            self.active_key_id,
+            manifest,
         )
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
@@ -2391,15 +2491,33 @@ class ProfileKeyring:
             return self.key(clean_id)
         if envelope_version != RECORD_ENVELOPE_V3:
             raise KeyUnavailable("record-envelope version is unsupported")
-        return derive_record_envelope_key(
-            self.key(clean_id),
-            profile_scope=self.scope,
-            scope_id=self.scope_id,
-            key_epoch=self.key_epoch(clean_id),
-            purpose=purpose,
-            envelope_version=envelope_version,
-            algorithm=RECORD_ENVELOPE_V3_ALGORITHM,
-        )
+        epoch = self.key_epoch(clean_id)
+        cache_key = (clean_id, purpose, epoch)
+        cached = self._derived_keys.get(cache_key)
+        if cached is not None:
+            return cached
+        material = self._keys.get(clean_id)
+        if isinstance(material, bytes):
+            derived = derive_record_envelope_key(
+                material,
+                profile_scope=self.scope,
+                scope_id=self.scope_id,
+                key_epoch=epoch,
+                purpose=purpose,
+                envelope_version=envelope_version,
+                algorithm=RECORD_ENVELOPE_V3_ALGORITHM,
+            )
+        elif isinstance(material, CustodyDescriptor):
+            derived = self._client_for(clean_id).derive_v3_key(
+                profile_scope=self.scope,
+                scope_id=self.scope_id,
+                key_epoch=epoch,
+                purpose=purpose,
+            )
+        else:
+            raise KeyUnavailable("required profile key is unavailable")
+        self._derived_keys[cache_key] = derived
+        return derived
 
     def lsh_index_key(self) -> bytes:
         """Derive the active profile's separately versioned LSH key."""
@@ -2418,6 +2536,49 @@ class ProfileKeyring:
             + self.scope.encode("utf-8"),
             hashlib.sha256,
         ).digest()
+
+    def export_portable_root(self, *, recovery_key: bytes, context: bytes) -> bytes:
+        """Return only a recovery-key-wrapped root from opaque native custody."""
+
+        value = self._keys.get(self.active_key_id)
+        if not isinstance(value, CustodyDescriptor):
+            raise RuntimeError("portable root export requires opaque key custody")
+        if value.state != "active":
+            raise RuntimeError("portable root export requires active key custody")
+        return self._client_for(self.active_key_id).export_portable(
+            recovery_key=recovery_key,
+            context=context,
+        )
+
+    def monotonic_generation(self) -> int | None:
+        """Return the device-local generation, or None for file custody."""
+
+        value = self._keys.get(self.active_key_id)
+        if not isinstance(value, CustodyDescriptor):
+            return None
+        return self._client_for(self.active_key_id).generation()
+
+    def advance_monotonic_generation(self, *, expected: int, new: int) -> int:
+        value = self._keys.get(self.active_key_id)
+        if not isinstance(value, CustodyDescriptor) or value.state != "active":
+            raise RuntimeError(
+                "local monotonic generation requires active opaque custody"
+            )
+        return self._client_for(self.active_key_id).advance_generation(
+            expected=expected,
+            new=new,
+        )
+
+    def destroy_opaque_custody_for_restore_drill(self, *, confirm: bool) -> None:
+        """Delete a temporary portable-restore item; never use on a live profile."""
+
+        if confirm is not True:
+            raise ValueError("restore-drill custody deletion requires confirm=true")
+        value = self._keys.get(self.active_key_id)
+        if not isinstance(value, CustodyDescriptor):
+            raise RuntimeError("restore-drill profile does not use opaque custody")
+        client = self._client_for(self.active_key_id)
+        client.delete(confirm=True)
 
     @staticmethod
     def _key_epochs_from_manifest(
@@ -2447,12 +2608,234 @@ class ProfileKeyring:
     def key(self, key_id: str) -> bytes:
         clean_id = _validate_key_id(key_id)
         try:
-            return self._keys[clean_id]
+            value = self._keys[clean_id]
         except KeyError as exc:
             raise KeyUnavailable("required profile key is unavailable") from exc
+        if not isinstance(value, bytes):
+            raise KeyUnavailable("opaque profile roots cannot be exported")
+        return value
 
     def active_key(self) -> bytes:
         return self.key(self.active_key_id)
+
+    @property
+    def custody_state(self) -> str:
+        value = self._keys.get(self.active_key_id)
+        return value.state if isinstance(value, CustodyDescriptor) else "file"
+
+    def prepare_custody_migration(
+        self,
+        *,
+        provider: str,
+        helper_path: Path,
+        backup_verified: bool,
+    ) -> dict[str, str]:
+        """Copy the active v3 root into native custody without switching reads.
+
+        The raw file remains authoritative until ``activate_custody_migration``
+        verifies every derived domain.  A later, separately confirmed call
+        removes that raw file.  Callers must derive ``backup_verified`` from the
+        authenticated backup verifier; user input is not readiness evidence.
+        """
+
+        if backup_verified is not True:
+            raise ValueError("key-custody migration requires a verified backup")
+        if provider not in OPAQUE_KEY_CUSTODY:
+            raise ValueError("key-custody provider is unsupported")
+        if RECORD_ENVELOPE_V3_FEATURE not in self.features:
+            raise RuntimeError("key custody requires record-envelope v3")
+        if self.rotation_state is not None:
+            raise RuntimeError("key custody requires a completed key rotation")
+        if self.custody_provider != FILE_CUSTODY_V1:
+            raise RuntimeError("active profile key already uses opaque custody")
+        root = self.active_key()
+        key_id = self.active_key_id
+        reference = f"evkc-{os.urandom(16).hex()}"
+        absolute_helper = Path(os.path.abspath(os.fspath(helper_path)))
+        digest, cdhash = helper_identity(absolute_helper)
+        descriptor = CustodyDescriptor(
+            provider=provider,
+            reference=reference,
+            key_id=key_id,
+            helper_path=absolute_helper,
+            helper_sha256=digest,
+            helper_cdhash=cdhash,
+            peer_cdhash=executable_cdhash(),
+            state="prepared",
+        )
+        custody_dir = _secure_directory(self.profile_dir / "custody")
+        descriptor_path = custody_dir / f"{reference}.json"
+        client: CustodyClient = MacOSKeyCustodyClient(descriptor, self.profile_dir)
+        imported = False
+        try:
+            if client.import_root(root) != key_id:
+                raise KeyUnavailable("native custody changed the profile key ID")
+            imported = True
+            for purpose in sorted(RECORD_ENVELOPE_KEY_PURPOSES):
+                native = client.derive_v3_key(
+                    profile_scope=self.scope,
+                    scope_id=self.scope_id,
+                    key_epoch=self.key_epoch(key_id),
+                    purpose=purpose,
+                )
+                expected = derive_record_envelope_key(
+                    root,
+                    profile_scope=self.scope,
+                    scope_id=self.scope_id,
+                    key_epoch=self.key_epoch(key_id),
+                    purpose=purpose,
+                )
+                if not hmac.compare_digest(native, expected):
+                    raise KeyUnavailable("native custody key derivation mismatch")
+            tag = client.root_hmac(
+                self._custody_authentication_message(descriptor)
+            ).hex()
+            _atomic_write_json(descriptor_path, descriptor.as_dict(tag_hex=tag))
+        except Exception:
+            if imported:
+                try:
+                    client.delete(confirm=True)
+                except Exception:
+                    pass
+            try:
+                _unlink_private_file(
+                    descriptor_path,
+                    label="unactivated key-custody descriptor",
+                )
+            except (KeyUnavailable, OSError):
+                pass
+            raise
+        finally:
+            client.close()
+        return {
+            "provider": provider,
+            "reference": reference,
+            "state": "prepared",
+        }
+
+    def _prepared_custody_descriptor(self) -> tuple[CustodyDescriptor, str, Path]:
+        custody_dir = self.profile_dir / "custody"
+        if not custody_dir.is_dir():
+            raise RuntimeError("no key-custody migration is prepared")
+        candidates = tuple(custody_dir.glob("evkc-*.json"))
+        prepared: list[tuple[CustodyDescriptor, str, Path]] = []
+        for path in candidates:
+            raw = _read_private_file_bytes(
+                path,
+                label="key-custody descriptor",
+                maximum=64 * 1024,
+            )
+            descriptor, tag = CustodyDescriptor.from_json_bytes(raw)
+            if descriptor.key_id == self.active_key_id and descriptor.state in {
+                "prepared",
+                "verified",
+            }:
+                prepared.append((descriptor, tag, path))
+        if len(prepared) != 1:
+            raise RuntimeError("key-custody migration state is ambiguous")
+        return prepared[0]
+
+    def activate_custody_migration(self, *, confirm: bool) -> dict[str, str]:
+        """Switch the manifest to a fully verified opaque root reference."""
+
+        if confirm is not True:
+            raise ValueError("key-custody activation requires confirm=true")
+        if self.custody_provider != FILE_CUSTODY_V1:
+            value = self._keys.get(self.active_key_id)
+            if isinstance(value, CustodyDescriptor):
+                return {"provider": value.provider, "state": value.state}
+            raise RuntimeError("active key-custody state is invalid")
+        descriptor, stored_tag, descriptor_path = self._prepared_custody_descriptor()
+        root = self.active_key()
+        client: CustodyClient = MacOSKeyCustodyClient(descriptor, self.profile_dir)
+        retain_client = False
+        try:
+            probe = client.probe()
+            if probe.get("key_id") != self.active_key_id:
+                raise KeyUnavailable("native custody key identity changed")
+            expected_tag = client.root_hmac(
+                self._custody_authentication_message(descriptor)
+            ).hex()
+            if not hmac.compare_digest(stored_tag, expected_tag):
+                raise KeyUnavailable("key-custody descriptor authentication failed")
+            for purpose in sorted(RECORD_ENVELOPE_KEY_PURPOSES):
+                native = client.derive_v3_key(
+                    profile_scope=self.scope,
+                    scope_id=self.scope_id,
+                    key_epoch=self.key_epoch(self.active_key_id),
+                    purpose=purpose,
+                )
+                expected = derive_record_envelope_key(
+                    root,
+                    profile_scope=self.scope,
+                    scope_id=self.scope_id,
+                    key_epoch=self.key_epoch(self.active_key_id),
+                    purpose=purpose,
+                )
+                if not hmac.compare_digest(native, expected):
+                    raise KeyUnavailable("native custody verification failed")
+            verified = replace(descriptor, state="verified")
+            verified_tag = client.root_hmac(
+                self._custody_authentication_message(verified)
+            ).hex()
+            _atomic_write_json(
+                descriptor_path,
+                verified.as_dict(tag_hex=verified_tag),
+            )
+            manifest = copy.deepcopy(self._manifest)
+            keys = manifest.get("keys")
+            entry = keys.get(self.active_key_id) if isinstance(keys, dict) else None
+            if not isinstance(entry, dict):
+                raise KeyUnavailable("active profile key reference is invalid")
+            epoch = entry.get("epoch")
+            manifest["keys"][self.active_key_id] = {
+                "epoch": epoch,
+                "provider": verified.provider,
+                "ref": verified.reference,
+                "status": "active",
+            }
+            # The root is unchanged, so the existing scope binding remains valid.
+            _atomic_write_json(self.manifest_path, manifest)
+            self._manifest = manifest
+            self._keys[self.active_key_id] = verified
+            self._custody_clients[self.active_key_id] = client
+            retain_client = True
+            self._derived_keys.clear()
+        finally:
+            if not retain_client:
+                client.close()
+        return {"provider": descriptor.provider, "state": "verified"}
+
+    def retire_file_custody(self, *, confirm: bool) -> dict[str, str]:
+        """Remove the raw root only after opaque custody is active and verified."""
+
+        if confirm is not True:
+            raise ValueError("file-custody retirement requires confirm=true")
+        value = self._keys.get(self.active_key_id)
+        if not isinstance(value, CustodyDescriptor) or value.state != "verified":
+            raise RuntimeError("key-custody migration is not verified")
+        client = self._client_for(self.active_key_id)
+        if client.probe().get("key_id") != self.active_key_id:
+            raise KeyUnavailable("native custody key identity changed")
+        key_path = self.profile_dir / "keys" / f"{self.active_key_id}.key"
+        key = _read_key(key_path)
+        if not hmac.compare_digest(key_id_for(key), self.active_key_id):
+            raise KeyUnavailable("retired file root does not match active custody")
+        active = replace(value, state="active")
+        tag = client.root_hmac(self._custody_authentication_message(active)).hex()
+        _atomic_write_json(
+            self._custody_descriptor_path(active.reference),
+            active.as_dict(tag_hex=tag),
+        )
+        self._keys[self.active_key_id] = active
+        _unlink_private_file(key_path, label="retired file-custody root")
+        return {"provider": active.provider, "state": "active"}
+
+    def close(self) -> None:
+        for client in tuple(self._custody_clients.values()):
+            client.close()
+        self._custody_clients.clear()
+        self._derived_keys.clear()
 
     def begin_rotation(self) -> dict[str, str]:
         current = self.rotation_state
@@ -2468,19 +2851,66 @@ class ProfileKeyring:
             target = key_id_for(key)
             if target not in self._keys:
                 break
-        relative_ref = f"keys/{target}.key"
-        key_path = self.profile_dir / relative_ref
-        _secure_directory(key_path.parent)
-        _write_new_key(key_path, key)
+        source_material = self._keys.get(source)
+        key_path: Path | None = None
+        descriptor_path: Path | None = None
+        custody_client: CustodyClient | None = None
+        target_material: bytes | CustodyDescriptor
+        if isinstance(source_material, CustodyDescriptor):
+            reference = f"evkc-{os.urandom(16).hex()}"
+            descriptor = CustodyDescriptor(
+                provider=source_material.provider,
+                reference=reference,
+                key_id=target,
+                helper_path=source_material.helper_path,
+                helper_sha256=source_material.helper_sha256,
+                helper_cdhash=source_material.helper_cdhash,
+                peer_cdhash=source_material.peer_cdhash,
+                state="active",
+            )
+            custody_client = MacOSKeyCustodyClient(descriptor, self.profile_dir)
+            try:
+                if custody_client.import_root(key) != target:
+                    raise KeyUnavailable("rotated opaque key identity changed")
+                tag = custody_client.root_hmac(
+                    self._custody_authentication_message(descriptor)
+                ).hex()
+                descriptor_path = self._custody_descriptor_path(reference)
+                _secure_directory(descriptor_path.parent)
+                _atomic_write_json(
+                    descriptor_path,
+                    descriptor.as_dict(tag_hex=tag),
+                )
+            except Exception:
+                try:
+                    custody_client.delete(confirm=True)
+                except Exception:
+                    pass
+                custody_client.close()
+                raise
+            target_entry: dict[str, Any] = {
+                "provider": descriptor.provider,
+                "ref": descriptor.reference,
+                "status": "active",
+            }
+            target_material = descriptor
+        elif isinstance(source_material, bytes):
+            relative_ref = f"keys/{target}.key"
+            key_path = self.profile_dir / relative_ref
+            _secure_directory(key_path.parent)
+            _write_new_key(key_path, key)
+            target_entry = {
+                "ref": relative_ref,
+                "status": "active",
+            }
+            target_material = key
+        else:
+            raise KeyUnavailable("active profile key is unavailable")
         manifest = copy.deepcopy(self._manifest)
         keys = manifest["keys"]
         if not isinstance(keys, dict):
             raise KeyUnavailable("profile key manifest is invalid")
         keys[source]["status"] = "decrypt-only"
-        target_entry: dict[str, Any] = {
-            "ref": relative_ref,
-            "status": "active",
-        }
         if RECORD_ENVELOPE_V3_FEATURE in self.features:
             target_entry["epoch"] = (
                 max(
@@ -2505,14 +2935,32 @@ class ProfileKeyring:
         try:
             _atomic_write_json(self.manifest_path, manifest)
         except Exception:
-            try:
-                _unlink_private_file(key_path, label="unactivated profile key")
-            except OSError:
-                # Preserve the manifest failure; an orphan key is never activated.
-                pass
+            if custody_client is not None:
+                try:
+                    custody_client.delete(confirm=True)
+                except Exception:
+                    pass
+                custody_client.close()
+                if descriptor_path is not None:
+                    try:
+                        _unlink_private_file(
+                            descriptor_path,
+                            label="unactivated key-custody descriptor",
+                        )
+                    except (KeyUnavailable, OSError):
+                        pass
+            elif key_path is not None:
+                try:
+                    _unlink_private_file(key_path, label="unactivated profile key")
+                except OSError:
+                    # Preserve the manifest failure; an orphan key is never activated.
+                    pass
             raise
         self._manifest = manifest
-        self._keys[target] = key
+        self._keys[target] = target_material
+        if custody_client is not None:
+            self._custody_clients[target] = custody_client
+        self._derived_keys.clear()
         return {"from": source, "to": target, "state": "migrating"}
 
     def mark_rotation_verified(self) -> dict[str, str]:
@@ -2539,21 +2987,45 @@ class ProfileKeyring:
         entry = keys.get(source)
         if not isinstance(entry, dict):
             raise KeyUnavailable("previous profile key reference is missing")
-        key_path = self.profile_dir / str(entry["ref"])
-        _require_owner_file(key_path, "previous profile key")
+        source_material = self._keys.get(source)
+        key_path: Path | None = None
+        descriptor_path: Path | None = None
+        if isinstance(source_material, bytes):
+            key_path = self.profile_dir / str(entry["ref"])
+            _require_owner_file(key_path, "previous profile key")
+        elif isinstance(source_material, CustodyDescriptor):
+            descriptor_path = self._custody_descriptor_path(source_material.reference)
+            _require_owner_file(descriptor_path, "previous key-custody descriptor")
+            if self._client_for(source).probe().get("key_id") != source:
+                raise KeyUnavailable("previous opaque key identity changed")
+        else:
+            raise KeyUnavailable("previous profile key is unavailable")
         del keys[source]
         manifest.pop("rotation", None)
-        manifest["scope_binding"] = _scope_binding(
-            self.active_key(),
-            self.scope,
-            self.scope_id,
-            features=self.features,
-            key_epochs=self._key_epochs_from_manifest(manifest),
+        manifest["scope_binding"] = self._scope_binding_for_manifest(
+            self.active_key_id,
+            manifest,
         )
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
         self._keys.pop(source, None)
-        _unlink_private_file(key_path, label="previous profile key")
+        self._derived_keys = {
+            cache_key: value
+            for cache_key, value in self._derived_keys.items()
+            if cache_key[0] != source
+        }
+        if key_path is not None:
+            _unlink_private_file(key_path, label="previous profile key")
+        elif descriptor_path is not None:
+            client = self._custody_clients.pop(source)
+            try:
+                client.delete(confirm=True)
+            finally:
+                client.close()
+            _unlink_private_file(
+                descriptor_path,
+                label="previous key-custody descriptor",
+            )
         return source
 
     def _create_manifest(self) -> dict[str, Any]:
@@ -2636,18 +3108,30 @@ class ProfileKeyring:
         active_count = 0
         for key_id, entry in keys.items():
             _validate_key_id(key_id)
-            expected_entry_fields = (
-                {"epoch", "ref", "status"} if v3_enabled else {"ref", "status"}
-            )
+            provider = entry.get("provider") if isinstance(entry, dict) else None
+            opaque = provider in OPAQUE_KEY_CUSTODY
+            expected_entry_fields = {"ref", "status"}
+            if v3_enabled:
+                expected_entry_fields.add("epoch")
+            if opaque:
+                expected_entry_fields.add("provider")
             if not isinstance(entry, dict) or set(entry) != expected_entry_fields:
                 raise KeyUnavailable("profile key reference is invalid")
             reference = entry["ref"]
             status_value = entry["status"]
-            if (
-                not isinstance(reference, str)
-                or _KEY_REF_RE.fullmatch(reference) is None
-                or status_value not in {"active", "decrypt-only"}
-            ):
+            if not isinstance(reference, str) or status_value not in {
+                "active",
+                "decrypt-only",
+            }:
+                raise KeyUnavailable("profile key reference is invalid")
+            if opaque:
+                if (
+                    provider not in OPAQUE_KEY_CUSTODY
+                    or _CUSTODY_REF_RE.fullmatch(reference) is None
+                    or not v3_enabled
+                ):
+                    raise KeyUnavailable("opaque key-custody reference is invalid")
+            elif provider is not None or _KEY_REF_RE.fullmatch(reference) is None:
                 raise KeyUnavailable("profile key reference is invalid")
             if v3_enabled:
                 epoch = entry["epoch"]
@@ -2669,6 +3153,39 @@ class ProfileKeyring:
         keys = self._manifest["keys"]
         for key_id, entry in keys.items():
             reference = str(entry["ref"])
+            provider = entry.get("provider")
+            if provider in OPAQUE_KEY_CUSTODY:
+                descriptor_path = self._custody_descriptor_path(reference)
+                raw = _read_private_file_bytes(
+                    descriptor_path,
+                    label="key-custody descriptor",
+                    maximum=64 * 1024,
+                )
+                try:
+                    descriptor, tag = CustodyDescriptor.from_json_bytes(raw)
+                except ValueError as exc:
+                    raise KeyUnavailable("key-custody descriptor is invalid") from exc
+                if (
+                    descriptor.reference != reference
+                    or descriptor.provider != provider
+                    or descriptor.key_id != key_id
+                    or descriptor.state not in {"verified", "active"}
+                ):
+                    raise KeyUnavailable("key-custody descriptor binding is invalid")
+                self._keys[key_id] = descriptor
+                try:
+                    expected = (
+                        self._client_for(key_id)
+                        .root_hmac(self._custody_authentication_message(descriptor))
+                        .hex()
+                    )
+                except Exception as exc:
+                    raise KeyUnavailable(
+                        "key-custody descriptor is unavailable"
+                    ) from exc
+                if not hmac.compare_digest(expected, tag):
+                    raise KeyUnavailable("key-custody descriptor authentication failed")
+                continue
             key_path = self.profile_dir / reference
             resolved_parent = key_path.parent.resolve()
             if resolved_parent not in {
@@ -2682,12 +3199,9 @@ class ProfileKeyring:
             self._keys[key_id] = key
 
     def _verify_scope_binding(self) -> None:
-        expected = _scope_binding(
-            self.active_key(),
-            self.scope,
-            self.scope_id,
-            features=self.features,
-            key_epochs=self._key_epochs_from_manifest(self._manifest),
+        expected = self._scope_binding_for_manifest(
+            self.active_key_id,
+            self._manifest,
         )
         if not hmac.compare_digest(expected, str(self._manifest["scope_binding"])):
             raise PermissionError("authorization scope does not match this profile")

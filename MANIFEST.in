@@ -15,6 +15,7 @@ recursive-include examples *.py
 recursive-include scripts *.py
 recursive-include skills *.md *.yaml
 recursive-include protocol *.json *.md
+recursive-include native/macos-key-custody *.swift *.md
 include integrations/openclaw/README.md
 include integrations/openclaw/deployment-lock.json
 include integrations/openclaw/openclaw.plugin.json
