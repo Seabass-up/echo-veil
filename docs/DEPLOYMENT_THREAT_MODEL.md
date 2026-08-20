@@ -151,3 +151,17 @@ row counts, timestamps, vector dimensions, access patterns, and relationship
 shape. Plaintext is present in the authorized Python and local embedding
 processes. This remains a local staging control, not CKKS, hardware isolation,
 or proof-gated production access.
+
+Record-envelope v3 strengthens this local boundary with HKDF-separated keys
+for each encrypted or authenticated purpose. It is an internal format under
+the unchanged `scoped-v2` database contract and does not alter preflight-v2.
+The migration is explicit, bounded, dual-read, and restart-resumable. Once its
+activation marker is written, an older core is expected to stop on the unknown
+key-manifest/schema state rather than treat the profile as empty. Operational
+rollback therefore requires restoration of a verified pre-activation backup.
+
+V3 does not change the trusted-host threat boundary: root material and
+plaintext are still available to the authorized Python process with file-v1
+custody. It adds no hardware isolation, remote attestation, rollback-resistant
+monotonic authority, or protection after host-account compromise. Those claims
+remain false until separately implemented and verified.

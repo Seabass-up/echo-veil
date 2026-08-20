@@ -282,6 +282,23 @@ Deployment-provided:
   snapshots, backups, and physical media are outside this adapter's protection
   unless separately controlled.
 
+- **Record-envelope v3 is internal and migration-safe.** The scoped-v2
+  database contract can contain envelope-v2 and envelope-v3 records at the
+  same time. A profile continues writing v2 until an explicit operator action
+  atomically installs a downgrade barrier, enables v3 writes, and begins
+  bounded conversion. HKDF-SHA256 derives separate payload, vector, semantic
+  contract, token, digest, integrity, tombstone, index, preflight-key, and
+  backup-manifest keys while binding scope, opaque scope ID, key epoch,
+  envelope version, purpose, and algorithm. An interruption resumes before an
+  Oracle write can occur. The marker intentionally makes a pre-v0.8 core fail
+  closed; rollback requires a verified pre-migration backup.
+
+  This does not create a preflight v3. The RPC remains `preflight_v2`, the
+  signed receipt remains `echo-veil-preflight-v2`, and the runtime, telemetry,
+  and evidence-budget contracts retain their v1 identifiers. V3 improves
+  at-rest key separation but does not remove plaintext from the trusted Python
+  process or protect a file-backed root key after host compromise.
+
 ## 5. Crypto shield: trust boundary
 
 The spec's Section 5 composes three independently difficult technologies:

@@ -936,6 +936,17 @@ def dispatch(
         if not isinstance(report, dict):
             raise RuntimeError("capabilities_v1 report is invalid")
         return report
+    if action == "migrate_record_envelope_v3":
+        _require_only(supplied, {"confirm", "batch_size"})
+        if supplied.get("confirm") is not True:
+            raise ValueError("record-envelope v3 migration requires confirm=true")
+        batch_size = supplied.get("batch_size", 100)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise TypeError("batch_size must be an integer")
+        migrate = getattr(memory, "migrate_record_envelope_v3", None)
+        if not callable(migrate):
+            raise RuntimeError("record-envelope v3 migration is unavailable")
+        return migrate(confirm=True, batch_size=batch_size)
     if action not in {"doctor", "echo_veil_doctor"}:
         assertion = getattr(memory, "assert_operational_mode", None)
         if callable(assertion):

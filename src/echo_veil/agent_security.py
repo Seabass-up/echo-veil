@@ -38,10 +38,20 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from numpy.typing import NDArray
 
 from ._json import strict_json_loads
+from .record_envelope import (
+    KEY_PURPOSE_SEMANTIC_CONTRACT,
+    KEY_PURPOSE_VECTOR,
+    RECORD_ENVELOPE_V2,
+    RECORD_ENVELOPE_V3,
+    RECORD_ENVELOPE_V3_ALGORITHM,
+    RECORD_ENVELOPE_V3_FEATURE,
+    SUPPORTED_RECORD_ENVELOPES,
+    derive_record_envelope_key,
+)
 from .vectors import as_vector, cosine_similarity
 
 KEYRING_SCHEMA_VERSION = 1
-SCOPED_VECTOR_SCHEMA_VERSION = 2
+SCOPED_VECTOR_SCHEMA_VERSION = RECORD_ENVELOPE_V2
 AES_GCM_NONCE_BYTES = 12
 AES_GCM_TAG_BYTES = 16
 AES_256_KEY_BYTES = 32
@@ -54,6 +64,7 @@ MAX_PROFILE_FEATURES = 16
 SUPPORTED_PROFILE_FEATURES = frozenset(
     {
         "record-integrity-hmac-v1",
+        RECORD_ENVELOPE_V3_FEATURE,
         "shielded-four-layer-v1",
     }
 )
@@ -104,6 +115,7 @@ def _scope_binding(
     scope_id: str,
     *,
     features: tuple[str, ...] = (),
+    key_epochs: tuple[tuple[str, int], ...] = (),
 ) -> str:
     digest = hmac.new(key, digestmod=hashlib.sha256)
     digest.update(b"echo-veil-scope-binding-v1\0")
@@ -113,6 +125,11 @@ def _scope_binding(
     for feature in features:
         digest.update(b"\0feature\0")
         digest.update(feature.encode("ascii"))
+    for key_id, epoch in key_epochs:
+        digest.update(b"\0key-epoch\0")
+        digest.update(key_id.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(epoch).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -1778,6 +1795,16 @@ class ProfileKeyring:
             raise KeyUnavailable("profile key manifest features are invalid")
         return tuple(str(feature) for feature in raw)
 
+    @property
+    def record_envelope_write_version(self) -> int:
+        """Return the internal write envelope without changing protocol versions."""
+
+        return (
+            RECORD_ENVELOPE_V3
+            if RECORD_ENVELOPE_V3_FEATURE in self.features
+            else RECORD_ENVELOPE_V2
+        )
+
     def has_feature(self, feature: str) -> bool:
         if feature not in SUPPORTED_PROFILE_FEATURES:
             raise ValueError("profile feature is unsupported")
@@ -1786,6 +1813,9 @@ class ProfileKeyring:
     def enable_feature(self, feature: str) -> None:
         if feature not in SUPPORTED_PROFILE_FEATURES:
             raise ValueError("profile feature is unsupported")
+        if feature == RECORD_ENVELOPE_V3_FEATURE:
+            self.enable_record_envelope_v3()
+            return
         if feature in self.features:
             return
         features = tuple(sorted((*self.features, feature)))
@@ -1796,9 +1826,107 @@ class ProfileKeyring:
             self.scope,
             self.scope_id,
             features=features,
+            key_epochs=self._key_epochs_from_manifest(manifest),
         )
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
+
+    def enable_record_envelope_v3(self) -> None:
+        """Persist the v3 downgrade barrier and initial root-key epoch."""
+
+        if self.rotation_state is not None:
+            raise RuntimeError(
+                "record-envelope activation requires a completed key rotation"
+            )
+        if RECORD_ENVELOPE_V3_FEATURE in self.features:
+            return
+        manifest = copy.deepcopy(self._manifest)
+        keys = manifest.get("keys")
+        if not isinstance(keys, dict) or set(keys) != {self.active_key_id}:
+            raise KeyUnavailable(
+                "record-envelope activation requires one verified active key"
+            )
+        entry = keys[self.active_key_id]
+        if not isinstance(entry, dict) or set(entry) != {"ref", "status"}:
+            raise KeyUnavailable("profile key reference is invalid")
+        entry["epoch"] = 1
+        features = tuple(sorted((*self.features, RECORD_ENVELOPE_V3_FEATURE)))
+        manifest["features"] = list(features)
+        manifest["scope_binding"] = _scope_binding(
+            self.active_key(),
+            self.scope,
+            self.scope_id,
+            features=features,
+            key_epochs=self._key_epochs_from_manifest(manifest),
+        )
+        _atomic_write_json(self.manifest_path, manifest)
+        self._manifest = manifest
+
+    def key_epoch(self, key_id: str) -> int:
+        """Return the authenticated v3 epoch for a referenced root key."""
+
+        clean_id = _validate_key_id(key_id)
+        if RECORD_ENVELOPE_V3_FEATURE not in self.features:
+            raise KeyUnavailable("record-envelope v3 key epochs are unavailable")
+        keys = self._manifest.get("keys")
+        entry = keys.get(clean_id) if isinstance(keys, dict) else None
+        epoch = entry.get("epoch") if isinstance(entry, dict) else None
+        if (
+            isinstance(epoch, bool)
+            or not isinstance(epoch, int)
+            or not 1 <= epoch <= 2**31 - 1
+        ):
+            raise KeyUnavailable("profile key epoch is invalid")
+        return epoch
+
+    def key_for_envelope(
+        self,
+        key_id: str,
+        *,
+        purpose: str,
+        envelope_version: int,
+    ) -> bytes:
+        """Return the legacy root key or one purpose-separated v3 subkey."""
+
+        clean_id = _validate_key_id(key_id)
+        if envelope_version == RECORD_ENVELOPE_V2:
+            return self.key(clean_id)
+        if envelope_version != RECORD_ENVELOPE_V3:
+            raise KeyUnavailable("record-envelope version is unsupported")
+        return derive_record_envelope_key(
+            self.key(clean_id),
+            profile_scope=self.scope,
+            scope_id=self.scope_id,
+            key_epoch=self.key_epoch(clean_id),
+            purpose=purpose,
+            envelope_version=envelope_version,
+            algorithm=RECORD_ENVELOPE_V3_ALGORITHM,
+        )
+
+    @staticmethod
+    def _key_epochs_from_manifest(
+        manifest: dict[str, Any],
+    ) -> tuple[tuple[str, int], ...]:
+        features = manifest.get("features", [])
+        if RECORD_ENVELOPE_V3_FEATURE not in features:
+            return ()
+        keys = manifest.get("keys")
+        if not isinstance(keys, dict):
+            raise KeyUnavailable("profile key references are invalid")
+        epochs: list[tuple[str, int]] = []
+        for key_id in sorted(keys):
+            entry = keys[key_id]
+            epoch = entry.get("epoch") if isinstance(entry, dict) else None
+            if (
+                isinstance(epoch, bool)
+                or not isinstance(epoch, int)
+                or not 1 <= epoch <= 2**31 - 1
+            ):
+                raise KeyUnavailable("profile key epoch is invalid")
+            epochs.append((_validate_key_id(key_id), epoch))
+        if len({epoch for _key_id, epoch in epochs}) != len(epochs):
+            raise KeyUnavailable("profile key epochs must be unique")
+        return tuple(epochs)
 
     def key(self, key_id: str) -> bytes:
         clean_id = _validate_key_id(key_id)
@@ -1833,7 +1961,18 @@ class ProfileKeyring:
         if not isinstance(keys, dict):
             raise KeyUnavailable("profile key manifest is invalid")
         keys[source]["status"] = "decrypt-only"
-        keys[target] = {"ref": relative_ref, "status": "active"}
+        target_entry: dict[str, Any] = {
+            "ref": relative_ref,
+            "status": "active",
+        }
+        if RECORD_ENVELOPE_V3_FEATURE in self.features:
+            target_entry["epoch"] = (
+                max(
+                    epoch for _key_id, epoch in self._key_epochs_from_manifest(manifest)
+                )
+                + 1
+            )
+        keys[target] = target_entry
         manifest["active_key_id"] = target
         manifest["rotation"] = {
             "from": source,
@@ -1845,6 +1984,7 @@ class ProfileKeyring:
             self.scope,
             self.scope_id,
             features=self.features,
+            key_epochs=self._key_epochs_from_manifest(manifest),
         )
         try:
             _atomic_write_json(self.manifest_path, manifest)
@@ -1887,6 +2027,13 @@ class ProfileKeyring:
         _require_owner_file(key_path, "previous profile key")
         del keys[source]
         manifest.pop("rotation", None)
+        manifest["scope_binding"] = _scope_binding(
+            self.active_key(),
+            self.scope,
+            self.scope_id,
+            features=self.features,
+            key_epochs=self._key_epochs_from_manifest(manifest),
+        )
         _atomic_write_json(self.manifest_path, manifest)
         self._manifest = manifest
         self._keys.pop(source, None)
@@ -1954,23 +2101,6 @@ class ProfileKeyring:
         keys = decoded["keys"]
         if not isinstance(keys, dict) or not keys or len(keys) > 8:
             raise KeyUnavailable("profile key references are invalid")
-        active_count = 0
-        for key_id, entry in keys.items():
-            _validate_key_id(key_id)
-            if not isinstance(entry, dict) or set(entry) != {"ref", "status"}:
-                raise KeyUnavailable("profile key reference is invalid")
-            reference = entry["ref"]
-            status_value = entry["status"]
-            if (
-                not isinstance(reference, str)
-                or _KEY_REF_RE.fullmatch(reference) is None
-                or status_value not in {"active", "decrypt-only"}
-            ):
-                raise KeyUnavailable("profile key reference is invalid")
-            if status_value == "active":
-                active_count += 1
-        if active_count != 1 or keys[decoded["active_key_id"]]["status"] != "active":
-            raise KeyUnavailable("profile active key state is invalid")
         features = decoded.get("features", [])
         if (
             not isinstance(features, list)
@@ -1983,6 +2113,37 @@ class ProfileKeyring:
             or features != sorted(set(features))
         ):
             raise KeyUnavailable("profile key manifest features are invalid")
+        v3_enabled = RECORD_ENVELOPE_V3_FEATURE in features
+        active_count = 0
+        for key_id, entry in keys.items():
+            _validate_key_id(key_id)
+            expected_entry_fields = (
+                {"epoch", "ref", "status"} if v3_enabled else {"ref", "status"}
+            )
+            if not isinstance(entry, dict) or set(entry) != expected_entry_fields:
+                raise KeyUnavailable("profile key reference is invalid")
+            reference = entry["ref"]
+            status_value = entry["status"]
+            if (
+                not isinstance(reference, str)
+                or _KEY_REF_RE.fullmatch(reference) is None
+                or status_value not in {"active", "decrypt-only"}
+            ):
+                raise KeyUnavailable("profile key reference is invalid")
+            if v3_enabled:
+                epoch = entry["epoch"]
+                if (
+                    isinstance(epoch, bool)
+                    or not isinstance(epoch, int)
+                    or not 1 <= epoch <= 2**31 - 1
+                ):
+                    raise KeyUnavailable("profile key epoch is invalid")
+            if status_value == "active":
+                active_count += 1
+        if active_count != 1 or keys[decoded["active_key_id"]]["status"] != "active":
+            raise KeyUnavailable("profile active key state is invalid")
+        if v3_enabled:
+            self._key_epochs_from_manifest(decoded)
         return decoded
 
     def _load_referenced_keys(self) -> None:
@@ -2007,6 +2168,7 @@ class ProfileKeyring:
             self.scope,
             self.scope_id,
             features=self.features,
+            key_epochs=self._key_epochs_from_manifest(self._manifest),
         )
         if not hmac.compare_digest(expected, str(self._manifest["scope_binding"])):
             raise PermissionError("authorization scope does not match this profile")
@@ -2032,7 +2194,7 @@ def scoped_aad(
     _validate_scope_id(scope_id)
     _validate_record_id(record_id)
     _validate_key_id(key_id)
-    if schema_version != SCOPED_VECTOR_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_RECORD_ENVELOPES:
         raise ValueError("encrypted object schema version is unsupported")
     payload: dict[str, object] = {
         "key_id": key_id,
@@ -2078,7 +2240,7 @@ class ScopedProtectedVector:
         _validate_key_id(self.key_id)
         _validate_scope_id(self.scope_id)
         _validate_record_id(self.record_id)
-        if self.schema_version != SCOPED_VECTOR_SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_RECORD_ENVELOPES:
             raise ValueError("scoped protected vector schema version is unsupported")
         if self.algorithm != "AES-256-GCM-SCOPED" or self.dtype != "float64":
             raise ValueError("scoped protected vector metadata is invalid")
@@ -2203,7 +2365,7 @@ class ScopedProtectedBlob:
         _validate_record_id(self.record_id)
         if self.object_type != "memory-contract":
             raise ValueError("scoped protected blob object type is invalid")
-        if self.schema_version != SCOPED_VECTOR_SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_RECORD_ENVELOPES:
             raise ValueError("scoped protected blob schema version is unsupported")
         if self.algorithm != "AES-256-GCM-SCOPED":
             raise ValueError("scoped protected blob algorithm is invalid")
@@ -2325,6 +2487,7 @@ class ScopedAesGcmShield:
         if vector.size > MAX_VECTOR_ELEMENTS:
             raise ValueError("anchor vector exceeds the safety limit")
         key_id = self.keyring.active_key_id
+        schema_version = self.keyring.record_envelope_write_version
         nonce = os.urandom(AES_GCM_NONCE_BYTES)
         protected = ScopedProtectedVector(
             key_id=key_id,
@@ -2333,8 +2496,15 @@ class ScopedAesGcmShield:
             nonce=nonce,
             ciphertext=b"\0" * (vector.nbytes + AES_GCM_TAG_BYTES),
             shape=(int(vector.size),),
+            schema_version=schema_version,
         )
-        ciphertext = AESGCM(self.keyring.key(key_id)).encrypt(
+        ciphertext = AESGCM(
+            self.keyring.key_for_envelope(
+                key_id,
+                purpose=KEY_PURPOSE_VECTOR,
+                envelope_version=schema_version,
+            )
+        ).encrypt(
             nonce,
             vector.tobytes(order="C"),
             protected.associated_data(),
@@ -2346,6 +2516,7 @@ class ScopedAesGcmShield:
             nonce=nonce,
             ciphertext=ciphertext,
             shape=(int(vector.size),),
+            schema_version=schema_version,
         )
 
     def protect_blob_for_record(
@@ -2354,6 +2525,8 @@ class ScopedAesGcmShield:
         record_id: str,
         *,
         object_type: str,
+        key_id: str | None = None,
+        schema_version: int | None = None,
     ) -> ScopedProtectedBlob:
         """Protect bounded semantic metadata under the same profile shield."""
 
@@ -2364,28 +2537,45 @@ class ScopedAesGcmShield:
             raise ValueError("protected blob payload has an invalid size")
         if object_type != "memory-contract":
             raise ValueError("protected blob object type is invalid")
-        key_id = self.keyring.active_key_id
+        target_key_id = (
+            self.keyring.active_key_id if key_id is None else _validate_key_id(key_id)
+        )
+        target_schema_version = (
+            self.keyring.record_envelope_write_version
+            if schema_version is None
+            else schema_version
+        )
+        if target_schema_version not in SUPPORTED_RECORD_ENVELOPES:
+            raise ValueError("target record-envelope version is unsupported")
         nonce = os.urandom(AES_GCM_NONCE_BYTES)
         placeholder = ScopedProtectedBlob(
-            key_id=key_id,
+            key_id=target_key_id,
             scope_id=self.keyring.scope_id,
             record_id=clean_id,
             object_type=object_type,
             nonce=nonce,
             ciphertext=b"\0" * (len(payload) + AES_GCM_TAG_BYTES),
+            schema_version=target_schema_version,
         )
-        ciphertext = AESGCM(self.keyring.key(key_id)).encrypt(
+        ciphertext = AESGCM(
+            self.keyring.key_for_envelope(
+                target_key_id,
+                purpose=KEY_PURPOSE_SEMANTIC_CONTRACT,
+                envelope_version=target_schema_version,
+            )
+        ).encrypt(
             nonce,
             payload,
             placeholder.associated_data(),
         )
         return ScopedProtectedBlob(
-            key_id=key_id,
+            key_id=target_key_id,
             scope_id=self.keyring.scope_id,
             record_id=clean_id,
             object_type=object_type,
             nonce=nonce,
             ciphertext=ciphertext,
+            schema_version=target_schema_version,
         )
 
     def reveal_blob(self, protected_blob: object) -> bytes:
@@ -2396,7 +2586,13 @@ class ScopedAesGcmShield:
         if protected_blob.scope_id != self.keyring.scope_id:
             raise ValueError("protected blob belongs to another authorization scope")
         try:
-            plaintext = AESGCM(self.keyring.key(protected_blob.key_id)).decrypt(
+            plaintext = AESGCM(
+                self.keyring.key_for_envelope(
+                    protected_blob.key_id,
+                    purpose=KEY_PURPOSE_SEMANTIC_CONTRACT,
+                    envelope_version=protected_blob.schema_version,
+                )
+            ).decrypt(
                 protected_blob.nonce,
                 protected_blob.ciphertext,
                 protected_blob.associated_data(),
@@ -2412,10 +2608,18 @@ class ScopedAesGcmShield:
         protected_blob: ScopedProtectedBlob,
         *,
         target_key_id: str,
+        target_schema_version: int | None = None,
     ) -> ScopedProtectedBlob:
         """Rewrap metadata during the same resumable profile-key rotation."""
 
         target = _validate_key_id(target_key_id)
+        target_version = (
+            protected_blob.schema_version
+            if target_schema_version is None
+            else target_schema_version
+        )
+        if target_version not in SUPPORTED_RECORD_ENVELOPES:
+            raise ValueError("target record-envelope version is unsupported")
         plaintext = bytearray(self.reveal_blob(protected_blob))
         try:
             nonce = os.urandom(AES_GCM_NONCE_BYTES)
@@ -2426,8 +2630,15 @@ class ScopedAesGcmShield:
                 object_type=protected_blob.object_type,
                 nonce=nonce,
                 ciphertext=b"\0" * (len(plaintext) + AES_GCM_TAG_BYTES),
+                schema_version=target_version,
             )
-            ciphertext = AESGCM(self.keyring.key(target)).encrypt(
+            ciphertext = AESGCM(
+                self.keyring.key_for_envelope(
+                    target,
+                    purpose=KEY_PURPOSE_SEMANTIC_CONTRACT,
+                    envelope_version=target_version,
+                )
+            ).encrypt(
                 nonce,
                 bytes(plaintext),
                 placeholder.associated_data(),
@@ -2439,6 +2650,7 @@ class ScopedAesGcmShield:
                 object_type=protected_blob.object_type,
                 nonce=nonce,
                 ciphertext=ciphertext,
+                schema_version=target_version,
             )
         finally:
             for index in range(len(plaintext)):
@@ -2449,7 +2661,13 @@ class ScopedAesGcmShield:
         plaintext = bytearray()
         try:
             plaintext = bytearray(
-                AESGCM(self.keyring.key(protected.key_id)).decrypt(
+                AESGCM(
+                    self.keyring.key_for_envelope(
+                        protected.key_id,
+                        purpose=KEY_PURPOSE_VECTOR,
+                        envelope_version=protected.schema_version,
+                    )
+                ).decrypt(
                     protected.nonce,
                     protected.ciphertext,
                     protected.associated_data(),
@@ -2480,8 +2698,16 @@ class ScopedAesGcmShield:
         protected_anchor: ScopedProtectedVector,
         *,
         target_key_id: str,
+        target_schema_version: int | None = None,
     ) -> ScopedProtectedVector:
         target = _validate_key_id(target_key_id)
+        target_version = (
+            protected_anchor.schema_version
+            if target_schema_version is None
+            else target_schema_version
+        )
+        if target_version not in SUPPORTED_RECORD_ENVELOPES:
+            raise ValueError("target record-envelope version is unsupported")
         vector = self.reveal(protected_anchor)
         try:
             nonce = os.urandom(AES_GCM_NONCE_BYTES)
@@ -2492,8 +2718,15 @@ class ScopedAesGcmShield:
                 nonce=nonce,
                 ciphertext=b"\0" * (vector.nbytes + AES_GCM_TAG_BYTES),
                 shape=protected_anchor.shape,
+                schema_version=target_version,
             )
-            ciphertext = AESGCM(self.keyring.key(target)).encrypt(
+            ciphertext = AESGCM(
+                self.keyring.key_for_envelope(
+                    target,
+                    purpose=KEY_PURPOSE_VECTOR,
+                    envelope_version=target_version,
+                )
+            ).encrypt(
                 nonce,
                 vector.astype(np.float64, copy=False).tobytes(order="C"),
                 placeholder.associated_data(),
@@ -2505,6 +2738,7 @@ class ScopedAesGcmShield:
                 nonce=nonce,
                 ciphertext=ciphertext,
                 shape=protected_anchor.shape,
+                schema_version=target_version,
             )
         finally:
             vector.fill(0.0)

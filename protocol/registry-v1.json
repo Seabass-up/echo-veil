@@ -173,6 +173,7 @@
         "crypto_environment",
         "local_production_ready",
         "mode_alias",
+        "record_envelope",
         "readiness_remediation"
       ],
       "producer": "echo_veil.agent_memory.AgentMemory.doctor",
@@ -390,7 +391,7 @@
       "introduced_version": "0.8.0",
       "maximum_bytes": 4194304,
       "optional_fields": [],
-      "producer": "reserved-for-phase-3",
+      "producer": "echo_veil.agent_memory._EncryptedPayloadStore",
       "required_fields": [
         "algorithm",
         "ciphertext",
@@ -402,7 +403,7 @@
         "scope_id"
       ],
       "signed": false,
-      "status": "reserved-not-emitted",
+      "status": "dual-read-explicit-write",
       "surface": "internal-record-envelope",
       "wire_schema": "echo-veil-record-envelope-v3"
     },

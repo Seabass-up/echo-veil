@@ -175,6 +175,31 @@ remain encrypted at the record level. Backups must include the database,
 lifecycle store, key manifest, and referenced keys as one protected recovery
 set. Echo Veil does not yet provide a qualified backup/restore command.
 
+## Record-envelope v3 migration
+
+The database security contract remains `scoped-v2`, independently of the
+encrypted record format. Existing profiles start as v2 reader/writers. An
+operator-only, confirmed migration installs a persistent activation marker,
+switches new writes to record-envelope v3, and converts lifecycle anchors,
+payloads, vectors, contracts, keyed metadata, integrity tags, and tombstones in
+bounded batches. V2 and v3 records are both readable while migration is in
+progress, and the next writable open completes an interrupted activation before
+an Oracle can write.
+
+V3 derives purpose-specific keys with HKDF-SHA256 from the profile root. Every
+derivation authenticates the normalized profile scope, opaque scope ID, key
+epoch, purpose, envelope version, and algorithm. A payload ciphertext therefore
+does not authenticate under the vector, semantic-contract, token, integrity,
+or backup domain. The root remains file-backed in the current implementation,
+so this separation does not protect plaintext or keys after trusted-host
+compromise.
+
+The activation marker is also a downgrade barrier. A pre-v0.8 core must reject
+the unknown manifest/schema instead of returning an apparently empty profile.
+Returning to that core requires restoring a verified pre-migration recovery
+set. Harnesses never see this format: their RPC and receipt remain
+`preflight_v2` and `echo-veil-preflight-v2`.
+
 ## Key custody and rotation
 
 `keyring.json` contains only non-secret key references. Raw 32-byte keys live in

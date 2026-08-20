@@ -117,7 +117,17 @@ backup, restore, profile-access, and host-enforcement gate passes. Current
 `file-v1` profiles do not qualify. Even a qualified local profile exposes
 plaintext to the authorized process and embedding service and does not protect
 against host compromise; hardware-isolated, remotely attested production
-remains a distinct enclave class. Echo Veil also does not automatically protect
+remains a distinct enclave class.
+
+Record-envelope v3 is available as an explicit, internal profile migration.
+It retains the `scoped-v2` database contract and every harness-facing v2/v1
+protocol identifier while adding purpose-separated HKDF keys and mixed-v2/v3
+reads. Existing profiles keep writing v2 until the operator confirms migration
+in bounded batches; after activation, the persistent downgrade marker requires
+the v0.8 dual-reader or a verified pre-migration restore. The migration action
+is operator-only and is not exposed to agents as an MCP tool.
+
+Echo Veil also does not automatically protect
 host logs, prompts, transcripts, wiki/graph stores, backups, swap, or physical
 media. The complete threat model and application entry-point contract are in
 [`docs/LOCAL_AGENT_SECURITY.md`](docs/LOCAL_AGENT_SECURITY.md).

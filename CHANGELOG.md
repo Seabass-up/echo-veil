@@ -22,6 +22,13 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Added internal record-envelope v3 with HKDF-SHA256 purpose separation across
+  payload, vector, semantic-contract, token, digest, integrity, tombstone,
+  index, preflight-key, and backup-manifest domains. Activation is explicit,
+  bounded, dual-read, restart-resumable, and protected by a persistent
+  downgrade barrier; unknown formats, lost keys, and cross-domain decryptions
+  fail closed.
+
 - Isolated Codex profiles now disable the plugin loader, account-level apps,
   the independently enabled remote plugin catalog, and app-backed MCP
   connectors while applying an all-connectors-denied policy. The launcher
@@ -61,8 +68,8 @@ All notable changes to Echo Veil are documented here. The project follows
   response and receipt are unchanged.
 - Added an authoritative protocol registry and shared Python/TypeScript/
   JavaScript fixtures that freeze signed preflight v2, retain the unsigned
-  preflight bridge, reserve `capabilities_v1`, and keep record-envelope v3
-  invisible to harness consumers.
+  preflight bridge, expose `capabilities_v1` independently, and keep the now
+  implemented record-envelope v3 invisible to harness consumers.
 - Added signed lifecycle-neutral `preflight_v2` receipts with exact
   query/session/turn/model/tool/artifact bindings, one-use replay defense,
   adaptive one-or-two-result evidence, compact ritual status, multilingual
