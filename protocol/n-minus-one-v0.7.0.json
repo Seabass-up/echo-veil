@@ -1,0 +1,85 @@
+{
+  "commit": "e94be9e649048273ab74eb1150e65ac9481596d9",
+  "consumers": {
+    "aip": {
+      "files": {
+        "integrations/aip/README.md": "1ca889ff9e741cc238da071a27795e2c3a9adefc3d63ddad824b378d68bdbf59"
+      },
+      "qualification": "external-release-gate"
+    },
+    "algo-cli": {
+      "files": {
+        "integrations/algo-cli/README.md": "d7b806fbfcdc408d9c24a8c0c0bb2bcb8e3365f5c1f119baccd5458c1041e4f7"
+      },
+      "qualification": "external-release-gate"
+    },
+    "claude-code": {
+      "files": {
+        "integrations/claude-code/hooks/hooks.json": "01b45e267217d2d838d1d894d5711be9996e2c3377ab67cc3b0d18a66cef6a3d"
+      },
+      "qualification": "pinned-thin-wrapper"
+    },
+    "codex": {
+      "files": {
+        ".codex-plugin/plugin.json": "1dd202da11c7506974831cf9807574db1dc50bd72a81e781faecc924932df25d",
+        "hooks/hooks.json": "07f47d53069106b640dbe9028dce180611884b447ce035613d85219a2bf74fdd",
+        "pyproject.toml": "95a855f295cde490defb4ef975cee0c6b2f6b998661e8f3734267a270f6bea20",
+        "src/echo_veil/agent_preflight.py": "b0f0d391c456196376cc8ba361f857fa4dcd49fdb9cb0689c4534e30eeea3c76",
+        "src/echo_veil/guarded_runner.py": "f9b812da961c7f6aa81c828bda0a2a798d073297a149baa29c2adb772438a65e"
+      },
+      "qualification": "executed-shared-python-consumer"
+    },
+    "droid": {
+      "files": {
+        "integrations/droid/hooks/echo-veil-preflight.sh": "d1a6be3352b68c565fa6ad1c6433da017148e8dd05e317fda7b2b3dbb1336945"
+      },
+      "qualification": "pinned-thin-wrapper"
+    },
+    "goose": {
+      "files": {
+        "integrations/goose/echo-veil.yaml": "bbdea0b9fb48742caf98c7a1b01b0e78bd520ef74d5c916dcad0e16ce236ba2d"
+      },
+      "qualification": "pinned-policy-wrapper"
+    },
+    "hermes": {
+      "files": {
+        "integrations/hermes/plugin/__init__.py": "f7db9163e75fa7e7e8c7d3e85d51dc747dd71fb3f212e38ec815a51efd78696b"
+      },
+      "qualification": "executed-legacy-consumer"
+    },
+    "openclaw": {
+      "files": {
+        "integrations/openclaw/package-lock.json": "a4de6bb3f750e5a0177fc09f041a09bb522ef58604ccd9b5c49b7bef514b41f4",
+        "integrations/openclaw/src/index.ts": "a4a2622d31e0380233cfb02d26d5d19f66541ab0c7a733efefefea54bc9be9e8"
+      },
+      "qualification": "executed-legacy-consumer"
+    },
+    "opencode": {
+      "files": {
+        "integrations/opencode/.opencode/plugins/echo-veil-shield.js": "52087f95197ca1e89a8acb6aabbd2090340267837057a262fbcc16bc645b6fca"
+      },
+      "qualification": "executed-legacy-consumer"
+    },
+    "pi": {
+      "files": {
+        "integrations/pi/package-lock.json": "d7ba0effe962e971cf368d3c00c613750b09e2eab121407becb547ee413c0140",
+        "integrations/pi/src/preflight.ts": "5fefc81fd77f51f2b7917ecda2473f6d76669bd73989aa3b6412c249da81b332"
+      },
+      "qualification": "executed-legacy-consumer"
+    }
+  },
+  "invariants": {
+    "capabilities": "capabilities_v1",
+    "database_security_contract": "scoped-v2",
+    "evidence_budget": "echo-veil-evidence-budget-v1",
+    "legacy_preflight_rpc": "preflight",
+    "preflight_receipt": "echo-veil-preflight-v2",
+    "preflight_rpc": "preflight_v2",
+    "record_envelope": "record-envelope-v3",
+    "record_envelope_visibility": "operator-diagnostics-only-never-harness-consumed",
+    "runtime_status": "echo-veil-runtime-status-v1",
+    "telemetry": "echo-veil-preflight-telemetry-v1"
+  },
+  "release": "0.7.0",
+  "schema": "echo-veil-n-minus-one-manifest-v1"
+}

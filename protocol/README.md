@@ -16,8 +16,9 @@ The compatibility rules are deliberately asymmetric:
   harnesses that have not moved to signed receipt consumption;
 - `capabilities_v1` is a separate unsigned readiness surface and does not
   authorize a model turn;
-- record-envelope v2/v3 is visible only to the core. Harnesses must behave the
-  same for v2, v3, and mixed profiles.
+- record-envelope v2/v3 is a storage contract. Bounded operator diagnostics may
+  report migration state, but turn-authorization harnesses must never parse or
+  branch on it. Harnesses must behave the same for v2, v3, and mixed profiles.
 
 `fixtures/compatibility-v1.json` is language-neutral. Python, TypeScript, and
 JavaScript adapter tests load it directly. Fixture data is synthetic and
@@ -28,6 +29,23 @@ The v3 rows are backed by real dual-reader, mixed-profile, bounded migration,
 restart, key-rotation, and downgrade-barrier tests. They still do not authorize
 a harness to inspect the storage version: unchanged v2 consumers must produce
 the same result for v2, mixed, and fully migrated profiles.
+
+`n-minus-one-v0.7.0.json` pins the exact last-release consumer bytes and their
+peeled Git commit. CI creates real mixed-v2/v3 and fully-v3 profiles with the
+current core, then feeds their current responses into the actual v0.7
+OpenClaw, OpenCode, Pi, Hermes, and shared Python preflight consumers. Claude
+Code, Droid, and Goose are pinned thin/policy wrappers over those same stable
+RPCs. Algo CLI and AIP remain explicit external release gates because their
+implementations do not live in this repository. The probes use the current
+locked test runner only; they rehash every pinned legacy consumer before and
+after execution and never regenerate the v0.7 lockfiles.
+
+The same CI job proves the asymmetric downgrade rule: current consumers may
+read responses produced from mixed or v3 storage without seeing that format,
+while the pinned v0.7 core must fail closed if it tries to open a profile whose
+v3 activation marker is present. This is the compatibility shield for the
+v1-to-v2 incident: a new storage generation cannot silently become a harness
+protocol generation.
 
 Installed-artifact and host-boundary receipts are independently versioned exact
 contracts in the same registry. They are encrypted readiness evidence, not
