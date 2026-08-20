@@ -572,15 +572,15 @@ afterEach(() => {
 });
 
 describe("Pi protected integration", () => {
-  it("pins real Pi 0.84.1 and marks every Echo tool sequential", () => {
+  it("pins real Pi 0.84.2 and marks every Echo tool sequential", () => {
     const packageJson = JSON.parse(readFileSync(
       fileURLToPath(new URL("../package.json", import.meta.url)),
       "utf8",
     ));
     expect(packageJson.peerDependencies["@earendil-works/pi-coding-agent"])
-      .toBe("0.84.1");
+      .toBe("0.84.2");
     expect(packageJson.devDependencies["@earendil-works/pi-coding-agent"])
-      .toBe("0.84.1");
+      .toBe("0.84.2");
     expect(echoVeilTools).toHaveLength(9);
     expect(echoVeilTools.every((tool) => tool.executionMode === "sequential"))
       .toBe(true);

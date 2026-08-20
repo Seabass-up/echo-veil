@@ -682,6 +682,28 @@ def test_pi_artifact_receipt_blocks_one_byte_drift(tmp_path: Path) -> None:
         guarded_runner._verify_pi_artifact(copied, authority_id)
 
 
+def test_pi_executable_version_is_exactly_qualified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def completed(stdout: bytes, returncode: int = 0) -> SimpleNamespace:
+        return SimpleNamespace(stdout=stdout, stderr=b"", returncode=returncode)
+
+    monkeypatch.setattr(
+        guarded_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: completed(b"0.84.2\n"),
+    )
+    guarded_runner._verify_pi_version("/verified/pi")
+
+    monkeypatch.setattr(
+        guarded_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: completed(b"0.84.1\n"),
+    )
+    with pytest.raises(RuntimeError, match="version is not qualified"):
+        guarded_runner._verify_pi_version("/verified/pi")
+
+
 def test_pi_argv_is_ephemeral_and_loads_only_the_pinned_echo_extension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -964,6 +986,7 @@ def test_main_fails_before_host_execution_when_preflight_fails(
         "_verify_pi_artifact",
         lambda directory, authority: "sha256:" + "a" * 64,
     )
+    monkeypatch.setattr(guarded_runner, "_verify_pi_version", lambda command: None)
     monkeypatch.setattr(
         guarded_runner,
         "_build_codex_artifact",
@@ -1102,6 +1125,7 @@ def test_pi_main_defers_semantic_gate_to_verified_extension_input_hook(
         "_preflight_authority_id",
         lambda args: preflight_id,
     )
+    monkeypatch.setattr(guarded_runner, "_verify_pi_version", lambda command: None)
     monkeypatch.setattr(
         guarded_runner,
         "_resolve_executable",

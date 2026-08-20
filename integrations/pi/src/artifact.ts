@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { canonicalJson } from "./preflight.js";
 
 const RECEIPT_SCHEMA = "echo-veil-pi-artifact-v1";
-const EXPECTED_HOST_VERSION = "0.84.1";
+const EXPECTED_HOST_VERSION = "0.84.2";
 const EXPECTED_PACKAGE_VERSION = "0.7.0";
 const MAX_ARTIFACT_BYTES = 2_000_000;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;

@@ -21,7 +21,7 @@ from ._json import strict_json_loads
 
 CODEX_ARTIFACT_SCHEMA = "echo-veil-codex-artifact-v1"
 CODEX_ARTIFACT_DOMAIN = b"echo-veil-codex-artifact-v1\0"
-EXPECTED_CODEX_VERSION = "0.146.0"
+EXPECTED_CODEX_VERSION = "0.147.0"
 MAX_ARTIFACT_FILE_BYTES = 512 * 1024 * 1024
 MAX_PLUGIN_FILE_BYTES = 2 * 1024 * 1024
 MAX_WHEEL_MEMBERS = 4_096
