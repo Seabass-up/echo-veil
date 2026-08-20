@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:3bdce6918789facaf9c2f2a67a1d0338f66a8caff8b09c9653943604f5080955",
+  "shared_source_digest": "sha256:19eb3b8371c7ee58b8c87bd7c518a3ffaddd771defa2f26bfe17db45d108f91b",
   "hosts": [
     {
       "id": "algo-cli",

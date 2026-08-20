@@ -84,6 +84,9 @@ _RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SCOPE_ID_RE = re.compile(r"scope-[0-9a-f]{32}\Z")
 _KEY_REF_RE = re.compile(r"(?:agent\.key|keys/ev-[0-9a-f]{16}\.key)\Z")
 _CUSTODY_REF_RE = re.compile(r"evkc-[0-9a-f]{32}\Z")
+_PROCESS_INSTANCE_RE = re.compile(r"[0-9a-f]{32}\Z")
+_CUSTODY_ACTIVATION_SCHEMA = "echo-veil-custody-activation-v1"
+_PROCESS_INSTANCE_ID = secrets.token_hex(16)
 
 
 class KeyUnavailable(RuntimeError):
@@ -2345,12 +2348,98 @@ class ProfileKeyring:
             raise KeyUnavailable("key-custody reference is invalid")
         return self.profile_dir / "custody" / f"{reference}.json"
 
+    def _custody_activation_receipt_path(self) -> Path:
+        return self.profile_dir / "custody" / "activation-receipt.json"
+
     @staticmethod
     def _custody_authentication_message(descriptor: CustodyDescriptor) -> bytes:
         return (
             b"echo-veil-key-custody-descriptor-v1\0"
             + descriptor.authentication_message()
         )
+
+    @staticmethod
+    def _custody_activation_message(
+        *,
+        reference: str,
+        process_instance: str,
+    ) -> bytes:
+        if _CUSTODY_REF_RE.fullmatch(reference) is None:
+            raise KeyUnavailable("key-custody activation reference is invalid")
+        if _PROCESS_INSTANCE_RE.fullmatch(process_instance) is None:
+            raise KeyUnavailable("key-custody activation process is invalid")
+        return (
+            b"echo-veil-custody-activation-v1\0"
+            + reference.encode("ascii")
+            + b"\0"
+            + process_instance.encode("ascii")
+        )
+
+    def _write_custody_activation_receipt(
+        self,
+        descriptor: CustodyDescriptor,
+        client: CustodyClient,
+    ) -> None:
+        message = self._custody_activation_message(
+            reference=descriptor.reference,
+            process_instance=_PROCESS_INSTANCE_ID,
+        )
+        _atomic_write_json(
+            self._custody_activation_receipt_path(),
+            {
+                "process_instance": _PROCESS_INSTANCE_ID,
+                "reference": descriptor.reference,
+                "schema": _CUSTODY_ACTIVATION_SCHEMA,
+                "tag": client.root_hmac(message).hex(),
+            },
+        )
+
+    def _verified_custody_activation_process(
+        self,
+        descriptor: CustodyDescriptor,
+        client: CustodyClient,
+    ) -> str:
+        try:
+            raw = _read_private_file_bytes(
+                self._custody_activation_receipt_path(),
+                label="key-custody activation receipt",
+                maximum=4096,
+            )
+            decoded = strict_json_loads(raw)
+        except Exception as exc:
+            raise KeyUnavailable(
+                "key-custody activation receipt is unavailable"
+            ) from exc
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "process_instance",
+            "reference",
+            "schema",
+            "tag",
+        }:
+            raise KeyUnavailable("key-custody activation receipt is invalid")
+        if (
+            decoded["schema"] != _CUSTODY_ACTIVATION_SCHEMA
+            or decoded["reference"] != descriptor.reference
+        ):
+            raise KeyUnavailable("key-custody activation receipt is invalid")
+        process_instance = decoded["process_instance"]
+        tag = decoded["tag"]
+        if (
+            not isinstance(process_instance, str)
+            or _PROCESS_INSTANCE_RE.fullmatch(process_instance) is None
+            or not isinstance(tag, str)
+            or re.fullmatch(r"[0-9a-f]{64}", tag) is None
+        ):
+            raise KeyUnavailable("key-custody activation receipt is invalid")
+        expected = client.root_hmac(
+            self._custody_activation_message(
+                reference=descriptor.reference,
+                process_instance=process_instance,
+            )
+        ).hex()
+        if not hmac.compare_digest(expected, tag):
+            raise KeyUnavailable("key-custody activation receipt authentication failed")
+        return process_instance
 
     def _client_for(self, key_id: str) -> CustodyClient:
         clean_id = _validate_key_id(key_id)
@@ -2743,6 +2832,11 @@ class ProfileKeyring:
         if self.custody_provider != FILE_CUSTODY_V1:
             value = self._keys.get(self.active_key_id)
             if isinstance(value, CustodyDescriptor):
+                if value.state == "verified":
+                    self._verified_custody_activation_process(
+                        value,
+                        self._client_for(self.active_key_id),
+                    )
                 return {"provider": value.provider, "state": value.state}
             raise RuntimeError("active key-custody state is invalid")
         descriptor, stored_tag, descriptor_path = self._prepared_custody_descriptor()
@@ -2782,6 +2876,7 @@ class ProfileKeyring:
                 descriptor_path,
                 verified.as_dict(tag_hex=verified_tag),
             )
+            self._write_custody_activation_receipt(verified, client)
             manifest = copy.deepcopy(self._manifest)
             keys = manifest.get("keys")
             entry = keys.get(self.active_key_id) if isinstance(keys, dict) else None
@@ -2812,23 +2907,52 @@ class ProfileKeyring:
         if confirm is not True:
             raise ValueError("file-custody retirement requires confirm=true")
         value = self._keys.get(self.active_key_id)
-        if not isinstance(value, CustodyDescriptor) or value.state != "verified":
+        if not isinstance(value, CustodyDescriptor) or value.state not in {
+            "active",
+            "verified",
+        }:
             raise RuntimeError("key-custody migration is not verified")
         client = self._client_for(self.active_key_id)
         if client.probe().get("key_id") != self.active_key_id:
             raise KeyUnavailable("native custody key identity changed")
+        receipt_path = self._custody_activation_receipt_path()
+        if value.state == "verified":
+            activated_by = self._verified_custody_activation_process(value, client)
+            if hmac.compare_digest(activated_by, _PROCESS_INSTANCE_ID):
+                raise RuntimeError(
+                    "file-custody retirement requires a fresh-process verification"
+                )
         key_path = self.profile_dir / "keys" / f"{self.active_key_id}.key"
-        key = _read_key(key_path)
-        if not hmac.compare_digest(key_id_for(key), self.active_key_id):
-            raise KeyUnavailable("retired file root does not match active custody")
-        active = replace(value, state="active")
-        tag = client.root_hmac(self._custody_authentication_message(active)).hex()
-        _atomic_write_json(
-            self._custody_descriptor_path(active.reference),
-            active.as_dict(tag_hex=tag),
-        )
-        self._keys[self.active_key_id] = active
-        _unlink_private_file(key_path, label="retired file-custody root")
+        active = value
+        if value.state == "verified":
+            active = replace(value, state="active")
+            tag = client.root_hmac(self._custody_authentication_message(active)).hex()
+            _atomic_write_json(
+                self._custody_descriptor_path(active.reference),
+                active.as_dict(tag_hex=tag),
+            )
+            self._keys[self.active_key_id] = active
+        try:
+            key = _read_key(key_path)
+        except FileNotFoundError:
+            if value.state == "verified":
+                raise KeyUnavailable(
+                    "verified custody migration lost its recoverable file root"
+                ) from None
+        else:
+            if not hmac.compare_digest(key_id_for(key), self.active_key_id):
+                raise KeyUnavailable("retired file root does not match active custody")
+            _unlink_private_file(key_path, label="retired file-custody root")
+        try:
+            _unlink_private_file(
+                receipt_path,
+                label="completed key-custody activation receipt",
+            )
+        except FileNotFoundError:
+            if value.state == "verified":
+                raise KeyUnavailable(
+                    "key-custody activation receipt disappeared during retirement"
+                ) from None
         return {"provider": active.provider, "state": "active"}
 
     def close(self) -> None:

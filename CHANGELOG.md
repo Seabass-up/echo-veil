@@ -35,6 +35,12 @@ All notable changes to Echo Veil are documented here. The project follows
   epoch, model identity, scoped-v2 contract, record-envelope version, recovery
   mode, rollback tier, logical-count inventory, and optional authority digests
   before a backup can satisfy local readiness.
+- File-key retirement after macOS custody migration now requires a different
+  process, proven by a root-authenticated activation receipt rather than a new
+  Python object. Retirement is resumable across the descriptor/file-removal
+  crash window. The deterministic custody gate also advances two local
+  monotonic backup generations and proves that verification and dry-run restore
+  reject the stale first snapshot.
 
 - Added internal record-envelope v3 with HKDF-SHA256 purpose separation across
   payload, vector, semantic-contract, token, digest, integrity, tombstone,

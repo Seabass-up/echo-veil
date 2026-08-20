@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from multiprocessing import get_context
 import os
 from pathlib import Path
 import secrets
@@ -27,7 +28,7 @@ def _helper() -> Path:
 
 def _delete_profile_items(profile: Path) -> None:
     custody = profile / "custody"
-    for path in custody.glob("*.json") if custody.is_dir() else ():
+    for path in custody.glob("evkc-*.json") if custody.is_dir() else ():
         descriptor, _tag = CustodyDescriptor.from_dict(
             json.loads(path.read_text(encoding="utf-8"))
         )
@@ -71,8 +72,19 @@ def test_native_secure_enclave_portable_restore_and_rollback_detection(
             )
             assert migration["raw_root_retained"] is True
 
+        process = get_context("spawn").Process(
+            target=_retire_file_custody_in_spawned_process,
+            args=(os.fspath(source_state),),
+        )
+        process.start()
+        process.join(timeout=60)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            pytest.fail("fresh-process custody retirement timed out")
+        assert process.exitcode == 0
+
         with AgentMemory(source_state) as memory:
-            memory.retire_file_key_custody(confirm=True)
             first = memory.backup_create(
                 first_backup,
                 recovery_mode="portable",
@@ -110,3 +122,8 @@ def test_native_secure_enclave_portable_restore_and_rollback_detection(
                 # The test must not hide cleanup failure when a profile exists.
                 if profile.exists():
                     raise
+
+
+def _retire_file_custody_in_spawned_process(state: str) -> None:
+    with AgentMemory(Path(state)) as memory:
+        memory.retire_file_key_custody(confirm=True)

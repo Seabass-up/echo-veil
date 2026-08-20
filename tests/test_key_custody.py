@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from echo_veil import agent_security
 from echo_veil.agent_memory import AgentMemory
 from echo_veil.agent_security import KeyUnavailable, ProfileKeyring
+from echo_veil.backup import RollbackDetected
 from echo_veil.key_custody import (
     CustodyDescriptor,
     MACOS_SECURE_ENCLAVE_V1,
@@ -122,6 +123,10 @@ def _migrated_keyring(profile: Path) -> ProfileKeyring:
     return keyring
 
 
+def _simulate_fresh_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_security, "_PROCESS_INSTANCE_ID", os.urandom(16).hex())
+
+
 def test_custody_descriptor_is_exact_and_path_bound(tmp_path: Path) -> None:
     descriptor = CustodyDescriptor(
         provider=MACOS_SECURE_ENCLAVE_V1,
@@ -145,6 +150,7 @@ def test_custody_descriptor_is_exact_and_path_bound(tmp_path: Path) -> None:
 def test_custody_migration_requires_backup_and_keeps_raw_root_until_confirmed(
     tmp_path: Path,
     fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = (tmp_path / "signed-helper").absolute()
     helper.write_bytes(b"fixture")
@@ -196,18 +202,26 @@ def test_custody_migration_requires_backup_and_keeps_raw_root_until_confirmed(
             derived,
         )
 
-    # A new process can use the same device-bound item before raw-key retirement.
+    with pytest.raises(RuntimeError, match="fresh-process verification"):
+        keyring.retire_file_custody(confirm=True)
+
+    # Reopening the object in the activation process is not a process restart.
     keyring.close()
-    reopened = ProfileKeyring(tmp_path / "profile", "workspace:synthetic")
+    same_process = ProfileKeyring(tmp_path / "profile", "workspace:synthetic")
     assert (
-        reopened.key_for_envelope(
+        same_process.key_for_envelope(
             key_id,
             purpose=KEY_PURPOSE_PAYLOAD,
             envelope_version=3,
         )
         == expected[KEY_PURPOSE_PAYLOAD]
     )
+    with pytest.raises(RuntimeError, match="fresh-process verification"):
+        same_process.retire_file_custody(confirm=True)
+    same_process.close()
 
+    _simulate_fresh_process(monkeypatch)
+    reopened = ProfileKeyring(tmp_path / "profile", "workspace:synthetic")
     retired = reopened.retire_file_custody(confirm=True)
     assert retired["state"] == "active"
     assert reopened.raw_active_key_present is False
@@ -236,6 +250,7 @@ def test_custody_migration_requires_backup_and_keeps_raw_root_until_confirmed(
 def test_copy_without_device_item_fails_closed(
     tmp_path: Path,
     fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = (tmp_path / "signed-helper").absolute()
     helper.write_bytes(b"fixture")
@@ -247,6 +262,9 @@ def test_copy_without_device_item_fails_closed(
         backup_verified=True,
     )
     keyring.activate_custody_migration(confirm=True)
+    keyring.close()
+    _simulate_fresh_process(monkeypatch)
+    keyring = ProfileKeyring(profile, "workspace:synthetic")
     keyring.retire_file_custody(confirm=True)
     keyring.close()
 
@@ -271,7 +289,7 @@ def test_descriptor_tampering_fails_before_scope_use(
     keyring.activate_custody_migration(confirm=True)
     keyring.close()
 
-    descriptor_path = next((profile / "custody").glob("*.json"))
+    descriptor_path = next((profile / "custody").glob("evkc-*.json"))
     descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
     descriptor["helper_sha256"] = "f" * 64
     descriptor_path.write_text(
@@ -283,9 +301,10 @@ def test_descriptor_tampering_fails_before_scope_use(
         ProfileKeyring(profile, "workspace:synthetic")
 
 
-def test_opaque_rotation_preserves_custody_and_retires_old_item(
+def test_activation_receipt_tampering_blocks_file_root_retirement(
     tmp_path: Path,
     fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = (tmp_path / "signed-helper").absolute()
     helper.write_bytes(b"fixture")
@@ -297,6 +316,83 @@ def test_opaque_rotation_preserves_custody_and_retires_old_item(
         backup_verified=True,
     )
     keyring.activate_custody_migration(confirm=True)
+    keyring.close()
+
+    receipt_path = profile / "custody" / "activation-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["process_instance"] = "f" * 32
+    receipt_path.write_text(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    receipt_path.chmod(0o600)
+
+    _simulate_fresh_process(monkeypatch)
+    reopened = ProfileKeyring(profile, "workspace:synthetic")
+    with pytest.raises(KeyUnavailable, match="authentication"):
+        reopened.retire_file_custody(confirm=True)
+    assert reopened.raw_active_key_present is True
+    reopened.close()
+
+
+def test_file_root_retirement_resumes_after_descriptor_publication_crash(
+    tmp_path: Path,
+    fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = (tmp_path / "signed-helper").absolute()
+    helper.write_bytes(b"fixture")
+    profile = tmp_path / "profile"
+    keyring = _migrated_keyring(profile)
+    keyring.prepare_custody_migration(
+        provider=MACOS_SECURE_ENCLAVE_V1,
+        helper_path=helper,
+        backup_verified=True,
+    )
+    keyring.activate_custody_migration(confirm=True)
+    keyring.close()
+
+    _simulate_fresh_process(monkeypatch)
+    reopened = ProfileKeyring(profile, "workspace:synthetic")
+    original_unlink = agent_security._unlink_private_file
+
+    def interrupt_key_unlink(path: Path, *, label: str) -> None:
+        if path.suffix == ".key":
+            raise OSError("simulated retirement interruption")
+        original_unlink(path, label=label)
+
+    monkeypatch.setattr(agent_security, "_unlink_private_file", interrupt_key_unlink)
+    with pytest.raises(OSError, match="simulated retirement interruption"):
+        reopened.retire_file_custody(confirm=True)
+    assert reopened.raw_active_key_present is True
+    reopened.close()
+
+    monkeypatch.setattr(agent_security, "_unlink_private_file", original_unlink)
+    resumed = ProfileKeyring(profile, "workspace:synthetic")
+    assert resumed.retire_file_custody(confirm=True)["state"] == "active"
+    assert resumed.raw_active_key_present is False
+    assert not (profile / "custody" / "activation-receipt.json").exists()
+    resumed.close()
+
+
+def test_opaque_rotation_preserves_custody_and_retires_old_item(
+    tmp_path: Path,
+    fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = (tmp_path / "signed-helper").absolute()
+    helper.write_bytes(b"fixture")
+    profile = tmp_path / "profile"
+    keyring = _migrated_keyring(profile)
+    keyring.prepare_custody_migration(
+        provider=MACOS_SECURE_ENCLAVE_V1,
+        helper_path=helper,
+        backup_verified=True,
+    )
+    keyring.activate_custody_migration(confirm=True)
+    keyring.close()
+    _simulate_fresh_process(monkeypatch)
+    keyring = ProfileKeyring(profile, "workspace:synthetic")
     keyring.retire_file_custody(confirm=True)
     old_reference = next(iter(fake_custody.roots))
 
@@ -315,6 +411,7 @@ def test_opaque_rotation_preserves_custody_and_retires_old_item(
 def test_agent_memory_custody_restart_recall_and_retirement(
     tmp_path: Path,
     fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = (tmp_path / "signed-helper").absolute()
     helper.write_bytes(b"fixture")
@@ -342,6 +439,7 @@ def test_agent_memory_custody_restart_recall_and_retirement(
         assert custody["verified_records"] == 1
         assert custody["raw_root_retained"] is True
 
+    _simulate_fresh_process(monkeypatch)
     with AgentMemory(state) as restarted:
         recalled = restarted.recall("river seven")
         assert recalled["results"][0]["vine_id"] == created["vine_id"]
@@ -360,3 +458,54 @@ def test_agent_memory_custody_restart_recall_and_retirement(
         assert (
             final.recall("river seven")["results"][0]["vine_id"] == created["vine_id"]
         )
+
+
+def test_local_monotonic_custody_rejects_stale_backup_after_generation_advance(
+    tmp_path: Path,
+    fake_custody: type[_FakeCustodyClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = (tmp_path / "signed-helper").absolute()
+    helper.write_bytes(b"fixture")
+    state = tmp_path / "state"
+    pre_migration = tmp_path / "pre-migration"
+    first_backup = tmp_path / "first-backup"
+    second_backup = tmp_path / "second-backup"
+
+    with AgentMemory(state) as memory:
+        created = memory.remember(
+            "rollback fixture",
+            "The rollback marker is cedar orbit twenty-three.",
+        )
+        while (
+            memory.migrate_record_envelope_v3(confirm=True, batch_size=10)["state"]
+            != "verified"
+        ):
+            pass
+        verified = memory.backup_create(pre_migration)
+        memory.migrate_key_custody(
+            provider=MACOS_SECURE_ENCLAVE_V1,
+            helper_path=helper,
+            verified_backup=verified,
+            confirm=True,
+        )
+        with pytest.raises(RuntimeError, match="fresh-process verification"):
+            memory.retire_file_key_custody(confirm=True)
+
+    _simulate_fresh_process(monkeypatch)
+    with AgentMemory(state) as restarted:
+        restarted.retire_file_key_custody(confirm=True)
+        first = restarted.backup_create(
+            first_backup,
+            rollback_detection="local-best-effort",
+        )
+        restarted.forget(str(created["vine_id"]))
+        second = restarted.backup_create(
+            second_backup,
+            rollback_detection="local-best-effort",
+        )
+        assert second.generation == first.generation + 1
+        with pytest.raises(RollbackDetected):
+            restarted.backup_verify(first_backup, record_evidence=False)
+        with pytest.raises(RollbackDetected):
+            restarted.restore_dry_run(first_backup)
