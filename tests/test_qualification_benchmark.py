@@ -29,6 +29,10 @@ def test_qualification_benchmark_runs_bounded_scale_and_recovery(
     assert [item["records"] for item in report["scale"]] == [64, 128]
     assert report["concurrent_read_write"]["passed"] is True
     assert report["abrupt_recovery"]["physical_power_loss_claimed"] is False
+    assert report["long_duration_lifecycle"]["passed"] is True
+    assert report["long_duration_lifecycle"]["wall_clock_wait_claimed"] is False
+    assert report["migration_under_load"]["passed"] is True
+    assert report["migration_under_load"]["preflight_protocol"] == "preflight_v2"
 
 
 def test_qualification_benchmark_rejects_unbounded_inputs() -> None:
