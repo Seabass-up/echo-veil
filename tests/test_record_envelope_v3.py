@@ -78,6 +78,36 @@ def _receipt_inputs() -> dict[str, str]:
     }
 
 
+def _pre_migration_backup(memory: AgentMemory):
+    return memory.backup_create(
+        memory.profile_dir.parent / f".{memory.profile_dir.name}-pre-v3"
+    )
+
+
+def _start_v3_migration(
+    memory: AgentMemory,
+    *,
+    batch_size: int = 100,
+) -> dict[str, object]:
+    receipt = (
+        _pre_migration_backup(memory) if any(memory._backup_counts().values()) else None
+    )
+    return memory.migrate_record_envelope_v3(
+        confirm=True,
+        batch_size=batch_size,
+        verified_backup=receipt,
+    )
+
+
+def _migrate_all_v3(memory: AgentMemory, *, batch_size: int = 100) -> None:
+    result = _start_v3_migration(memory, batch_size=batch_size)
+    while result["state"] != "verified":
+        result = memory.migrate_record_envelope_v3(
+            confirm=True,
+            batch_size=batch_size,
+        )
+
+
 def test_v3_hkdf_domains_bind_scope_epoch_purpose_version_and_algorithm() -> None:
     root = b"r" * 32
     derived = {
@@ -160,7 +190,17 @@ def test_v3_activation_is_explicit_and_persists_a_downgrade_barrier(
         assert RECORD_ENVELOPE_V3_FEATURE not in keyring_before.get("features", [])
         assert memory.doctor()["record_envelope"]["migration_state"] == "inactive"
 
-        result = memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+        with pytest.raises(ValueError, match="pre-migration backup"):
+            memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+        pre_migration = _pre_migration_backup(memory)
+        assert pre_migration.record_envelope_version == RECORD_ENVELOPE_V2
+        assert "record_envelope_version" not in pre_migration.as_dict()
+        assert memory.doctor()["capabilities_v1"]["backup_verified"] is False
+        result = memory.migrate_record_envelope_v3(
+            confirm=True,
+            batch_size=1,
+            verified_backup=pre_migration,
+        )
 
         keyring_after = json.loads((profile_dir / "keyring.json").read_text())
         connection = sqlite3.connect(profile_dir / "payloads.db")
@@ -179,6 +219,34 @@ def test_v3_activation_is_explicit_and_persists_a_downgrade_barrier(
         assert keyring_after["keys"][keyring_after["active_key_id"]]["epoch"] == 1
         assert "record_envelope_state" in objects
         assert memory.doctor()["record_envelope"]["write_version"] == 3
+
+
+def test_v3_activation_rejects_stale_and_cross_profile_backup_receipts(
+    tmp_path: Path,
+) -> None:
+    with AgentMemory(
+        tmp_path, profile="receipt-source", embed=_SemanticEmbedder()
+    ) as source:
+        source.remember("backup receipt", "The source receipt is profile-bound.")
+        source_receipt = _pre_migration_backup(source)
+
+    with AgentMemory(
+        tmp_path, profile="receipt-target", embed=_SemanticEmbedder()
+    ) as target:
+        target.remember("backup receipt", "The target requires its own backup.")
+        with pytest.raises(ValueError, match="does not match"):
+            target.migrate_record_envelope_v3(
+                confirm=True,
+                verified_backup=source_receipt,
+            )
+
+        target_receipt = _pre_migration_backup(target)
+        target.remember("later mutation", "The verified snapshot is now stale.")
+        with pytest.raises(ValueError, match="does not match"):
+            target.migrate_record_envelope_v3(
+                confirm=True,
+                verified_backup=target_receipt,
+            )
 
 
 @pytest.mark.parametrize("batch_size", [False, 0, 1001])
@@ -213,8 +281,13 @@ def test_v3_activation_resumes_after_interruption_before_key_schedule_commit(
             "enable_record_envelope_v3",
             fail_activation,
         )
+        pre_migration = _pre_migration_backup(memory)
         with pytest.raises(RuntimeError, match="synthetic interruption"):
-            memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+            memory.migrate_record_envelope_v3(
+                confirm=True,
+                batch_size=1,
+                verified_backup=pre_migration,
+            )
         assert memory._payloads.record_envelope_status()["migration_state"] == (
             "prepared"
         )
@@ -237,7 +310,7 @@ def test_mixed_v2_v3_profile_resumes_after_restart_and_keeps_preflight_v2(
     with AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder()) as memory:
         for payload in payloads:
             memory.remember("migration", payload, provenance=["test"])
-        first = memory.migrate_record_envelope_v3(confirm=True, batch_size=2)
+        first = _start_v3_migration(memory, batch_size=2)
         assert first["state"] == "migrating"
         assert first["remaining_v2_records"] > 0
 
@@ -297,7 +370,14 @@ def test_v3_migrates_authenticated_tombstones_and_rejects_wrong_scope(
         )
         memory.forget(str(created["vine_id"]))
         for _attempt in range(10):
-            result = memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+            result = (
+                _start_v3_migration(memory, batch_size=1)
+                if _attempt == 0
+                else memory.migrate_record_envelope_v3(
+                    confirm=True,
+                    batch_size=1,
+                )
+            )
             if result["state"] == "verified":
                 break
         assert result["remaining_v2_tombstones"] == 0
@@ -321,8 +401,7 @@ def test_v3_payload_rejects_a_key_from_the_vector_domain(tmp_path: Path) -> None
             "domain separation",
             "Payload and vector keys are independently derived.",
         )
-        result = memory.migrate_record_envelope_v3(confirm=True, batch_size=100)
-        assert result["state"] == "verified"
+        _migrate_all_v3(memory)
         assert memory._keyring is not None
         connection = sqlite3.connect(memory.profile_dir / "payloads.db")
         try:
@@ -364,10 +443,7 @@ def test_v3_unknown_envelope_and_lost_key_fail_closed(tmp_path: Path) -> None:
     profile = "v3-fail-closed"
     with AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder()) as memory:
         created = memory.remember("fail closed", "Unknown formats must not vanish.")
-        assert (
-            memory.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-            == "verified"
-        )
+        _migrate_all_v3(memory)
         key_id = str(memory.doctor()["key_id"])
 
     profile_dir = tmp_path / profile
@@ -402,10 +478,7 @@ def test_v3_key_rotation_preserves_envelope_and_blocks_early_retirement(
     with AgentMemory(tmp_path, profile=profile, embed=_SemanticEmbedder()) as memory:
         for payload in payloads:
             memory.remember("rotation", payload)
-        assert (
-            memory.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-            == "verified"
-        )
+        _migrate_all_v3(memory)
         first = memory.rotate_key(confirm=True, batch_size=1)
         assert first["remaining_key_references"] > 0
         assert first["lsh_index_rekeyed"] is True
@@ -462,7 +535,7 @@ def test_v3_rejects_live_write_version_downgrade_and_false_verification(
                 f"Protected state record {index}.",
                 provenance=["test"],
             )
-        migrating = memory.migrate_record_envelope_v3(confirm=True, batch_size=1)
+        migrating = _start_v3_migration(memory, batch_size=1)
         assert migrating["state"] == "migrating"
         assert migrating["remaining_v2_records"] > 0
 
@@ -535,10 +608,7 @@ def test_v3_ciphertext_cannot_be_transplanted_between_profiles(tmp_path: Path) -
             "source profile",
             "The source profile remains cryptographically isolated.",
         )
-        assert (
-            source.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-            == "verified"
-        )
+        _migrate_all_v3(source)
     with AgentMemory(
         tmp_path, profile="v3-target", embed=_SemanticEmbedder()
     ) as target:
@@ -546,10 +616,7 @@ def test_v3_ciphertext_cannot_be_transplanted_between_profiles(tmp_path: Path) -
             "target profile",
             "The target profile rejects transplanted ciphertext.",
         )
-        assert (
-            target.migrate_record_envelope_v3(confirm=True, batch_size=100)["state"]
-            == "verified"
-        )
+        _migrate_all_v3(target)
 
     source_connection = sqlite3.connect(tmp_path / "v3-source" / "payloads.db")
     try:

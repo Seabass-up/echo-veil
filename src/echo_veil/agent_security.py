@@ -47,6 +47,7 @@ from .key_custody import (
     helper_identity,
 )
 from .record_envelope import (
+    KEY_PURPOSE_BACKUP_MANIFEST,
     KEY_PURPOSE_LSH_INDEX,
     KEY_PURPOSE_SEMANTIC_CONTRACT,
     KEY_PURPOSE_VECTOR,
@@ -2607,6 +2608,22 @@ class ProfileKeyring:
             raise KeyUnavailable("required profile key is unavailable")
         self._derived_keys[cache_key] = derived
         return derived
+
+    def pre_migration_backup_key(self, key_id: str) -> bytes:
+        """Derive the envelope-v2 recovery key without exporting opaque roots."""
+
+        clean_id = _validate_key_id(key_id)
+        message = (
+            b"echo-veil-pre-migration-backup-key-v1\0"
+            + self.scope.encode("utf-8")
+            + b"\0"
+            + self.scope_id.encode("ascii")
+            + b"\0"
+            + clean_id.encode("ascii")
+            + b"\0record-envelope-v2\0"
+            + KEY_PURPOSE_BACKUP_MANIFEST.encode("ascii")
+        )
+        return self._root_hmac(clean_id, message)
 
     def lsh_index_key(self) -> bytes:
         """Derive the active profile's separately versioned LSH key."""

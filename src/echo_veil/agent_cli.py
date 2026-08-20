@@ -2142,9 +2142,18 @@ def _run_explicit_maintenance(args: argparse.Namespace) -> int:
         if not isinstance(memory, AgentMemory):
             raise RuntimeError("maintenance requires the semantic profile")
         if args.mode == "repair" and args.command == "migrate-v3":
+            verified_backup = (
+                None
+                if args.archive is None
+                else memory.backup_verify(
+                    _required_path(args.archive, "--archive"),
+                    record_evidence=False,
+                )
+            )
             result = memory.migrate_record_envelope_v3(
                 confirm=args.confirm,
                 batch_size=100,
+                verified_backup=verified_backup,
             )
         elif args.mode == "maintain" and args.command == "prune-expired-live":
             if args.confirm is not True:

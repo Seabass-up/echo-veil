@@ -227,7 +227,11 @@ structure.
 SQLite may create WAL and shared-memory files; payload-bearing database pages
 remain encrypted at the record level. Backups must include the database,
 lifecycle store, key manifest, and referenced keys as one protected recovery
-set. Echo Veil does not yet provide a qualified backup/restore command.
+set. The operator backup command takes writer-locked SQLite snapshots, encrypts
+every bounded member, authenticates an exact manifest, and reconciles logical
+counts before returning a verifier capability. Restore always targets a new
+profile directory; dry-run and restore-drill paths never replace the active
+profile.
 
 ## Record-envelope v3 migration
 
@@ -261,6 +265,15 @@ the unknown manifest/schema instead of returning an apparently empty profile.
 Returning to that core requires restoring a verified pre-migration recovery
 set. Harnesses never see this format: their RPC and receipt remain
 `preflight_v2` and `echo-veil-preflight-v2`.
+
+For a nonempty v2 profile, activation additionally requires an authenticated
+device-bound pre-migration archive. Its key is root-HMAC-derived in a separate
+v2 recovery domain, so native custody can later rederive it without exporting
+the root. The backup manifest's existing `record_envelope_version` field is
+authenticated as either 2 or 3; the exact operator-receipt field inventory does
+not change. A v2 receipt authorizes only the initial migration/recovery gate and
+cannot populate local-production backup or restore readiness. Those gates
+require a fresh v3 backup and successful isolated restore drill after migration.
 
 ## Key custody and rotation
 

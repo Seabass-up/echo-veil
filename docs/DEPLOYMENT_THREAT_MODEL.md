@@ -159,6 +159,11 @@ The migration is explicit, bounded, dual-read, and restart-resumable. Once its
 activation marker is written, an older core is expected to stop on the unknown
 key-manifest/schema state rather than treat the profile as empty. Operational
 rollback therefore requires restoration of a verified pre-activation backup.
+For nonempty profiles, the first activation call requires that authenticated
+v2 backup as an in-process verifier capability; the operator CLI re-verifies
+the selected archive before passing the capability. The v2 receipt cannot
+satisfy v3 local-readiness evidence. A fresh v3 archive and actual isolated
+restore drill are required after conversion.
 
 V3 does not change the trusted-host threat boundary: root material and
 plaintext are still available to the authorized Python process with file-v1

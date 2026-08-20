@@ -347,12 +347,17 @@ their implementation source.
 ### Internal record-envelope migration
 
 Existing profiles continue writing envelope v2 until an operator explicitly
-calls `migrate_record_envelope_v3(confirm=True, batch_size=...)`. This
-operator-only RPC is intentionally absent from the agent MCP tool catalog. The
-first call installs a persistent downgrade barrier, enables v3 writes, and
-converts at most the requested number of lifecycle anchors, records, and
-authenticated tombstones. Repeating the call resumes the migration until its
-state is `verified`; unmigrated v2 records remain readable throughout.
+creates an authenticated device-bound backup and passes its in-process
+`VerifiedBackup` capability to
+`migrate_record_envelope_v3(confirm=True, batch_size=...,
+verified_backup=...)`. This operator-only RPC is intentionally absent from the
+agent MCP tool catalog. The ordinary CLI performs the same gate with `backup
+create`, followed by `repair migrate-v3 --archive ... --confirm`. A nonempty
+profile cannot install the downgrade barrier without re-authenticating that v2
+archive. The first accepted call enables v3 writes and converts at most the
+requested number of lifecycle anchors, records, and authenticated tombstones.
+Repeating the call resumes the migration until its state is `verified`;
+unmigrated v2 records remain readable throughout.
 
 Envelope v3 derives independent keys for payloads, vectors, semantic
 contracts, topic and lexical tokens, content digests, record-integrity tags,
@@ -361,11 +366,14 @@ derivation binds the profile scope, opaque scope ID, key epoch, purpose,
 envelope version, and algorithm. The database security contract remains
 `scoped-v2`, and preflight remains `echo-veil-preflight-v2`.
 
-Back up the profile before activation. Once the marker is present, cores that
-do not understand record-envelope v3 must fail closed. Downgrade recovery is a
-verified pre-migration restore, not removal of the marker or manual database
-editing. Keep the v0.8 dual-reader available until migration, restart, recall,
-and key rotation have all been verified.
+The pre-migration archive reports envelope v2 internally and never satisfies
+the v3 `backup_verified` readiness field. Once the marker is present, cores
+that do not understand record-envelope v3 must fail closed. Downgrade recovery
+is a verified pre-migration restore, not removal of the marker or manual
+database editing. After migration, create a fresh v3 backup and perform an
+actual restore drill before requesting local-production readiness. Keep the
+v0.8 dual-reader available until migration, restart, recall, restore, and key
+rotation have all been verified.
 
 `capabilities_v1` is now available as an RPC-only action. It separately reports
 implementation health, host-trusted local-production readiness, and attested
@@ -911,11 +919,14 @@ secrets, raw protected vectors, proofs, or attestation credentials.
   it reports `verified`. Retire the previous key only after record-reference
   verification and an explicit backup-accounting confirmation. Legacy-v1
   profiles must migrate to a fresh scoped-v2 profile first.
-- Before enabling record-envelope v3, create and verify a recoverable profile
-  backup. Run the confirmed migration in bounded batches until it reports
-  `verified`; do not infer progress from the preflight schema, which remains
-  v2. An interrupted `prepared` or `migrating` state is resumed by the v0.8
-  dual-reader before new writes.
+- Before enabling record-envelope v3, create and verify a device-bound v2
+  profile backup. Pass that verifier capability directly to the first Python
+  migration call, or give the same archive to the confirmed `repair
+  migrate-v3` operator command. Run the migration in bounded batches until it
+  reports `verified`; do not infer progress from the preflight schema, which
+  remains v2. An interrupted `prepared` or `migrating` state is resumed by the
+  v0.8 dual-reader before new writes. Create and restore-drill a new v3 backup
+  afterward; the v2 recovery archive never grants local readiness.
 - Keep one embedding model/version and dimension per Oracle/store. Migrate to a
   new profile when changing dimensions or model identity; use only the reviewed
   hashing-to-Qwen migration above for legacy adapter profiles.

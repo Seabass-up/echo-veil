@@ -421,11 +421,14 @@ def test_agent_memory_custody_restart_recall_and_retirement(
             "custody fixture",
             "The protected restart value is river seven.",
         )
+        pre_migration = memory.backup_create(tmp_path / "record-envelope-v2-backup")
         while True:
             migration = memory.migrate_record_envelope_v3(
                 confirm=True,
                 batch_size=1,
+                verified_backup=pre_migration,
             )
+            pre_migration = None
             if migration["state"] == "verified":
                 break
         backup = memory.backup_create(tmp_path / "custody-backup")
@@ -468,7 +471,7 @@ def test_local_monotonic_custody_rejects_stale_backup_after_generation_advance(
     helper = (tmp_path / "signed-helper").absolute()
     helper.write_bytes(b"fixture")
     state = tmp_path / "state"
-    pre_migration = tmp_path / "pre-migration"
+    custody_backup = tmp_path / "custody-backup"
     first_backup = tmp_path / "first-backup"
     second_backup = tmp_path / "second-backup"
 
@@ -477,12 +480,17 @@ def test_local_monotonic_custody_rejects_stale_backup_after_generation_advance(
             "rollback fixture",
             "The rollback marker is cedar orbit twenty-three.",
         )
-        while (
-            memory.migrate_record_envelope_v3(confirm=True, batch_size=10)["state"]
-            != "verified"
-        ):
-            pass
-        verified = memory.backup_create(pre_migration)
+        pre_migration = memory.backup_create(tmp_path / "record-envelope-v2-backup")
+        while True:
+            migration = memory.migrate_record_envelope_v3(
+                confirm=True,
+                batch_size=10,
+                verified_backup=pre_migration,
+            )
+            pre_migration = None
+            if migration["state"] == "verified":
+                break
+        verified = memory.backup_create(custody_backup)
         memory.migrate_key_custody(
             provider=MACOS_SECURE_ENCLAVE_V1,
             helper_path=helper,

@@ -546,6 +546,10 @@ class ReadinessEvidenceStore:
     def _validate_current_receipt(self, receipt: VerifiedBackup) -> None:
         if not isinstance(receipt, VerifiedBackup):
             raise TypeError("verified backup receipt is required")
+        if receipt.record_envelope_version != RECORD_ENVELOPE_V3:
+            raise ReadinessEvidenceError(
+                "pre-migration backup cannot satisfy local readiness"
+            )
         key_id = self._keyring.active_key_id
         expected_hash = profile_hash_for(self._key(key_id), self._keyring.scope_id)
         if receipt.key_id != key_id or not hmac.compare_digest(
