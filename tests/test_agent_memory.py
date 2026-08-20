@@ -231,6 +231,48 @@ def test_supporting_retrieval_preserves_indirect_evidence_without_weakening_dire
     assert rpc_supporting["supporting_evidence_only"] is True
 
 
+def test_supporting_retrieval_uses_its_explicit_lower_relevance_floor(
+    tmp_path: Path,
+) -> None:
+    class IndirectEvidenceEmbedder(_SemanticTestEmbedder):
+        identity = "test:supporting-relevance-floor:v1:dimension:32"
+
+        def embed_query(self, _text: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[0] = 0.35
+            vector[1] = math.sqrt(1.0 - 0.35**2)
+            return vector
+
+        def embed_answerability_query(
+            self, _text: str
+        ) -> np.ndarray[Any, np.dtype[np.float64]]:
+            vector = np.zeros(self.dimension)
+            vector[0] = 0.30
+            vector[1] = math.sqrt(1.0 - 0.30**2)
+            return vector
+
+    with AgentMemory(tmp_path, embed=IndirectEvidenceEmbedder()) as memory:
+        memory.remember(
+            "Taylor relocation evidence",
+            "Taylor accepted a role in Montreal before the planned move.",
+        )
+
+        direct = memory.recall("Why might Taylor move to Canada?")
+        supporting = memory.recall(
+            "Why might Taylor move to Canada?",
+            retrieval_mode="supporting",
+        )
+        report = memory.doctor()
+
+    assert direct["min_score"] == DEFAULT_SEMANTIC_MIN_SCORE
+    assert direct["results"] == []
+    assert supporting["min_score"] == 0.25
+    assert supporting["results"][0]["supporting_evidence_only"] is True
+    assert supporting["results"][0]["direct_answerability_passed"] is False
+    assert report["retrieval"]["supporting_relevance_min_score"] == 0.25
+    assert report["retrieval"]["supporting_answerability_min_score"] == 0.25
+
+
 def test_recall_rejects_unknown_retrieval_mode(tmp_path: Path) -> None:
     with AgentMemory(tmp_path, embed=_SemanticTestEmbedder()) as memory:
         memory.remember("deployment", "The service deploys locally.")

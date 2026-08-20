@@ -157,6 +157,7 @@ MAX_PROFILE_WAL_BYTES = 256 * 1024 * 1024
 VACUUM_RECOMMENDATION_RATIO = 0.20
 DEFAULT_SEMANTIC_MIN_SCORE = 0.44
 DEFAULT_ANSWERABILITY_MIN_SCORE = 0.42
+SUPPORTING_RELEVANCE_MIN_SCORE = 0.25
 SUPPORTING_ANSWERABILITY_MIN_SCORE = 0.25
 DEFAULT_AVAILABILITY_MIN_SCORE = 0.45
 DEFAULT_HASHING_MIN_SCORE = 0.35
@@ -5472,8 +5473,13 @@ class AgentMemory:
             raise TypeError("top_k must be an integer")
         if not 1 <= top_k <= MAX_RECALL_RESULTS:
             raise ValueError(f"top_k must be between 1 and {MAX_RECALL_RESULTS}")
+        clean_retrieval_mode = _validate_retrieval_mode(retrieval_mode)
         if min_score is None:
-            threshold = self._embedder.default_min_score
+            threshold = (
+                SUPPORTING_RELEVANCE_MIN_SCORE
+                if clean_retrieval_mode == RETRIEVAL_MODE_SUPPORTING
+                else self._embedder.default_min_score
+            )
         elif isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
             raise TypeError("min_score must be a finite number or None")
         else:
@@ -5482,7 +5488,6 @@ class AgentMemory:
             raise ValueError("min_score must be between 0 and 1")
         if not isinstance(allow_inferential, bool):
             raise TypeError("allow_inferential must be a bool")
-        clean_retrieval_mode = _validate_retrieval_mode(retrieval_mode)
         point_in_time = _validate_optional_timestamp(as_of, "as_of")
         requested_layers = _validate_memory_layers(layers)
 
@@ -7221,6 +7226,12 @@ class AgentMemory:
                 ),
                 "answerability_min_score": (
                     DEFAULT_ANSWERABILITY_MIN_SCORE if answerability_ready else None
+                ),
+                "supporting_relevance_min_score": (
+                    SUPPORTING_RELEVANCE_MIN_SCORE if answerability_ready else None
+                ),
+                "supporting_answerability_min_score": (
+                    SUPPORTING_ANSWERABILITY_MIN_SCORE if answerability_ready else None
                 ),
                 "metadata": (
                     "opaque-authenticated" if scoped else "legacy-plaintext-topics"
