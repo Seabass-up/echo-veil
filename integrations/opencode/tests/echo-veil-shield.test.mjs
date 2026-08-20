@@ -59,6 +59,12 @@ test("consumes the shared legacy and capabilities compatibility fixtures", () =>
   assert.deepEqual(parseCapabilitiesV1(
     protocolFixture.capabilities_cases.valid_documented_additions.value,
   ).remediation_codes, ["EV-BACKUP-UNVERIFIED"])
+  assert.equal(parseCapabilitiesV1(
+    protocolFixture.capabilities_cases.host_trusted_local_ready.value,
+  ).local_production_ready, true)
+  assert.equal(parseCapabilitiesV1(
+    protocolFixture.capabilities_cases.attested_enclave_ready.value,
+  ).production_ready, true)
   const unknown = structuredClone(
     protocolFixture.capabilities_cases.unknown_schema.value,
   )

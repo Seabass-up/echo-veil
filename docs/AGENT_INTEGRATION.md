@@ -332,6 +332,18 @@ belongs to the separate optional `capabilities_v1` surface, never to an
 existing signed receipt. Capabilities can inform diagnostics but cannot
 authorize a model turn.
 
+`capabilities_v1` is now available as an RPC-only action. It separately reports
+implementation health, host-trusted local-production readiness, and attested
+enclave production readiness. Existing harnesses do not need to call it and
+must continue to authorize turns only through the exact preflight-v2 receipt.
+The current file-backed scoped AES profile remains `local-staging`: setting
+`ECHO_VEIL_DEPLOYMENT_MODE=local-production` cannot manufacture evidence and
+instead blocks all non-diagnostic actions until artifact, Secure Enclave key
+custody, backup, restore, host-boundary, Qwen3 identity, and profile-health
+checks are verified. A local-ready report still states
+`hardware_isolated=false`, `remotely_attested=false`, and
+`host_compromise_protected=false`.
+
 Goose's recipe prompt explicitly calls doctor and a two-slot minimal recall
 before waiting for a separate mutation request. Do not launch the recipe with
 `--no-profile`: Goose 1.41.0 suppresses recipe-defined extensions under that

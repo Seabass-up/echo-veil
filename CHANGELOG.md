@@ -53,6 +53,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Added
 
+- Added the RPC-only `capabilities_v1` readiness surface and a distinct,
+  fail-closed `local-production` mode. Host-trusted local readiness now requires
+  independent artifact, Secure Enclave custody, backup, restore, host-boundary,
+  digest-bound Qwen3, profile-access, migration, and protected-state evidence;
+  the current file-key profile remains local staging. The signed preflight-v2
+  response and receipt are unchanged.
 - Added an authoritative protocol registry and shared Python/TypeScript/
   JavaScript fixtures that freeze signed preflight v2, retain the unsigned
   preflight bridge, reserve `capabilities_v1`, and keep record-envelope v3

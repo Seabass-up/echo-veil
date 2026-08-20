@@ -96,6 +96,24 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
             ("Configure EnclaveCryptoShield for the Level-5 security profile.",),
         )
         blockers.append("NullCryptoShield is not production-ready.")
+    elif (
+        environment == "local-production"
+        and getattr(shield, "local_production_ready", False) is True
+    ):
+        crypto = CapabilityCheck(
+            "crypto_readiness",
+            CapabilityStatus.READY,
+            "Explicitly reviewed host-trusted local encryption marker is active.",
+            "Preserve verified artifact, key-custody, backup, restore, and host-boundary evidence.",
+            (
+                "The shield marker alone does not establish capabilities_v1 local-production readiness.",
+                "Runtime plaintext remains visible to the trusted host process.",
+                "This mode provides no hardware isolation or remote attestation.",
+            ),
+        )
+        warnings.append(
+            "Local production trusts the host account and process with runtime plaintext."
+        )
     elif isinstance(shield, EnclaveCryptoShield):
         attestation = shield.attestation
         crypto = CapabilityCheck(
@@ -278,7 +296,7 @@ def build_capability_report(oracle: Any) -> CapabilityReport:
     )
 
     # Development can be honest/degraded without being blocked from local use.
-    if environment in {"staging", "production"} and blockers:
+    if environment in {"staging", "local-production", "production"} and blockers:
         overall = CapabilityStatus.BLOCKED
     elif blockers or warnings:
         overall = CapabilityStatus.DEGRADED

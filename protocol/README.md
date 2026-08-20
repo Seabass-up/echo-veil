@@ -28,3 +28,19 @@ The v3 rows currently prove only that consumers do not read a storage-version
 field. They are not evidence that a v3 core exists. Phase 3 must replace those
 boundary simulations with real dual-reader, mixed-profile, migration, restart,
 and rollback tests before v3 writes can be enabled.
+
+## Readiness surface
+
+The RPC-only `capabilities_v1` action is emitted independently of preflight.
+Its `local_production_ready` field is a conjunction, not a user-controlled
+mode label. It stays false unless scoped authenticated storage, protected
+semantic state, digest-bound Qwen3 embeddings, owner-only profile access,
+immutable artifact evidence, verified backup and restore, qualified host
+enforcement, qualified key custody, clean reconciliation/quarantine state, and
+an explicit local-production selection all pass. Stable `EV-*` remediation
+codes explain failed gates without exposing payloads, secrets, personal data,
+or filesystem paths.
+
+`production_ready` remains the separate attested-enclave class. Host-trusted
+local production never claims hardware isolation, remote attestation, or
+protection from a compromised host process.

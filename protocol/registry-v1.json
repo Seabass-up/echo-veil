@@ -129,8 +129,12 @@
       "earliest_retirement_version": "0.10.0",
       "introduced_version": "0.8.0",
       "maximum_bytes": 32768,
-      "optional_fields": [],
-      "producer": "reserved-for-phase-2",
+      "optional_fields": [
+        "generated_at_ms",
+        "limitations",
+        "remediation_codes"
+      ],
+      "producer": "echo_veil.local_readiness",
       "required_fields": [
         "artifact_verified",
         "at_rest_encrypted",
@@ -151,7 +155,7 @@
         "schema"
       ],
       "signed": false,
-      "status": "reserved-not-emitted",
+      "status": "emitted-rpc-only",
       "surface": "capabilities-rpc",
       "wire_schema": "echo-veil-capabilities-v1"
     },
@@ -164,7 +168,13 @@
       "earliest_retirement_version": "0.10.0",
       "introduced_version": "0.7.0",
       "maximum_bytes": 262144,
-      "optional_fields": [],
+      "optional_fields": [
+        "capabilities_v1",
+        "crypto_environment",
+        "local_production_ready",
+        "mode_alias",
+        "readiness_remediation"
+      ],
       "producer": "echo_veil.agent_memory.AgentMemory.doctor",
       "required_fields": [
         "adapter_ready",

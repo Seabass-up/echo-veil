@@ -46,6 +46,10 @@ describe("echo-veil OpenClaw plugin", () => {
       .toBe("echo-veil-capabilities-v1");
     expect(parseCapabilitiesV1(cases.valid_documented_additions?.value)
       ?.remediation_codes).toEqual(["EV-BACKUP-UNVERIFIED"]);
+    expect(parseCapabilitiesV1(cases.host_trusted_local_ready?.value)
+      ?.local_production_ready).toBe(true);
+    expect(parseCapabilitiesV1(cases.attested_enclave_ready?.value)
+      ?.production_ready).toBe(true);
     const unknown = structuredClone(
       cases.unknown_schema?.value,
     ) as Record<string, unknown>;

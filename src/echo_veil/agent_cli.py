@@ -33,6 +33,7 @@ from .agent_memory import (
     TextEmbedder,
 )
 from .memory_layers import LogicKind, MemoryLayer
+from .local_readiness import LOCAL_PRODUCTION_MODE, LOCAL_STAGING_MODE
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MAX_REQUEST_BYTES = 1_048_576
@@ -373,6 +374,20 @@ class _RuntimeAvailabilityMemory:
             AlwaysAvailableMemory,
         )
         return report
+
+    def capabilities_v1(self) -> dict[str, Any]:
+        capabilities = getattr(self._memory, "capabilities_v1", None)
+        if not callable(capabilities):
+            raise RuntimeError("capabilities_v1 report is unavailable")
+        report = capabilities()
+        if not isinstance(report, dict):
+            raise RuntimeError("capabilities_v1 report is invalid")
+        return report
+
+    def assert_operational_mode(self) -> None:
+        assertion = getattr(self._memory, "assert_operational_mode", None)
+        if callable(assertion):
+            assertion()
 
     def rotate_key(
         self,
@@ -912,6 +927,19 @@ def dispatch(
     if not isinstance(arguments, Mapping):
         raise TypeError("arguments must be an object")
     supplied = dict(arguments)
+    if action == "capabilities_v1":
+        _require_only(supplied, set())
+        capabilities = getattr(memory, "capabilities_v1", None)
+        if not callable(capabilities):
+            raise RuntimeError("capabilities_v1 report is unavailable")
+        report = capabilities()
+        if not isinstance(report, dict):
+            raise RuntimeError("capabilities_v1 report is invalid")
+        return report
+    if action not in {"doctor", "echo_veil_doctor"}:
+        assertion = getattr(memory, "assert_operational_mode", None)
+        if callable(assertion):
+            assertion()
     if action in {"remember", "echo_veil_remember"}:
         _require_only(
             supplied,
@@ -1535,6 +1563,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="authorization scope bound to this encrypted profile",
     )
     parser.add_argument(
+        "--deployment-mode",
+        choices=(LOCAL_STAGING_MODE, LOCAL_PRODUCTION_MODE),
+        default=os.environ.get("ECHO_VEIL_DEPLOYMENT_MODE", LOCAL_STAGING_MODE),
+        help=(
+            "explicit local trust class; local-production remains blocked until "
+            "every capabilities_v1 prerequisite is independently verified"
+        ),
+    )
+    parser.add_argument(
         "--caller",
         default=os.environ.get("ECHO_VEIL_CALLER"),
         help=(
@@ -1652,6 +1689,9 @@ def main(argv: list[str] | None = None) -> int:
             # authorization domain to serialize on one protected authority.
             with _open_memory(args) as startup_probe:
                 startup_probe.doctor()
+                assertion = getattr(startup_probe, "assert_operational_mode", None)
+                if callable(assertion):
+                    assertion()
             return run_mcp(
                 memory_factory=lambda: _open_memory(args),
                 caller=caller,
@@ -1711,6 +1751,7 @@ def _open_memory(args: argparse.Namespace) -> MemoryAdapter:
             capacity=args.capacity,
             embed=embedder,
             profile_lock_timeout_seconds=args.profile_lock_timeout,
+            deployment_mode=args.deployment_mode,
         )
     except EmbeddingUnavailable:
         if args.embedder != "ollama" or not args.availability_layer:

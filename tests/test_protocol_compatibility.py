@@ -170,7 +170,19 @@ def test_protocol_registry_is_complete_and_matches_runtime_identifiers() -> None
     assert contracts["artifact_codex_v1"]["wire_schema"] == CODEX_ARTIFACT_SCHEMA
     assert contracts["capabilities_v1"]["wire_schema"] == CAPABILITIES_SCHEMA
     assert contracts["record_envelope_v3"]["status"] == "reserved-not-emitted"
-    assert contracts["capabilities_v1"]["status"] == "reserved-not-emitted"
+    assert contracts["capabilities_v1"]["status"] == "emitted-rpc-only"
+    assert set(contracts["capabilities_v1"]["optional_fields"]) == {
+        "generated_at_ms",
+        "limitations",
+        "remediation_codes",
+    }
+    assert set(contracts["doctor_current"]["optional_fields"]) == {
+        "capabilities_v1",
+        "crypto_environment",
+        "local_production_ready",
+        "mode_alias",
+        "readiness_remediation",
+    }
 
     fixture = _fixture()
     signed_response = fixture["signed_preflight"]["response"]
@@ -332,6 +344,14 @@ def test_capabilities_v1_is_optional_and_uses_only_documented_additions() -> Non
     extended = parse_capabilities_v1(cases["valid_documented_additions"]["value"])
     assert extended is not None
     assert extended["remediation_codes"] == ["EV-BACKUP-UNVERIFIED"]
+    local_ready = parse_capabilities_v1(cases["host_trusted_local_ready"]["value"])
+    assert local_ready is not None
+    assert local_ready["local_production_ready"] is True
+    assert local_ready["production_ready"] is False
+    enclave_ready = parse_capabilities_v1(cases["attested_enclave_ready"]["value"])
+    assert enclave_ready is not None
+    assert enclave_ready["local_production_ready"] is False
+    assert enclave_ready["production_ready"] is True
     for case_name in ("missing_required", "unknown_schema"):
         case = cases[case_name]
         value = copy.deepcopy(case["value"])
