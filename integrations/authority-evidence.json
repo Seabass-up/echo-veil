@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:600d21355dc05deb17609dc6e71a248dd9e64631454c5092d2b3fcdae8ea8984",
+  "shared_source_digest": "sha256:8f3b99b3a4c25dc15280ccb8c2c5b4eeef80adb3781fea3fe8b670a96cae62b3",
   "hosts": [
     {
       "id": "algo-cli",
@@ -104,7 +104,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:fe4e7b494596c4e820b1cdde962fdee810eea9e7f72cd5a378c291bccd5a5d99",
+      "source_digest": "sha256:20cef7781492e9edc2003afb808e8f0f42447a9c27f87aa530de82ae41478e1a",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -138,7 +138,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:e568f3f07cc670bdd7774064d3685868646c109766e9f3c690f2a1bbd5e2fb89",
+      "source_digest": "sha256:ef69d747d84b3e59666e4a2889cb233012fd93cfc2a8b48742502a9123b54e32",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -175,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:517657587b222c962163e662104f10c91ab3157c96272b859536b23c883363e4",
+      "source_digest": "sha256:bf82427d421649b391d680d777d93b89c16bd593f1441312700c87b21704b45a",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -211,7 +211,7 @@
         "integrations/claude-code/hooks/hooks.json",
         "integrations/claude-code/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:72a54048b52a25807d3e099eee0d60f3a039024b86e9d62b77bcc9a158ee8237",
+      "source_digest": "sha256:4a191d054d2dd73d2b0fa3b2056e6bea38c49ed32593366c1361415b7ae40af8",
       "checks": [
         "Plugin MCP connected",
         "Native auto-memory disabled",
@@ -246,7 +246,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:1955d0e9fdf4f5400541ca62e6a89992106e778286fee2c62ccd02bc83fe07f1",
+      "source_digest": "sha256:971e040f725ca0830ead43873e6697c0aefaa41bbcbbfb7525944aef10a51715",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -309,7 +309,7 @@
         "integrations/droid/hooks/echo-veil-preflight.sh",
         "integrations/droid/skills/echo-veil-memory/SKILL.md"
       ],
-      "source_digest": "sha256:8e42c9ede133e4eadace79839e7a195c70f4ac471deb3316864cddb48f657ef4",
+      "source_digest": "sha256:d7c790db7cc1262ef32634abd24db2ef011d0c4f7219f686dcd0bff34e110e2a",
       "checks": [
         "Installed plugin and MCP connection",
         "Healthy shield-owned headless turn",
@@ -362,7 +362,7 @@
         "integrations/grok/skills/echo-veil-memory/SKILL.md",
         "integrations/grok/README.md"
       ],
-      "source_digest": "sha256:21d4357b5689110ed0f9591836f9acd071f9c328223856e3035e599a96bca2c4",
+      "source_digest": "sha256:04e78630d102a8b3b7a669293632d7ac8567411bde0438daa6b24b1edc344d9d",
       "checks": [
         "Plugin layout matches Grok marketplace and hook schema",
         "MCP binds echo-universal-qwen3-v1 and caller grok-build",
@@ -384,7 +384,7 @@
       "tested_on": "2026-07-25",
       "tested_version": null,
       "source_artifacts": ["integrations/mercury/SKILL.md"],
-      "source_digest": "sha256:76ce2177e3d4bbd3f4d01961f541b842faeb68fafb961ec4e4b2b7afd2f8f66b",
+      "source_digest": "sha256:49a2bb4548cfcb76f90eb47145c61a221ee392e544de4e0ce09785737e5bbee4",
       "checks": [
         "Payload-silent readiness-only skill",
         "No unsafe shell payload transport"

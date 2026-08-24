@@ -52,6 +52,10 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    `integrations/opencode/package.json`, and `integrations/pi/package.json`.
    Update their package lockfiles and
    `integrations/openclaw/deployment-lock.json` in the same reviewed change.
+   Rebuild and then verify Pi's source-bound receipt with
+   `uv run --locked python scripts/build_pi_artifact_receipt.py` followed by
+   the same command with `--check`; never copy an authority ID across source
+   changes.
    Set the deployment lock's `source_date_epoch` once for the release date;
    both local and hosted builds must reproduce the wheel and the allowlisted
    OpenClaw archive built by `scripts/build_openclaw_archive.py`.
@@ -232,8 +236,8 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
 6. Create and push an annotated tag from the protected release commit:
 
    ```bash
-   git tag -a v0.7.0 -m "Echo Veil v0.7.0"
-   git push origin v0.7.0
+   git tag -a v0.8.0 -m "Echo Veil v0.8.0"
+   git push origin v0.8.0
    ```
 
 7. Manually run the `Release` workflow with that exact tag.
@@ -254,6 +258,6 @@ sha256sum --check SHA256SUMS
 For a public repository, verify GitHub provenance with the GitHub CLI:
 
 ```bash
-gh attestation verify echo_veil-0.7.0-py3-none-any.whl \
+gh attestation verify echo_veil-0.8.0-py3-none-any.whl \
   --repo Seabass-up/echo-veil
 ```

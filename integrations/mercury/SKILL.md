@@ -1,7 +1,7 @@
 ---
 name: echo-veil
 description: Verify Echo Veil readiness in Mercury without leaking protected memory through the shell.
-version: 0.7.0
+version: 0.8.0
 category: developer-tools
 intents:
   - echo veil memory

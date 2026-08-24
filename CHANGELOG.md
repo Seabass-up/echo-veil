@@ -5,6 +5,8 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-20
+
 ### Changed
 
 - Added a digest-pinned, query-blind LongMemEval-S pilot that partitions long
@@ -641,7 +643,8 @@ All notable changes to Echo Veil are documented here. The project follows
 - Secret generation, replay controls, bounded inputs, and encrypted key-transfer
   tooling are included and tested.
 
-[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Seabass-up/echo-veil/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Seabass-up/echo-veil/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Seabass-up/echo-veil/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Seabass-up/echo-veil/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Seabass-up/echo-veil/compare/v0.3.0...v0.5.0

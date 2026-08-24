@@ -22,13 +22,14 @@ contract contains provenance, expiry/review state, complete promotion evidence,
 and typed contextual relationships. Missing or unauthenticated contracts stop
 the profile; there is no plaintext layer fallback.
 
-> **Status: 0.7.0 — four-layer protected memory with fail-closed host gates.**
-> The memory lifecycle, conflict handling, drift detection, capability reporting,
-> confidence-gating surfaces, and a practical AES-GCM Crypto Shield are implemented
-> and tested. The repository includes an Azure SEV-SNP origin using OpenFHE CKKS,
-> a Ristretto255 proof gate, Cloudflare Access/Worker configuration, and fail-closed
-> attestation/session integration. Cloud credentials and hardware deployment are
-> still required before these claims are active. See
+> **Status: 0.8.0 release candidate — compatibility-first local protection.**
+> The memory lifecycle, conflict handling, semantic answerability, record-envelope
+> v3 dual reader, recovery drills, and host-trusted local readiness contract are
+> implemented and tested without changing the harness-facing preflight-v2 contract.
+> The repository also includes an Azure SEV-SNP origin using OpenFHE CKKS, a
+> Ristretto255 proof gate, Cloudflare Access/Worker configuration, and fail-closed
+> attestation/session integration. Cloud credentials, hardware deployment, and
+> independent review are still required before enclave claims are active. See
 > `docs/ARCHITECTURE_NOTES.md`.
 
 ## What's in the box

@@ -1,6 +1,6 @@
 {
   "name": "echo-veil",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Primary four-layer memory tools, skill, and Grok hooks. UserPromptSubmit injects protected context and is non-blocking; PreToolUse can deny unpreflighted subagents.",
   "author": {
     "name": "Algo-cli.com",

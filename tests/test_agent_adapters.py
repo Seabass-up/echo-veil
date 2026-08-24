@@ -14,7 +14,7 @@ from echo_veil.agent_memory import AgentMemory
 
 
 ROOT = Path(__file__).parents[1]
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 HOSTS = (
     "algo-cli",
     "aip",
@@ -423,7 +423,7 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     assert "echo_veil_list" in hermes
     assert "echo_veil_list" in goose
     assert "echo_veil_reindex" in hermes
-    assert 'version: "0.7.0"' in hermes_manifest
+    assert f'version: "{VERSION}"' in hermes_manifest
     assert 'register_hook("pre_llm_call"' in hermes_plugin
     assert 'register_middleware("llm_execution"' in hermes_plugin
     assert "shell=False" in hermes_plugin

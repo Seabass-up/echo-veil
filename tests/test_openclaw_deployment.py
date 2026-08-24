@@ -132,7 +132,7 @@ def test_deployment_lock_and_healthy_local_staging_contract() -> None:
     lock = _lock()
     fixture = _runtime_fixture(lock)
 
-    assert lock["source_date_epoch"] == 1_784_937_600
+    assert lock["source_date_epoch"] == 1_787_184_000
     assert (
         evaluate_openclaw_state(
             lock=lock,

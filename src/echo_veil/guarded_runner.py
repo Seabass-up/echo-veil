@@ -67,7 +67,7 @@ GOOSE_GUARDED_BUILTINS = ("developer",)
 HERMES_PLUGIN_FILES = ("__init__.py", "plugin.yaml")
 HERMES_PLUGIN_DIGESTS = {
     "__init__.py": "52c5084834d5e71d5b5682c0497b08046b93a90b7e7370a518383283024b5b63",
-    "plugin.yaml": "1046a331329c19b0f2b47b721f8857a99f13e70450f6af17c2787a90304f7c97",
+    "plugin.yaml": "4cd15d6dd254e1e971b84784b57acce20095d8024a29d25b6605a495ba48c78f",
 }
 HERMES_LAUNCH_NONCE_ENV = "ECHO_VEIL_HERMES_LAUNCH_NONCE"
 HERMES_LAUNCH_MARKER = f"{HERMES_LAUNCH_NONCE_ENV}="
@@ -78,7 +78,7 @@ _PI_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
 _SHA256_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PI_ARTIFACT_SCHEMA = "echo-veil-pi-artifact-v1"
 PI_HOST_VERSION = "0.84.2"
-PI_PACKAGE_VERSION = "0.7.0"
+PI_PACKAGE_VERSION = "0.8.0"
 PI_ARTIFACT_FILES = (
     "extensions/index.ts",
     "package-lock.json",

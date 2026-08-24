@@ -103,7 +103,7 @@ export default function Home() {
       <section className="hero shell" id="top">
         <div className="hero-copy">
           <div className="eyebrow">
-            <span className="status-dot" /> v0.7.0 · Four-layer protected memory
+            <span className="status-dot" /> v0.8.0 · Compatibility-first protected memory
           </div>
           <h1>
             Memory that knows
@@ -113,9 +113,8 @@ export default function Home() {
           <p className="hero-lede">
             Echo Veil gives AI agents a protected four-layer memory lifecycle,
             semantic recall with an answerability check, visible ranking
-            ambiguity, and a conservative read-only layer that stays available
-            when the embedding service does not—without turning guesses into
-            facts.
+            ambiguity, encrypted record migration, and a stable preflight-v2
+            contract across supported agent harnesses.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href="#system">
@@ -126,10 +125,10 @@ export default function Home() {
             </a>
           </div>
           <div className="hero-proof" aria-label="Product attributes">
-            <span>Release v0.7.0</span>
+            <span>v0.8.0 release candidate</span>
             <span>Open source</span>
             <span>Commercial use free</span>
-            <span>Fail-closed production mode</span>
+            <span>Host-trusted local boundary</span>
           </div>
         </div>
 
@@ -340,9 +339,10 @@ export default function Home() {
             <span className="section-index">05 / PRIVACY BY MODE</span>
             <h2>Start simple.<br />Harden without pretending.</h2>
             <p>
-              Every environment says exactly what it can protect. Echo Veil
-              refuses production startup when CKKS, verified hardware isolation,
-              fresh attestation, or the proof gate is missing.
+              Every environment says exactly what it can protect. Host-trusted
+              local production and attested-enclave production are separate
+              readiness classes, so local encryption never implies hardware
+              isolation or remote attestation.
             </p>
             <div className="security-pills">
               <span>Capability report</span><span>Replay defense</span><span>Bounded inputs</span><span>Encrypted vectors</span>
@@ -351,8 +351,9 @@ export default function Home() {
           <div className="mode-list">
             <div><span>01</span><strong>Development</strong><small>Plaintext, local testing</small></div>
             <div><span>02</span><strong>Staging</strong><small>AES-GCM protected storage</small></div>
-            <div><span>03</span><strong>Local private</strong><small>Native OpenFHE CKKS</small></div>
-            <div className="mode-active"><span>04</span><strong>Production</strong><small>Attested enclave + ZKP gate</small></div>
+            <div className="mode-active"><span>03</span><strong>Host-trusted local</strong><small>Qualified artifacts, custody, backup + restore</small></div>
+            <div><span>04</span><strong>Local private</strong><small>Native OpenFHE CKKS, experimental</small></div>
+            <div><span>05</span><strong>Attested enclave</strong><small>Future deployment + independent review</small></div>
           </div>
         </div>
       </section>
@@ -361,7 +362,7 @@ export default function Home() {
         <div className="cta-orbit" aria-hidden="true"><i /><i /><i /></div>
         <span className="section-index">MEMORY, WITH BETTER JUDGMENT</span>
         <h2>Give your agent<br /><em>a wiser memory.</em></h2>
-        <p>Echo Veil v0.7.0 · Open source under MIT · Free for personal and commercial use.</p>
+        <p>Echo Veil v0.8.0 release candidate · Open source under MIT · Free for personal and commercial use.</p>
         <div className="cta-actions">
           <a className="button button-primary" href="https://github.com/Seabass-up/echo-veil">View source on GitHub <span aria-hidden="true">↗</span></a>
           <a className="text-link" href="https://github.com/Seabass-up/echo-veil/blob/master/docs/AGENT_INTEGRATION.md">Read the integration guide <span aria-hidden="true">→</span></a>

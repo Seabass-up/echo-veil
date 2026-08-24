@@ -1,5 +1,5 @@
 name: echo-veil-shield
-version: "0.7.0"
+version: "0.8.0"
 description: "Required Echo Veil pre-model context and zero-provider-call execution gate for Hermes."
 hooks:
   - pre_llm_call
