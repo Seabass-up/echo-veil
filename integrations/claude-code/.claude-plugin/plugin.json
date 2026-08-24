@@ -1,6 +1,6 @@
 {
   "name": "echo-veil",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Shielded four-layer living-memory tools for Claude Code.",
   "author": {
     "name": "Algo-cli.com",

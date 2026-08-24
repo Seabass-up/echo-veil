@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
-  "source_date_epoch": 1784937600,
-  "tested_on": "2026-08-19",
+  "source_date_epoch": 1787184000,
+  "tested_on": "2026-08-20",
   "openclaw_version": "2026.7.1-2",
   "plugin": {
     "id": "echo-veil",
-    "version": "0.7.0",
-    "archive_sha256": "d982b33f6f7d0eec11c2110e9d11c7ff01a274122bec2d29059c45b54c31a141",
-    "entrypoint_sha256": "36b49d00c4fa54e5ebb127908e168f7189d1992c0944e17307d36c228f6a2a24"
+    "version": "0.8.0",
+    "archive_sha256": "9c54480c6265186f11c4eddad3d7bd32049a4d74975d18ade233161f42a51d12",
+    "entrypoint_sha256": "8b39cb67e129808affd2620aaba2cb5f384748101231a95c7d8c9c75986cac29"
   },
   "python": {
     "distribution": "echo-veil",
-    "version": "0.7.0",
-    "wheel_sha256": "c834dc1ae9e4a3a4da93750de82f8bb9dd32214dc3b9d83439f3908c55868a18",
-    "console_body_sha256": "fe4b01dda1ce3a070d6a727d9ff917a78a05090ca87480a12d1c5b5cc00c0019"
+    "version": "0.8.0",
+    "wheel_sha256": "ddb4d2edb936ba7c9040957c8cf3cd9d2e81da7433ebe3ab56ebadd244609376",
+    "console_body_sha256": "bebc12b7ed3291f807a34cf71d478968b1ff2148c8d4ab1f4307337eb5dfadc3"
   },
   "profile": {
     "id": "echo-universal-qwen3-v1",

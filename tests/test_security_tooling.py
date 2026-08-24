@@ -133,10 +133,10 @@ def test_workflow_scanner_requires_immutable_action_refs(tmp_path: Path) -> None
 def test_release_metadata_is_consistent() -> None:
     root = Path(__file__).resolve().parents[1]
 
-    version, errors = check_metadata(root, "v0.7.0")
+    version, errors = check_metadata(root, "v0.8.0")
     manifest = (root / "MANIFEST.in").read_text(encoding="utf-8")
 
-    assert version == "0.7.0"
+    assert version == "0.8.0"
     assert errors == []
     assert "recursive-include scripts *.py" in manifest
     assert "include integrations/algo-cli/README.md" in manifest
@@ -151,7 +151,7 @@ def test_release_metadata_is_consistent() -> None:
 
 def test_release_artifacts_are_bound_to_deployment_lock(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
-    archive = tmp_path / "openclaw-plugin-echo-veil-0.7.0.tgz"
+    archive = tmp_path / "openclaw-plugin-echo-veil-0.8.0.tgz"
     archive.write_bytes(b"not the reviewed archive")
 
     errors = check_locked_artifacts(root, plugin_archive=archive)

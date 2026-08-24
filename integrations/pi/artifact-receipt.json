@@ -1,16 +1,16 @@
 {
-  "artifact_authority_id": "sha256:bcef5414155badec31c35b35e4e36488e70bcbea16092045f480199068d2d5b2",
+  "artifact_authority_id": "sha256:cef55d039e7b21918db18742b794b217908233413d2e6f9e4bca7a27cff1c2d4",
   "files": {
     "extensions/index.ts": "sha256:80948b08c03e2796259a7135670cf79b4a8e2843ccca9c9852b4e778480122bc",
-    "package-lock.json": "sha256:5151917f39082da698a2c50d7af8a410bd93e30ba3f114579feeab281aa35c87",
-    "package.json": "sha256:5cfe5a61ffbdea3f816b6a241e0ad5879230998f53146308d064b9ede8ee1815",
-    "src/artifact.ts": "sha256:a4bcd86f8cc32969f5e3d2556ad7504ca2eb7edae95b01fd58fde73135589816",
+    "package-lock.json": "sha256:0f377e47bea22103a5438643da74dd3cc3acac41a469aae393ea24140c92e02a",
+    "package.json": "sha256:4899a3482d726851402519991348f5605bc60a0bcf7a42c18813b8324fa1e35d",
+    "src/artifact.ts": "sha256:1f3e31fd8c7a67355a461324064dd11e2543921fa842a8a98ded6095dbb449e0",
     "src/preflight.ts": "sha256:ddbd81caa28a0bf0efe68feec9acea0d2075920f5659ab7595720174e654daff",
     "src/runner.ts": "sha256:286d448f5233d4ab94a3c2adcf436f5d4a4e4f5dd384c3bd1957fae192bb984e"
   },
   "host": "pi",
   "host_version": "0.84.2",
   "package": "pi-extension-echo-veil",
-  "package_version": "0.7.0",
+  "package_version": "0.8.0",
   "schema": "echo-veil-pi-artifact-v1"
 }

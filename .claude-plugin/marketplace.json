@@ -9,7 +9,7 @@
       "name": "echo-veil",
       "source": "./integrations/claude-code",
       "description": "Shielded four-layer living-memory tools and fail-closed pre-model hooks.",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "category": "Productivity",
       "strict": true
     }

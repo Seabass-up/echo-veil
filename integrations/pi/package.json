@@ -1,6 +1,6 @@
 {
   "name": "pi-extension-echo-veil",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Native Pi tools for Echo Veil's local agent memory adapter.",
   "type": "module",
   "private": true,

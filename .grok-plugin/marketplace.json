@@ -9,7 +9,7 @@
       "name": "echo-veil",
       "source": "./integrations/grok",
       "description": "Primary four-layer memory tools, skill, and Grok hooks.",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "category": "Productivity"
     }
   ]

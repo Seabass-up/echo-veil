@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-echo-veil",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Exclusive OpenClaw memory capability and nine Echo Veil tools.",
   "type": "module",
   "private": true,

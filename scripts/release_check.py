@@ -82,6 +82,7 @@ REQUIRED_SDIST_FILES = {
     "scripts/locomo_benchmark.py",
     "scripts/longmemeval_benchmark.py",
     "scripts/build_openclaw_archive.py",
+    "scripts/build_pi_artifact_receipt.py",
     "scripts/migrate_agent_profile.py",
     "scripts/migrate_host_memory.py",
     "scripts/verify_agent_profile_migration.py",
