@@ -54,7 +54,7 @@ class _QualificationEmbedder:
         return self._vector()
 
     def embed_documents(self, texts: list[str]) -> list[np.ndarray]:
-        return [self._vector() for _text in texts]
+        return [self._vector() for _ in texts]
 
     def embed_query(self, _text: str) -> np.ndarray:
         return self._vector()
@@ -175,9 +175,12 @@ def _run_scale_tier(
     storage_bytes = _directory_size(tier)
 
     opened = time.perf_counter()
-    store = SQLiteStore(database, lsh_key=LSH_KEY, verify_integrity=True)
-    integrity_open_ms = (time.perf_counter() - opened) * 1_000.0
-    try:
+    with SQLiteStore(
+        database,
+        lsh_key=LSH_KEY,
+        verify_integrity=True,
+    ) as store:
+        integrity_open_ms = (time.perf_counter() - opened) * 1_000.0
         search_ms: list[float] = []
         candidate_counts: list[int] = []
         correct = 0
@@ -196,9 +199,6 @@ def _run_scale_tier(
             correct += int(bool(results) and results[0][0] == f"record-{index:07d}")
         reopened_count = len(store.index)
         lsh_status = store.lsh_status()
-    finally:
-        store.close()
-
     max_candidate_fraction = max(candidate_counts) / size
     passed = (
         correct == len(queries)

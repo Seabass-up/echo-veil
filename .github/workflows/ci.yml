@@ -149,7 +149,7 @@ jobs:
           node --test \
             compatibility/v0.7.0/integrations/opencode/tests/n-minus-one.test.mjs
           PYTHONPATH="$GITHUB_WORKSPACE/compatibility/v0.7.0:$GITHUB_WORKSPACE/compatibility/v0.7.0/src" \
-            python compatibility/probes/python-v0.7.0.py \
+            uv run --locked python compatibility/probes/python-v0.7.0.py \
               /tmp/echo-veil-n-minus-one.json
 
       - name: Reverify pinned consumer bytes after execution

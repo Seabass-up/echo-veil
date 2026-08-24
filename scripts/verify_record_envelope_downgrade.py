@@ -52,7 +52,13 @@ def run(legacy_source: Path) -> dict[str, object]:
     if not package.is_dir():
         raise ValueError("legacy Echo Veil package is unavailable")
 
-    private_tmp = Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
+    # Fixed sticky system temp roots keep the subprocess profile path short;
+    # TemporaryDirectory creates the owner-only child directory.
+    private_tmp = (
+        Path("/private/tmp")  # nosec B108
+        if sys.platform == "darwin"
+        else Path("/tmp")  # nosec B108
+    )
     with tempfile.TemporaryDirectory(
         prefix="echo-veil-envelope-compat-",
         dir=private_tmp,

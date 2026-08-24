@@ -1,0 +1,14 @@
+title = "Echo Veil secret-scanning policy"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Key-custody provider identifier is a public protocol constant"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''MACOS_KEYCHAIN_V1\s*=\s*"macos-keychain-v1"''']
+  paths = ['''^src/echo_veil/key_custody\.py$''']

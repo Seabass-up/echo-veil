@@ -301,6 +301,14 @@ def helper_identity(path: Path) -> tuple[str, str]:
 class MacOSKeyCustodyClient:
     """Bounded client for the signed Swift helper's owner-only Unix socket."""
 
+    descriptor: CustodyDescriptor
+    _timeout: float
+    _socket: socket.socket | None
+    _process: subprocess.Popen[bytes] | None
+    _request_counter: int
+    _runtime_dir: Path
+    _socket_path: Path
+
     def __init__(
         self,
         descriptor: CustodyDescriptor,
@@ -308,6 +316,12 @@ class MacOSKeyCustodyClient:
         *,
         timeout_seconds: float = DEFAULT_CUSTODY_TIMEOUT_SECONDS,
     ) -> None:
+        # Establish a safe finalizer state before any validation can raise.
+        self.descriptor = descriptor
+        self._timeout = DEFAULT_CUSTODY_TIMEOUT_SECONDS
+        self._socket = None
+        self._process = None
+        self._request_counter = 0
         if descriptor.provider not in OPAQUE_KEY_CUSTODY:
             raise ValueError("opaque custody client requires a native provider")
         if sys.platform != "darwin":
@@ -318,11 +332,7 @@ class MacOSKeyCustodyClient:
             or not 0.1 <= float(timeout_seconds) <= 30.0
         ):
             raise ValueError("key-custody timeout is invalid")
-        self.descriptor = descriptor
         self._timeout = float(timeout_seconds)
-        self._socket: socket.socket | None = None
-        self._process: subprocess.Popen[bytes] | None = None
-        self._request_counter = 0
 
         helper_digest = _sha256_file(descriptor.helper_path)
         helper_cdhash, _identifier = _codesign_information(descriptor.helper_path)

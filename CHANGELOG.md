@@ -63,6 +63,12 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Security
 
+- Raised the minimum `cryptography` runtime to 50.0 after the locked 49.0.0
+  release received a security advisory. Release CI now exercises the pinned
+  v0.7 Python consumer inside the locked environment, supports the hosted macOS
+  Swift 6.1 toolchain, scans the complete release history with a narrowly
+  source-bound false-positive exception, and keeps the key-custody finalizer in
+  a safe state even when constructor validation exits early.
 - CI now rejects any runtime or harness-facing preflight-v3 identifier, runs the
   complete 1K/10K/100K local qualification in one dedicated job, and requires a
   successful full CI run for the exact annotated-tag commit before the release
