@@ -59,8 +59,12 @@ def _ready_doctor() -> dict[str, Any]:
 @pytest.fixture
 def broker_root() -> Any:
     # Darwin's AF_UNIX path is short; pytest's descriptive temp hierarchy is
-    # intentionally much longer than a real profile path.
-    with tempfile.TemporaryDirectory(prefix="evb-", dir="/private/tmp") as directory:
+    # intentionally much longer than a real profile path. Linux runners do not
+    # necessarily expose Darwin's /private/tmp alias.
+    private_tmp = Path("/private/tmp")
+    if not private_tmp.is_dir():
+        private_tmp = Path(tempfile.gettempdir())
+    with tempfile.TemporaryDirectory(prefix="evb-", dir=private_tmp) as directory:
         root = Path(directory).resolve(strict=True)
         root.chmod(0o700)
         yield root

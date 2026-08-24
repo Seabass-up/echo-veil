@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -152,7 +153,8 @@ def test_guided_setup_is_path_free_and_non_mutating(
     assert result == 2
     output = capsys.readouterr().out
     report = json.loads(output)
-    assert report["checks"]["filevault"] == "enabled"
+    expected_filevault = "enabled" if sys.platform == "darwin" else "not-applicable"
+    assert report["checks"]["filevault"] == expected_filevault
     assert report["checks"]["embedding_profile_binding"] == "mismatched"
     assert report["checks"]["backup_evidence"] == "unverified"
     assert report["checks"]["restore_evidence"] == "unverified"
