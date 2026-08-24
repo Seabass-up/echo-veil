@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:8f3b99b3a4c25dc15280ccb8c2c5b4eeef80adb3781fea3fe8b670a96cae62b3",
+  "shared_source_digest": "sha256:0e0a056c899a00dbdeaa36ee33349916a925f8e01743f07859c71d0b4e4b2695",
   "hosts": [
     {
       "id": "algo-cli",
@@ -104,7 +104,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:20cef7781492e9edc2003afb808e8f0f42447a9c27f87aa530de82ae41478e1a",
+      "source_digest": "sha256:4a4c1e918f92222a0dd19c386c2036f2f5fe45bc09bbff89c14bdbbabae3b43f",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -138,7 +138,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:ef69d747d84b3e59666e4a2889cb233012fd93cfc2a8b48742502a9123b54e32",
+      "source_digest": "sha256:6fee73f770f603b79601670ce26af68f008c76c153ae4400aa783fe186eec74b",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -175,7 +175,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:bf82427d421649b391d680d777d93b89c16bd593f1441312700c87b21704b45a",
+      "source_digest": "sha256:abbf71ce6c1eefa077304b1720e425a4d5f261b7335507f27f93138739e0760d",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",

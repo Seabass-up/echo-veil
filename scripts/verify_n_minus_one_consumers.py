@@ -280,11 +280,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.verify_only:
             if args.output is None:
                 raise ValueError("--output is required unless --verify-only is set")
-            private_tmp = Path(
-                "/private/tmp"
-                if os.name == "posix" and Path("/private/tmp").is_dir()
-                else "/tmp"
-            )
+            # Fixed sticky system temp roots keep the compatibility socket path
+            # short; TemporaryDirectory creates the owner-only child directory.
+            private_tmp = Path("/private/tmp")  # nosec B108
+            if os.name != "posix" or not private_tmp.is_dir():
+                private_tmp = Path("/tmp")  # nosec B108
             with tempfile.TemporaryDirectory(
                 prefix="echo-veil-n-minus-one-",
                 dir=private_tmp,

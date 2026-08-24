@@ -604,6 +604,7 @@ class BrokerServer:
         try:
             _write_frame(connection, response)
         except (BrokenPipeError, OSError):
+            # The caller may disconnect after its deadline; no retry is safe here.
             pass
 
     def _dispatch_loop(self, stop: threading.Event) -> None:
@@ -708,6 +709,7 @@ class BrokerServer:
         try:
             self._unlink_exact(*identity)
         except BrokerError:
+            # Cleanup is best effort and must not unlink a replaced socket path.
             pass
 
     def _unlink_exact(self, device: int, inode: int) -> None:

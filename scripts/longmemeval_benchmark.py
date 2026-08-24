@@ -166,15 +166,18 @@ class JsonGenerator(Protocol):
     model: str
     model_digest: str
 
-    def capture(self, sessions: Sequence[Mapping[str, Any]]) -> dict[str, Any]: ...
+    def capture(self, sessions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        raise NotImplementedError
 
     def answer(
         self,
         question: str,
         evidence: Sequence[Mapping[str, Any]],
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        raise NotImplementedError
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)

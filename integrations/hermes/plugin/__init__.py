@@ -666,7 +666,7 @@ def on_llm_execution(
     """Permit the provider only for an exact successful preflight turn."""
 
     ready = False
-    denial_reason = "invalid_turn_identity"
+    denial_reason: str
     try:
         key = _turn_key(
             session_id=session_id,

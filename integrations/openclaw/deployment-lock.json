@@ -12,7 +12,7 @@
   "python": {
     "distribution": "echo-veil",
     "version": "0.8.0",
-    "wheel_sha256": "ddb4d2edb936ba7c9040957c8cf3cd9d2e81da7433ebe3ab56ebadd244609376",
+    "wheel_sha256": "bb7bea8a8dd8ad8bc7a8fdc68998f8f303f7ffe8bb73e2b3d4672a2df2c0151e",
     "console_body_sha256": "bebc12b7ed3291f807a34cf71d478968b1ff2148c8d4ab1f4307337eb5dfadc3"
   },
   "profile": {
