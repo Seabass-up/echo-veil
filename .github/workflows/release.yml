@@ -165,7 +165,7 @@ jobs:
           subject-checksums: release/SHA256SUMS
 
       - name: Create draft GitHub release
-        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ inputs.tag }}
           draft: true
