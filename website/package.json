@@ -33,7 +33,7 @@
     "image-size": "file:vendor/image-size-disabled",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.3.2",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "typescript-eslint": "8.65.0",
     "vinext": "0.0.50",
     "vite": "8.1.5",
