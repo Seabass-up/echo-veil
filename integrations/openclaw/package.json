@@ -28,7 +28,7 @@
     "typebox": "^1.1.38"
   },
   "devDependencies": {
-    "@types/node": "22.19.19",
+    "@types/node": "26.2.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
