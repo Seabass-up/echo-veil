@@ -75,6 +75,14 @@ npm --prefix integrations/pi test
 pi install ./integrations/pi
 ```
 
+For a pinned distribution, use `integrations/pi` from the verified Echo Veil
+source archive and retain `package-lock.json` and `artifact-receipt.json`.
+Plain `npm pack` omits the lockfile and does not produce a valid receipt-bound
+Pi artifact. Verify the extracted directory before and after `npm ci` with
+`python scripts/build_pi_artifact_receipt.py --directory DIRECTORY --check`
+from the extracted Echo source root. Do not regenerate a receipt merely to
+accept an incomplete package.
+
 For the strongest supported Pi boundary, use the isolated one-turn launcher.
 It keeps the prompt off the process command line, disables sessions, ambient
 extensions, skills, templates, themes, context files, project trust, and all

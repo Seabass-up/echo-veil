@@ -106,7 +106,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:4a4c1e918f92222a0dd19c386c2036f2f5fe45bc09bbff89c14bdbbabae3b43f",
+      "source_digest": "sha256:2953ba885a59cc2c5edad964ad36df01cc4c619e89dd5c80c276a640f563c99a",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -194,7 +194,7 @@
         "Owner-only broker endpoint and Echo signing authority bound when enabled"
       ],
       "remaining": [
-        "Repository changes are uncommitted and unreleased, so the installed 0.146.0 runtime remains release-stale",
+        "Historical 0.146.0 evidence is not current; isolated 0.149.1 candidate smokes are recorded in docs/reviews/2026-09-04-installed-qualification.md, while released operational installation remains pending",
         "Direct Codex is protected recall but not singular while competing mutable memory is exposed",
         "Direct collaboration is unqualified until every child receives and consumes a fresh task-specific receipt",
         "The isolated launcher deliberately disables subagents; out-of-band spawn paths are not covered"
@@ -266,7 +266,7 @@
         "Healthy isolated Pi 0.84.1 one-turn runtime completed against the receipt-bound package"
       ],
       "remaining": [
-        "Repository changes are uncommitted and unreleased, so the installed 0.84.1 runtime remains release-stale",
+        "Historical 0.84.1 evidence is not current; isolated 0.84.2 candidate smokes are recorded in docs/reviews/2026-09-04-installed-qualification.md, while released operational installation remains pending",
         "Direct ambient Pi stacks retain later-extension provider-payload ordering risk",
         "Extension-disabled runs are outside the claim",
         "Requalify after Pi lifecycle-hook or artifact changes"

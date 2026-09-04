@@ -7,6 +7,10 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Fixed
 
+- Bind the deployment lock to the reproducibly rebuilt wheel and document
+  hash-pinned wheel installation plus the complete source-archive route for Pi.
+  Bare local-wheel installs can omit the required PEP 610 hash, and plain
+  `npm pack` omits Pi's receipt-bound lockfile; neither bypasses the artifact gate.
 - Reject duplicate preflight candidates, incomplete or unauthenticated conflict
   groups, and missing ambiguous/competing Contextual Logic roots before either
   unsigned context emission or v2 receipt signing. Valid v2 wire contracts and
