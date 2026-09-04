@@ -5,6 +5,27 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject duplicate preflight candidates, incomplete or unauthenticated conflict
+  groups, and missing ambiguous/competing Contextual Logic roots before either
+  unsigned context emission or v2 receipt signing. Valid v2 wire contracts and
+  complete candidate sets remain unchanged.
+- Preserve a live broker socket when its connection probe times out, and retain
+  the original startup error when the dispatch thread has not started. Confirmed
+  stale sockets remain recoverable.
+- Return Grok's native top-level deny decision for guarded subagent requests,
+  including malformed input. Delegation remains blocked because delivery of
+  protected child context is unqualified; parent-side preflight success alone
+  cannot authorize it.
+- Select the fixture profile explicitly in operator CLI tests so a harness's
+  `ECHO_VEIL_PROFILE` cannot redirect backup, restoration, or migration checks
+  into a different empty profile.
+- Refresh reviewed host-source bindings without renewing historical installed
+  qualification: affected hosts are explicitly release-pending. Isolated
+  authority fixtures keep version/artifact rejection covered, and regression
+  checks prove matching artifacts cannot bypass the required-current gate.
+
 ## [0.8.0] - 2026-08-20
 
 ### Changed

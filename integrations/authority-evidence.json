@@ -23,13 +23,13 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:0e0a056c899a00dbdeaa36ee33349916a925f8e01743f07859c71d0b4e4b2695",
+  "shared_source_digest": "sha256:d8e51b138cdea011853287746ac74eb950ffad14f3a7d38fb8f38c3384e6ee10",
   "hosts": [
     {
       "id": "algo-cli",
       "display_name": "Algo CLI",
       "adapter": "In-process protected-memory bridge",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Required-protection ordinary chat and Agent Block turns",
       "tested_on": "2026-07-25",
       "tested_version": "0.18.0",
@@ -44,6 +44,7 @@
         "Exact archive-hash installation and path-silent one-shot qualification"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "The Algo implementation lives in a separate repository and must retain its own source and installed-wheel gates",
         "Algo release governance is blocked by an unauthorized dirty hardening set and stale qualification source digest",
         "Production enclave readiness is not asserted"
@@ -53,7 +54,7 @@
       "id": "aip",
       "display_name": "AIP",
       "adapter": "Artifact-bound provider gate and fresh-process RPC backend",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Installed 0.1.1 runtime model generation through the Echo-bound provider registry",
       "tested_on": "2026-07-25",
       "tested_version": "0.1.1",
@@ -82,6 +83,7 @@
         "Repository backend contract and shared-domain behavior"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "The AIP implementation lives in a separate non-Git checkout",
         "Production enclave readiness is not asserted"
       ]
@@ -90,7 +92,7 @@
       "id": "openclaw",
       "display_name": "OpenClaw",
       "adapter": "Exclusive native memory plugin and nine tools",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Models pinned to the OpenClaw runtime with all required Echo hooks",
       "tested_on": "2026-08-19",
       "tested_version": "2026.7.1-2",
@@ -116,6 +118,7 @@
         "Owner-only profile paths and zero-warning host security audit"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "The native Codex app-server runtime is excluded because it skips the required hook pair",
         "Requalify after any runtime, plugin, model-route, or hook-permission change",
         "Time Machine destination restore and production cryptographic review remain external gates"
@@ -125,7 +128,7 @@
       "id": "hermes",
       "display_name": "Hermes",
       "adapter": "Shield-owned headless launcher plus native pre-LLM and provider middleware",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Local Echo-tools-only turns started through echo-veil-shielded-run hermes",
       "tested_on": "2026-08-19",
       "tested_version": "0.18.2",
@@ -149,6 +152,7 @@
         "Healthy shield-owned local turn and pre-host outage stop"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "Ordinary Hermes plugin mode remains conditional because general plugin failure does not abort startup",
         "The shield-owned claim is local, one-turn, and Echo-tools-only",
         "Interactive, gateway, arbitrary-toolset, and remote-provider modes remain outside the qualified boundary"
@@ -175,7 +179,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:abbf71ce6c1eefa077304b1720e425a4d5f261b7335507f27f93138739e0760d",
+      "source_digest": "sha256:36f36db73aa9054f86b862a8a973501e9d77be09280cdaa5e12cd36d0daa095a",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -200,7 +204,7 @@
       "id": "claude-code",
       "display_name": "Claude Code",
       "adapter": "Plugin hooks, Agent Skill, and stdio MCP",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Normal plugin-mode root turns with native auto-memory disabled",
       "tested_on": "2026-07-25",
       "tested_version": "2.1.207",
@@ -220,6 +224,7 @@
         "Child-only deny control preserves root preflight and blocks before opening Echo"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "Installed spawn attempt completed protected root preflight but Claude Code was not authenticated",
         "Healthy and denied installed Agent spawns remain release gates",
         "Safe mode and bare mode disable the required hooks",
@@ -271,7 +276,7 @@
       "id": "opencode",
       "display_name": "OpenCode",
       "adapter": "Global or project plugin, Agent Skill, and local MCP",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Normal plugin-pipeline root turns",
       "tested_on": "2026-08-19",
       "tested_version": "1.17.18",
@@ -289,6 +294,7 @@
         "Task-only deny control preserves root preflight and blocks before invoking Echo"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "Authenticated provider refresh returned 401 and a free-provider Task smoke timed out",
         "Healthy and denied installed Task spawns remain release gates",
         "Pure mode disables external plugins"
@@ -298,7 +304,7 @@
       "id": "droid",
       "display_name": "Droid",
       "adapter": "Shield-owned headless launcher plus native plugin artifacts",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Headless turns started through echo-veil-shielded-run droid",
       "tested_on": "2026-07-25",
       "tested_version": "0.180.0",
@@ -317,6 +323,7 @@
         "Bare exec negative control on the tested version"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "Bare droid exec 0.180.0 bypasses native prompt hooks and is not qualified",
         "Interactive Droid and Task spawns require separate installed proof",
         "The shielded launcher disables Task"
@@ -326,7 +333,7 @@
       "id": "goose",
       "display_name": "Goose",
       "adapter": "Shield-owned headless launcher plus portable recipe",
-      "evidence_state": "qualified",
+      "evidence_state": "release_pending",
       "qualified_boundary": "Headless turns started through echo-veil-shielded-run goose",
       "tested_on": "2026-07-25",
       "tested_version": "1.41.0",
@@ -342,6 +349,7 @@
         "Forced-outage stop before host creation"
       ],
       "remaining": [
+        "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "The normal Goose recipe remains policy-driven rather than a hard pre-model boundary",
         "No-profile suppresses recipe extensions outside the shield-owned launcher"
       ]
@@ -349,9 +357,9 @@
     {
       "id": "grok-build",
       "display_name": "Grok Build",
-      "adapter": "Plugin skill, stdio MCP, prompt injection, and subagent PreToolUse",
+      "adapter": "Plugin skill, stdio MCP, best-effort prompt output, and subagent deny guard",
       "evidence_state": "repository_only",
-      "qualified_boundary": "Protected recall and injected context; UserPromptSubmit is non-blocking",
+      "qualified_boundary": "Protected MCP recall; prompt and child context delivery are unqualified",
       "tested_on": "2026-08-13",
       "tested_version": "1.0.3",
       "source_artifacts": [
@@ -362,15 +370,17 @@
         "integrations/grok/skills/echo-veil-memory/SKILL.md",
         "integrations/grok/README.md"
       ],
-      "source_digest": "sha256:04e78630d102a8b3b7a669293632d7ac8567411bde0438daa6b24b1edc344d9d",
+      "source_digest": "sha256:3ab03ef7084268d5265292175bcb8dab5fe3b99a3a7e1f7c23d4c6e6dee55729",
       "checks": [
         "Plugin layout matches Grok marketplace and hook schema",
         "MCP binds echo-universal-qwen3-v1 and caller grok-build",
         "Hook parser accepts Grok camelCase envelopes",
-        "Prompt-mode outage injects a warning instead of claiming a turn stop"
+        "Prompt-mode outage emits a warning; host consumption is unverified"
       ],
       "remaining": [
         "UserPromptSubmit is non-blocking and hook failures fail open",
+        "Changed adapter requires new artifact binding and installed-host qualification",
+        "Guarded child spawns are denied because rewritten context delivery is unqualified",
         "No installed zero-token outage smoke has been recorded",
         "Grok native memory is not a detectable exclusive-disable switch"
       ]
@@ -398,7 +408,8 @@
   "limitations": [
     "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
     "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
-    "Pi and Codex remain release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified.",
+    "The 2026-09-04 source-binding refresh records reviewed repository bytes only; tested_on, tested_version, checks, and qualified_boundary remain historical evidence, not new installed qualification.",
+    "All previously qualified runtimes plus Pi and Codex are release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified. Grok remains repository-only and Mercury blocked.",
     "Algo CLI and AIP implementation sources live in separate repositories and retain independent release gates.",
     "Production CKKS, enclave, mTLS, Access, ZKP, and operational controls require external deployment evidence."
   ]

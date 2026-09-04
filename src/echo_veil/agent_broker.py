@@ -465,6 +465,7 @@ class BrokerServer:
             daemon=True,
         )
         connections: list[threading.Thread] = []
+        worker_started = False
         try:
             self._remove_stale_socket()
             previous_umask = os.umask(0o177)
@@ -483,6 +484,7 @@ class BrokerServer:
             )
             listener.settimeout(0.25)
             worker.start()
+            worker_started = True
             if ready_event is not None:
                 ready_event.set()
             while not stop.is_set():
@@ -496,14 +498,19 @@ class BrokerServer:
                         self._rejected += 1
                     continue
                 connections = [thread for thread in connections if thread.is_alive()]
-                thread = threading.Thread(
-                    target=self._connection_worker,
-                    args=(connection,),
-                    name="echo-veil-broker-connection",
-                    daemon=True,
-                )
+                try:
+                    thread = threading.Thread(
+                        target=self._connection_worker,
+                        args=(connection,),
+                        name="echo-veil-broker-connection",
+                        daemon=True,
+                    )
+                    thread.start()
+                except Exception:
+                    connection.close()
+                    self._connection_slots.release()
+                    raise
                 connections.append(thread)
-                thread.start()
         finally:
             stop.set()
             for job in self._scheduler.close():
@@ -514,7 +521,8 @@ class BrokerServer:
                 )
                 job.completed.set()
             listener.close()
-            worker.join(timeout=min(self._request_deadline, 5.0))
+            if worker_started:
+                worker.join(timeout=min(self._request_deadline, 5.0))
             for thread in connections:
                 thread.join(timeout=0.1)
             self._unlink_bound_socket(bound_identity)
@@ -693,9 +701,11 @@ class BrokerServer:
         try:
             probe.settimeout(0.1)
             probe.connect(os.fspath(self.socket_path))
-        except (ConnectionRefusedError, FileNotFoundError, TimeoutError):
+        except (ConnectionRefusedError, FileNotFoundError):
             pass
         except OSError as exc:
+            # A timeout can mean a live listener has a full backlog. Only a
+            # confirmed absent/refused listener authorizes stale-path removal.
             raise BrokerError("existing broker socket cannot be verified") from exc
         else:
             raise BrokerError("an Echo Veil broker is already active")

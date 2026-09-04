@@ -111,6 +111,19 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    repository-only, release-pending, blocked, or stale. A Pi or Codex boundary
    recorded as `runtime_release_stale` must not be promoted merely because the
    host executable version matches.
+   When reviewed source changes invalidate `integrations/authority-evidence.json`,
+   refresh the affected source digests only with an explicit evidence-state
+   review. A shared-source change invalidates every dependent host's prior
+   qualification: move formerly `qualified` or `conditional` records to
+   `release_pending` until their exact installed artifacts pass new healthy and
+   outage smokes. Preserve historical `tested_on`, `tested_version`, `checks`,
+   and `qualified_boundary` values until that requalification actually happens;
+   do not date an old smoke as a new test. Keep `repository_only`,
+   `external_unbound`, and `blocked` limitations intact.
+   The source-only CI command verifies reviewed repository bytes, not installed
+   readiness. Passing it must not be presented as passing `--require-current
+   HOST`. Unit tests exercise qualified-state version and artifact failures in
+   disposable fixtures so they cannot renew the real manifest's authority.
    For Pi, verify `integrations/pi/artifact-receipt.json` from both TypeScript
    and Python and pin that exact authority ID in the isolated launcher. For
    Codex, run the receipt-only mode with

@@ -19,6 +19,7 @@ from .agent_cli import _open_memory, build_parser as build_agent_parser
 from .agent_memory import (
     DEFAULT_OLLAMA_EMBEDDING_DIMENSION,
     DEFAULT_OLLAMA_MODEL,
+    MAX_CONTEXT_EDGES,
 )
 from .preflight_receipt import (
     PREFLIGHT_RECEIPT_SCHEMA,
@@ -76,11 +77,26 @@ MAX_PREFLIGHT_CONTEXT_CHARS = 16_000
 MAX_PREFLIGHT_ESTIMATED_TOKENS = 2_400
 MAX_REWRITTEN_AGENT_PROMPT_CHARS = MAX_QUERY_CHARS + MAX_PREFLIGHT_CONTEXT_CHARS + 512
 MAX_PREFLIGHT_RESULTS = 8
+MAX_PREFLIGHT_CONTEXT_RECORDS = 3
+MAX_PREFLIGHT_CONTEXT_EDGES = MAX_PREFLIGHT_RESULTS
 MAX_PREFLIGHT_PAYLOAD_CHARS = 4_000
 MAX_PROVENANCE_ITEMS = 4
+CONTEXT_ROOT_EXPANSION_STATUSES = frozenset(
+    {
+        "authenticated",
+        "confidence_gated",
+        "authentication_failed",
+        "invalid_logic_root",
+    }
+)
+_MISSING = object()
 REQUIRED_PREFLIGHT_FAILURE = (
     "Echo Veil required preflight is unavailable. The model turn was blocked; "
     "no host memory fallback was used."
+)
+GROK_SUBAGENT_UNAVAILABLE = (
+    "Echo Veil cannot verify protected context delivery to Grok subagents. "
+    "Delegation is blocked; use Echo Veil tools in the current session."
 )
 FORCE_AGENT_PREFLIGHT_FAILURE_ENV = "ECHO_VEIL_FORCE_AGENT_PREFLIGHT_FAILURE"
 RUNTIME_STATUS_SCHEMA = "echo-veil-runtime-status-v1"
@@ -118,6 +134,7 @@ class HookRequest:
     tool_input: dict[str, Any] | None = None
     query_field: str | None = None
     raw_event: str | None = None
+    host: str = "codex"
 
 
 class PreflightMemory(Protocol):
@@ -276,7 +293,7 @@ def prepare_preflight(
             clean_query,
             allow_inferential=False,
             max_depth=2,
-            max_records=8,
+            max_records=MAX_PREFLIGHT_CONTEXT_RECORDS,
         )
         if context_required
         else None
@@ -340,7 +357,7 @@ def prepare_preflight_v2(
             clean_query,
             allow_inferential=False,
             max_depth=2,
-            max_records=8,
+            max_records=MAX_PREFLIGHT_CONTEXT_RECORDS,
         )
         if context_required
         else None
@@ -741,6 +758,7 @@ def parse_hook_request(
             event=event,
             query=prompt,
             raw_event=None if event == str(raw_event) else str(raw_event),
+            host=host,
         )
     agent_tools = AGENT_TOOL_NAMES.get(host)
     tool_name = _first_present(request, "tool_name", "toolName")
@@ -779,6 +797,7 @@ def parse_hook_request(
         tool_input=tool_input,
         query_field=query_field,
         raw_event=None if event == str(raw_event) else str(raw_event),
+        host=host,
     )
 
 
@@ -791,6 +810,10 @@ def success_output(request: HookRequest, context: str) -> dict[str, Any]:
         raise ValueError("hook context is invalid")
     hook_event = request.raw_event or request.event
     if request.event == AGENT_HOOK_EVENT:
+        if request.host == "grok-build":
+            # Grok's native hook decision has no qualified updatedInput path.
+            # A successful parent-side lookup cannot authorize an unseeded child.
+            return blocked_output("agent", host=request.host)
         tool_input = _object(request.tool_input, "agent tool input")
         query_field = request.query_field
         if query_field not in {"message", "prompt"}:
@@ -822,6 +845,8 @@ def blocked_output(mode: str = "prompt", *, host: str = "codex") -> dict[str, An
     """Stop a host turn or deny an Agent tool without leaking failure detail."""
 
     if mode == "agent":
+        if host == "grok-build":
+            return {"decision": "deny", "reason": GROK_SUBAGENT_UNAVAILABLE}
         return {
             "hookSpecificOutput": {
                 "hookEventName": AGENT_HOOK_EVENT,
@@ -904,6 +929,9 @@ def main(argv: list[str] | None = None, *, stream: BinaryIO | None = None) -> in
             mode=args.hook_mode,
             host=args.host,
         )
+        if args.host == "grok-build" and args.hook_mode == "agent":
+            _write_output(blocked_output("agent", host=args.host))
+            return 0
         if agent_preflight_forced(args.hook_mode):
             raise RuntimeError("agent preflight failure probe is active")
         runtime_args = build_agent_parser().parse_args(
@@ -996,22 +1024,57 @@ def _protected_agent_prompt(context: str, task: str) -> str:
 
 def _compact_recall(value: object) -> dict[str, Any]:
     recall = _object(value, "recall response")
+    ambiguity_candidates_preserved = _optional_boolean(
+        recall.get("ambiguity_candidates_preserved", _MISSING),
+        "ambiguity candidates preserved",
+        default=True,
+    )
+    ranking_ambiguous = _boolean(
+        recall.get("ranking_ambiguous"),
+        "ranking ambiguous",
+    )
+    competing_memory_detected = _boolean(
+        recall.get("competing_memory_detected"),
+        "competing memory detected",
+    )
+    competing_pair_preserved = _boolean(
+        recall.get("competing_pair_preserved"),
+        "competing pair preserved",
+    )
+    degraded = _optional_boolean(
+        recall.get("degraded", _MISSING),
+        "recall degraded",
+        default=False,
+    )
+    semantic_available = _optional_boolean(
+        recall.get("semantic_available", _MISSING),
+        "recall semantic availability",
+        default=True,
+    )
+    lifecycle_mutated = _boolean(
+        recall.get("lifecycle_mutated"),
+        "recall lifecycle mutation",
+    )
     results = _compact_records(recall.get("results"), "recall results")
     requested_top_k = _finite_number(recall.get("requested_top_k"), "requested_top_k")
     effective_top_k = _finite_number(recall.get("effective_top_k"), "effective_top_k")
     if requested_top_k < 2 or effective_top_k < 2:
         raise RuntimeError("recall did not preserve ambiguity candidates")
-    if recall.get("ambiguity_candidates_preserved") is False:
+    if not ambiguity_candidates_preserved:
         raise RuntimeError("recall did not preserve ambiguity candidates")
-    if recall.get("ranking_ambiguous") is True and len(results) < 2:
-        raise RuntimeError("ambiguous recall omitted a leading candidate")
-    if (
-        recall.get("competing_memory_detected") is True
-        and recall.get("competing_pair_preserved") is not True
-    ):
-        raise RuntimeError("competing recall omitted a protected candidate")
-    if recall.get("degraded") is True or recall.get("semantic_available") is False:
+    competing_groups = _compact_competing_groups(recall.get("competing_memory_groups"))
+    _validate_candidate_integrity(
+        results,
+        ranking_ambiguous=ranking_ambiguous,
+        competing_memory_detected=competing_memory_detected,
+        competing_pair_preserved=competing_pair_preserved,
+        groups=competing_groups,
+        label="recall",
+    )
+    if degraded or not semantic_available:
         raise RuntimeError("semantic recall became unavailable")
+    if lifecycle_mutated:
+        raise RuntimeError("protected preflight recall changed lifecycle state")
     return {
         "mode": "semantic",
         "requested_layers": _bounded_strings(
@@ -1024,11 +1087,9 @@ def _compact_recall(value: object) -> dict[str, Any]:
             len(MEMORY_LAYERS),
             32,
         ),
-        "ranking_ambiguous": recall.get("ranking_ambiguous") is True,
-        "competing_memory_detected": (recall.get("competing_memory_detected") is True),
-        "competing_memory_groups": _compact_competing_groups(
-            recall.get("competing_memory_groups")
-        ),
+        "ranking_ambiguous": ranking_ambiguous,
+        "competing_memory_detected": competing_memory_detected,
+        "competing_memory_groups": competing_groups,
         "gated_count": _nonnegative_integer(recall.get("gated_count"), "gated_count"),
         "results": results,
     }
@@ -1036,23 +1097,92 @@ def _compact_recall(value: object) -> dict[str, Any]:
 
 def _compact_context(value: object) -> dict[str, Any]:
     context = _object(value, "context response")
-    if context.get("degraded") is True or context.get("semantic_available") is False:
+    degraded = _boolean(context.get("degraded"), "context degraded")
+    semantic_available = _boolean(
+        context.get("semantic_available"),
+        "context semantic availability",
+    )
+    lifecycle_mutated = _boolean(
+        context.get("lifecycle_mutated"),
+        "context lifecycle mutation",
+    )
+    incomplete = _boolean(context.get("incomplete"), "context incomplete")
+    truncated = _boolean(context.get("truncated"), "context truncated")
+    ranking_ambiguous = _boolean(
+        context.get("ranking_ambiguous"),
+        "context ranking ambiguous",
+    )
+    competing_memory_detected = _boolean(
+        context.get("competing_memory_detected"),
+        "context competing memory detected",
+    )
+    if degraded or not semantic_available:
         raise RuntimeError("semantic context became unavailable")
+    if lifecycle_mutated:
+        raise RuntimeError("protected preflight context changed lifecycle state")
+    logic_roots = _compact_records(
+        context.get("logic_roots"),
+        "logic roots",
+    )
+    _validate_candidate_integrity(
+        logic_roots,
+        ranking_ambiguous=ranking_ambiguous,
+        competing_memory_detected=competing_memory_detected,
+        competing_pair_preserved=_optional_boolean(
+            context.get("competing_pair_preserved", _MISSING),
+            "context competing pair preserved",
+            default=False,
+        ),
+        groups=_compact_competing_groups(context.get("competing_memory_groups", [])),
+        label="context",
+    )
+    (
+        _root_expansion,
+        authenticated_root_ids,
+        root_expansion_incomplete,
+    ) = _compact_root_expansion(
+        context.get("root_expansion"),
+        logic_roots,
+    )
+    evidence = _compact_records(
+        context.get("evidence"),
+        "context evidence",
+    )
+    if len(evidence) > MAX_PREFLIGHT_CONTEXT_RECORDS:
+        raise ValueError("context evidence exceeds the host preflight record budget")
+    logic_root_ids = {str(record["vine_id"]) for record in logic_roots}
+    evidence_ids = {str(record["vine_id"]) for record in evidence}
+    if len(evidence_ids) != len(evidence):
+        raise ValueError("context evidence identifiers are not unique")
+    if logic_root_ids.intersection(evidence_ids):
+        raise RuntimeError("context evidence duplicates a logic root")
+    context_edges, omitted_edge_count = _compact_context_edges(
+        context.get("context_edges"),
+        evidence,
+        authenticated_root_ids,
+    )
+    queued_links_omitted = _nonnegative_integer(
+        context.get("queued_links_omitted", 0),
+        "queued links omitted",
+    )
+    queued_trace_was_truncated = queued_links_omitted > 0
+    trace_was_compacted = omitted_edge_count > 0
     return {
         "mode": "semantic",
-        "incomplete": context.get("incomplete") is True,
-        "truncated": context.get("truncated") is True,
-        "ranking_ambiguous": context.get("ranking_ambiguous") is True,
-        "competing_memory_detected": (context.get("competing_memory_detected") is True),
-        "logic_roots": _compact_records(
-            context.get("logic_roots"),
-            "logic roots",
+        "incomplete": (
+            incomplete
+            or root_expansion_incomplete
+            or queued_trace_was_truncated
+            or trace_was_compacted
         ),
-        "evidence": _compact_records(
-            context.get("evidence"),
-            "context evidence",
-        ),
-        "context_edges": _compact_edges(context.get("context_edges")),
+        "truncated": (truncated or queued_trace_was_truncated or trace_was_compacted),
+        "queued_links_omitted": queued_links_omitted + omitted_edge_count,
+        "context_edges_omitted": omitted_edge_count,
+        "ranking_ambiguous": ranking_ambiguous,
+        "competing_memory_detected": competing_memory_detected,
+        "logic_roots": logic_roots,
+        "evidence": evidence,
+        "context_edges": context_edges,
     }
 
 
@@ -1062,6 +1192,97 @@ def _compact_records(value: object, label: str) -> list[dict[str, Any]]:
     return [_compact_record(item) for item in value]
 
 
+def _validate_candidate_integrity(
+    records: list[dict[str, Any]],
+    *,
+    ranking_ambiguous: bool,
+    competing_memory_detected: bool,
+    competing_pair_preserved: bool,
+    groups: list[dict[str, Any]],
+    label: str,
+) -> None:
+    """Check actual members before compacting or signing upstream claims."""
+
+    record_ids = {record["vine_id"] for record in records}
+    if len(record_ids) != len(records):
+        raise ValueError(f"{label} candidate identifiers are not unique")
+    if ranking_ambiguous and len(record_ids) < 2:
+        raise RuntimeError(f"ambiguous {label} omitted a leading candidate")
+    if competing_memory_detected and (
+        not competing_pair_preserved or len(record_ids) < 2 or not groups
+    ):
+        raise RuntimeError(f"competing {label} omitted a protected candidate")
+    if bool(groups) != competing_memory_detected:
+        raise RuntimeError(f"{label} competing memory groups are inconsistent")
+    seen_groups: set[str] = set()
+    for group in groups:
+        members = group["member_ids"]
+        member_ids = set(members)
+        if (
+            len(member_ids) < 2
+            or len(member_ids) != len(members)
+            or not member_ids.issubset(record_ids)
+            or group["protected_topic_basis"] is not True
+            or group["group_id"] in seen_groups
+        ):
+            raise RuntimeError(f"{label} competing memory group is invalid")
+        seen_groups.add(group["group_id"])
+
+
+def _compact_root_expansion(
+    value: object,
+    logic_roots: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], bool]:
+    if not isinstance(value, list) or len(value) > MAX_PREFLIGHT_RESULTS:
+        raise ValueError("context root expansion is invalid")
+    root_by_id = {str(record["vine_id"]): record for record in logic_roots}
+    if len(root_by_id) != len(logic_roots):
+        raise ValueError("context logic root identifiers are not unique")
+    compact: list[dict[str, Any]] = []
+    authenticated_root_ids: set[str] = set()
+    seen: set[str] = set()
+    for raw_item in value:
+        item = _object(raw_item, "context root expansion")
+        vine_id = _bounded_required_string(
+            item.get("vine_id"),
+            "context root expansion vine_id",
+            128,
+        )
+        expanded = item.get("expanded")
+        status = _bounded_required_string(
+            item.get("status"),
+            "context root expansion status",
+            64,
+        )
+        if (
+            not isinstance(expanded, bool)
+            or status not in CONTEXT_ROOT_EXPANSION_STATUSES
+            or expanded is not (status == "authenticated")
+            or vine_id in seen
+        ):
+            raise ValueError("context root expansion is invalid")
+        seen.add(vine_id)
+        compact.append(
+            {
+                "vine_id": vine_id,
+                "expanded": expanded,
+                "status": status,
+            }
+        )
+        if expanded:
+            root = root_by_id.get(vine_id)
+            if (
+                root is None
+                or root.get("memory_layer") != "contextual_logic"
+                or root.get("gated") is True
+            ):
+                raise RuntimeError("authenticated context logic root is invalid")
+            authenticated_root_ids.add(vine_id)
+    if seen != set(root_by_id):
+        raise ValueError("context root expansion does not cover every logic root")
+    return compact, authenticated_root_ids, len(authenticated_root_ids) != len(compact)
+
+
 def _compact_record(value: object) -> dict[str, Any]:
     record = _object(value, "memory result")
     _true(record.get("layer_contract_protected"), "record protection")
@@ -1069,7 +1290,16 @@ def _compact_record(value: object) -> dict[str, Any]:
     if layer not in MEMORY_LAYERS:
         raise ValueError("memory layer is invalid")
     vine_id = _bounded_required_string(record.get("vine_id"), "vine_id", 128)
-    gated = record.get("gated") is True
+    gated = _optional_boolean(
+        record.get("gated", _MISSING),
+        "memory result gated",
+        default=False,
+    )
+    possible_conflict = _optional_boolean(
+        record.get("possible_conflict", _MISSING),
+        "memory result possible conflict",
+        default=False,
+    )
     raw_payload = record.get("payload")
     if gated:
         payload: str | None = None
@@ -1115,7 +1345,7 @@ def _compact_record(value: object) -> dict[str, Any]:
             64,
         ),
         "gated": gated,
-        "possible_conflict": record.get("possible_conflict") is True,
+        "possible_conflict": possible_conflict,
         "promotion_recommendation": _bounded_optional_string(
             record.get("promotion_recommendation"),
             128,
@@ -1150,14 +1380,17 @@ def _compact_competing_groups(value: object) -> list[dict[str, Any]]:
                     group.get("resolution_status"),
                     64,
                 ),
-                "protected_topic_basis": (group.get("protected_topic_basis") is True),
+                "protected_topic_basis": _boolean(
+                    group.get("protected_topic_basis"),
+                    "protected topic basis",
+                ),
             }
         )
     return groups
 
 
 def _compact_edges(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or len(value) > MAX_PREFLIGHT_RESULTS:
+    if not isinstance(value, list) or len(value) > MAX_CONTEXT_EDGES:
         raise ValueError("context edges are invalid")
     edges: list[dict[str, Any]] = []
     for raw_edge in value:
@@ -1177,6 +1410,67 @@ def _compact_edges(value: object) -> list[dict[str, Any]]:
     return edges
 
 
+def _compact_context_edges(
+    value: object,
+    evidence: list[dict[str, Any]],
+    authenticated_root_ids: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    edges = _compact_edges(value)
+    evidence_ids = {str(record["vine_id"]) for record in evidence}
+    for edge in edges:
+        if (
+            edge["status"] in {"included", "authenticated"}
+            and edge["to"] not in evidence_ids
+        ):
+            raise RuntimeError(
+                "authenticated context edge target is missing from evidence"
+            )
+    reachable = set(authenticated_root_ids)
+    parent_edge: dict[str, int] = {}
+    while True:
+        changed = False
+        for index, edge in enumerate(edges):
+            target = edge["to"]
+            if (
+                edge["status"] in {"included", "authenticated"}
+                and edge["from"] in reachable
+                and target not in reachable
+            ):
+                reachable.add(target)
+                parent_edge[target] = index
+                changed = True
+        if not changed:
+            break
+    if not evidence_ids.issubset(reachable):
+        raise RuntimeError(
+            "context evidence is not reachable from an authenticated root"
+        )
+
+    required_indices: set[int] = set()
+    for evidence_id in evidence_ids:
+        node = evidence_id
+        while node not in authenticated_root_ids:
+            parent_index = parent_edge.get(node)
+            if parent_index is None:
+                raise RuntimeError(
+                    "context evidence is not linked by an authenticated edge"
+                )
+            required_indices.add(parent_index)
+            node = str(edges[parent_index]["from"])
+    if len(edges) <= MAX_PREFLIGHT_CONTEXT_EDGES:
+        return edges, 0
+    if len(required_indices) > MAX_PREFLIGHT_CONTEXT_EDGES:
+        raise RuntimeError("context evidence links exceed the host preflight budget")
+
+    selected_indices = set(required_indices)
+    for index in range(len(edges)):
+        if len(selected_indices) >= MAX_PREFLIGHT_CONTEXT_EDGES:
+            break
+        selected_indices.add(index)
+    selected = [edge for index, edge in enumerate(edges) if index in selected_indices]
+    return selected, len(edges) - len(selected)
+
+
 def _first_present(request: Mapping[str, Any], *names: str) -> object:
     for name in names:
         if name in request:
@@ -1193,6 +1487,18 @@ def _object(value: object, label: str) -> dict[str, Any]:
 def _true(value: object, label: str) -> None:
     if value is not True:
         raise RuntimeError(f"{label} is invalid")
+
+
+def _boolean(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _optional_boolean(value: object, label: str, *, default: bool) -> bool:
+    if value is _MISSING:
+        return default
+    return _boolean(value, label)
 
 
 def _finite_number(value: object, label: str) -> float:

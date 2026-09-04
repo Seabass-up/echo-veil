@@ -49,6 +49,13 @@ claim: the report binds recorded smokes to their exact Echo source artifacts
 and tested host versions, while the release procedure still reruns the live
 provider and outage smokes.
 
+The 2026-09-04 source-binding refresh covers repository validation only. All
+previously qualified hosts, plus Pi and Codex, are currently `release_pending`
+after shared-source changes. Grok remains `repository_only` and Mercury
+`blocked`. The named boundaries and test records below describe implementation
+scope and historical evidence, not fresh installed-host qualification. An
+installed release must pass `--require-current HOST` and its live smokes.
+
 Ordinary MCP hosts receive only these nine tools. Profile-key rotation and
 previous-key retirement remain hidden and are rejected unless a separately
 reviewed operator MCP process starts with `--operator-tools`. RPC maintenance
@@ -116,21 +123,22 @@ adapters can auto-detect this checkout when loaded from the repository.
 | AIP | Artifact-bound provider gate + fresh-process RPC backend | **Hard runtime pre-provider gate** for Agent, SDK, workflow, chat, stream, and vision generation; no plaintext/RAM shadow store | Install the exact reviewed AIP wheel, verify `aip authority-receipt`, then require current AIP evidence; see `integrations/aip/README.md` |
 | OpenClaw | Exclusive native memory capability + nine tools + three-stage turn attestation | **Hard OpenClaw-runtime pre-model gate** plus exclusive memory routing; the native Codex app-server runtime is not a qualified path | Select the memory slot, enable both required hook permissions, disable built-in `session-memory`, pin each protected model to `agentRuntime.id="openclaw"`, then run a zero-model outage smoke |
 | Hermes | Shield-owned headless launcher plus native pre-LLM/execution plugin and stdio MCP | **Hard shielded memory-only gate** through `echo-veil-shielded-run hermes`; ordinary plugin mode remains conditional on visible plugin load | Install the reviewed plugin, then use the shielded launcher with an explicit local model; it isolates `HERMES_HOME`, disables both native memories, binds plugin digests and a launch nonce, and exposes only Echo tools |
-| Codex | Artifact-bound shielded headless/interactive profiles plus direct protected-recall plugin | **Hard isolated gate** with ambient mutable memory and parallel agents disabled; direct mode is not singular and direct collaboration is unqualified | Use `echo-veil-shielded-run codex` with the reviewed 0.147.0 artifact authority ID; the current implementation remains release-pending |
+| Codex | Artifact-bound shielded headless/interactive profiles plus direct protected-recall plugin | **Hard isolated gate** with ambient mutable memory and parallel agents disabled; direct mode is not singular and direct collaboration is unqualified | Use `echo-veil-shielded-run codex` with the reviewed 0.149.1 artifact authority ID; the current implementation remains release-pending |
 | Claude Code | Claude plugin, root/expansion/Agent hooks, implicit Agent Skill, and stdio MCP | **Hard root/Agent-spawn gate** in normal plugin mode; `--safe-mode` and `--bare` disable it, and only supported `Agent` tool spawns are covered | Disable Claude auto-memory without disabling hooks, validate the plugin, then run root-outage and Agent-spawn smokes |
 | Pi | Receipt-bound TypeScript extension, provider-bound state machine, and isolated launcher | **Hard isolated pre-provider gate** for the single-extension launcher; direct ambient stacks retain extension-order risk | Use `echo-veil-shielded-run pi` with the reviewed 0.84.2 artifact authority ID; `/echo-veil-availability` remains manual only and the implementation is release-pending |
 | OpenCode | Global/project plugin + local MCP config + canonical memory skill | **Hard root/Task-spawn gate** in the normal plugin pipeline; `--pure` disables external plugins | Merge `integrations/opencode/opencode.json`, copy `integrations/opencode/.opencode`, run the plugin tests, then run healthy and zero-token outage smokes |
 | Droid | Shield-owned headless launcher plus project/plugin MCP, skill, and native hooks | **Hard shielded headless gate**; native interactive hooks remain separately unqualified | Use `echo-veil-shielded-run droid`; Droid 0.180.0 `exec` bypasses native prompt hooks, so bare `droid exec` is outside the claim |
 | Goose | Shield-owned headless launcher plus portable recipe | **Hard shielded headless gate**; the normal recipe remains policy-driven | Use `echo-veil-shielded-run goose`; see `integrations/goose/README.md` for the explicit Echo-only profile and recipe distinction |
-| grok-build | Plugin skill, stdio MCP, prompt injection, and subagent PreToolUse | **Protected recall and injected context**; UserPromptSubmit is non-blocking and hook failures fail open | `grok plugin validate ./integrations/grok`, then `grok plugin install ./integrations/grok --trust`; do not claim a singular pre-model stop |
+| grok-build | Plugin skill, stdio MCP, best-effort prompt output, and subagent deny guard | **Protected MCP recall**; prompt delivery is unqualified, guarded spawns are denied, and hook failures still fail open | `grok plugin validate ./integrations/grok`, then `grok plugin install ./integrations/grok --trust`; do not claim a singular pre-model stop |
 | Mercury | Readiness-only guarded Agent Skill; incompatible with singular-authority mode | **Blocked for singular authority** because native mutable memory remains active | `mercury skills install --from ./integrations/mercury/SKILL.md`; disabling Second Brain still leaves native mutable memory, so payload operations remain blocked |
 
 Algo CLI required mode, OpenClaw's pinned runtime, receipt-bound isolated Pi, and a loaded Hermes
-shield plugin currently own broad tested model-turn stop boundaries. Codex and
+shield plugin implement broad model-turn stop boundaries. Codex and
 Claude Code have isolated/root stop boundaries respectively. Claude Code intercepts supported
 `Agent` tool calls before subagent creation; OpenCode
 does the same for root turns and supported `Task` calls. Claude Code and
-OpenCode root boundaries retain their recorded installed-host evidence. Their
+OpenCode root boundaries retain historical installed-host evidence, with
+current source qualification release-pending. Their
 Agent/Task-spawn boundaries retain repository/schema evidence but still require
 installed provider smokes; Codex direct collaboration receives no child-specific
 receipt and is excluded. Direct Codex also exposed a competing mutable-memory

@@ -52,7 +52,7 @@ HOST_ENFORCEMENT_TIERS = {
     "opencode": "Hard root/Task-spawn gate",
     "droid": "Hard shielded headless gate",
     "goose": "Hard shielded headless gate",
-    "grok-build": "Protected recall and injected context",
+    "grok-build": "Protected MCP recall",
     "mercury": "Blocked for singular authority",
 }
 
@@ -375,8 +375,13 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     assert re.search(
         r"Algo CLI required mode,\s+OpenClaw's pinned runtime,\s+"
         r"receipt-bound isolated Pi,\s+and a "
-        r"loaded Hermes\s+shield plugin currently own broad tested "
+        r"loaded Hermes\s+shield plugin implement broad "
         r"model-turn stop",
+        integration_readme,
+    )
+    assert "are currently `release_pending`" in integration_readme
+    assert re.search(
+        r"historical evidence, not fresh installed-host qualification",
         integration_readme,
     )
     assert re.search(
