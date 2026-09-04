@@ -7,6 +7,19 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Fixed
 
+- Export only the OpenCode plugin initializer from its discovery entry point;
+  move strict contract helpers outside the plugin directory so the installed
+  host cannot mistake validators for additional plugins.
+- Keep operator backup, restore, artifact qualification, and migration on the
+  concrete semantic adapter when Ollama is selected. Healthy operations no
+  longer fail merely because runtime availability is enabled; real embedding
+  outages still stop operator execution without a read-only fallback.
+- Support reviewed local-source/capability consent and the current success
+  message in the isolated OpenClaw loader validator. Live installation consent
+  and gateway qualification remain separate.
+- Rebind the isolated Pi candidate to the installed 0.84.4 API and package
+  lock without widening accepted versions or changing preflight v2. Rebuild
+  the artifact receipt; older package receipts must not authorize this update.
 - Bind the deployment lock to the reproducibly rebuilt wheel and document
   hash-pinned wheel installation plus the complete source-archive route for Pi.
   Bare local-wheel installs can omit the required PEP 610 hash, and plain

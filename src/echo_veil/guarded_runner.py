@@ -77,7 +77,7 @@ _HERMES_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
 _PI_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}\Z")
 _SHA256_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PI_ARTIFACT_SCHEMA = "echo-veil-pi-artifact-v1"
-PI_HOST_VERSION = "0.84.2"
+PI_HOST_VERSION = "0.84.4"
 PI_PACKAGE_VERSION = "0.8.0"
 PI_ARTIFACT_FILES = (
     "extensions/index.ts",

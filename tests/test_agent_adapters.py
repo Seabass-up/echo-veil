@@ -79,6 +79,24 @@ def _mapping(value: object) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def test_openclaw_loader_consent_is_explicit_and_isolated() -> None:
+    source = (
+        ROOT / "integrations/openclaw/tests/validate-openclaw-loader.mjs"
+    ).read_text(encoding="utf-8")
+    assert 'process.argv.includes("--confirm-local-source")' in source
+    assert 'confirmLocalSource ? ["--force", "--accept-capabilities"] : []' in source
+    assert "OPENCLAW_STATE_DIR: stateDir" in source
+    assert "OPENCLAW_CONFIG_PATH: configPath" in source
+    assert 'mkdtempSync(join(tmpdir(), "echo-veil-openclaw-loader-"))' in source
+    assert "doctor.status !== 0" in source
+    assert "].includes(doctor.stdout.trim())" in source
+    assert '"No plugin issues detected."' in source
+    assert (
+        "Plugin discovery, module loading, compatibility, and configuration checks passed."
+        in source
+    )
+
+
 def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
     codex_marketplace = _json(".agents/plugins/marketplace.json")
     claude_marketplace = _json(".claude-plugin/marketplace.json")

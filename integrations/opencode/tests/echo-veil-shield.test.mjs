@@ -2,11 +2,23 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 
+import * as pluginExports from "../.opencode/plugins/echo-veil-shield.js"
 import {
-  EchoVeilShield,
   parseCapabilitiesV1,
   validateLegacyPreflight,
-} from "../.opencode/plugins/echo-veil-shield.js"
+} from "../.opencode/lib/echo-veil-contracts.js"
+
+const { EchoVeilShield } = pluginExports
+
+test("native plugin discovery sees only the plugin initializer", async () => {
+  assert.deepEqual(Object.keys(pluginExports), ["EchoVeilShield"])
+  for (const initialize of Object.values(pluginExports)) {
+    const hooks = await initialize({ directory: "/isolated-workspace" })
+    assert.equal(typeof hooks["chat.message"], "function")
+    assert.equal(typeof hooks["chat.params"], "function")
+    assert.equal(typeof hooks["tool.execute.before"], "function")
+  }
+})
 
 const protocolFixture = JSON.parse(readFileSync(
   new URL("../../../protocol/fixtures/compatibility-v1.json", import.meta.url),
