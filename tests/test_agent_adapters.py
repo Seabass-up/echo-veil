@@ -52,7 +52,7 @@ HOST_ENFORCEMENT_TIERS = {
     "opencode": "Hard root/Task-spawn gate",
     "droid": "Hard shielded headless gate",
     "goose": "Hard shielded headless gate",
-    "grok-build": "Protected recall and injected context",
+    "grok-build": "Protected MCP recall",
     "mercury": "Blocked for singular authority",
 }
 
@@ -77,6 +77,24 @@ def _json(path: str) -> dict[str, object]:
 
 def _mapping(value: object) -> dict[str, Any]:
     return cast(dict[str, Any], value)
+
+
+def test_openclaw_loader_consent_is_explicit_and_isolated() -> None:
+    source = (
+        ROOT / "integrations/openclaw/tests/validate-openclaw-loader.mjs"
+    ).read_text(encoding="utf-8")
+    assert 'process.argv.includes("--confirm-local-source")' in source
+    assert 'confirmLocalSource ? ["--force", "--accept-capabilities"] : []' in source
+    assert "OPENCLAW_STATE_DIR: stateDir" in source
+    assert "OPENCLAW_CONFIG_PATH: configPath" in source
+    assert 'mkdtempSync(join(tmpdir(), "echo-veil-openclaw-loader-"))' in source
+    assert "doctor.status !== 0" in source
+    assert "].includes(doctor.stdout.trim())" in source
+    assert '"No plugin issues detected."' in source
+    assert (
+        "Plugin discovery, module loading, compatibility, and configuration checks passed."
+        in source
+    )
 
 
 def test_plugin_versions_and_mcp_profiles_are_aligned() -> None:
@@ -375,8 +393,13 @@ def test_text_configs_cover_every_host_and_preserve_security_boundary() -> None:
     assert re.search(
         r"Algo CLI required mode,\s+OpenClaw's pinned runtime,\s+"
         r"receipt-bound isolated Pi,\s+and a "
-        r"loaded Hermes\s+shield plugin currently own broad tested "
+        r"loaded Hermes\s+shield plugin implement broad "
         r"model-turn stop",
+        integration_readme,
+    )
+    assert "are currently `release_pending`" in integration_readme
+    assert re.search(
+        r"historical evidence, not fresh installed-host qualification",
         integration_readme,
     )
     assert re.search(

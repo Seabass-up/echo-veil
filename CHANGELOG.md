@@ -5,6 +5,44 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Export only the OpenCode plugin initializer from its discovery entry point;
+  move strict contract helpers outside the plugin directory so the installed
+  host cannot mistake validators for additional plugins.
+- Keep operator backup, restore, artifact qualification, and migration on the
+  concrete semantic adapter when Ollama is selected. Healthy operations no
+  longer fail merely because runtime availability is enabled; real embedding
+  outages still stop operator execution without a read-only fallback.
+- Support reviewed local-source/capability consent and the current success
+  message in the isolated OpenClaw loader validator. Live installation consent
+  and gateway qualification remain separate.
+- Rebind the isolated Pi candidate to the installed 0.84.4 API and package
+  lock without widening accepted versions or changing preflight v2. Rebuild
+  the artifact receipt; older package receipts must not authorize this update.
+- Bind the deployment lock to the reproducibly rebuilt wheel and document
+  hash-pinned wheel installation plus the complete source-archive route for Pi.
+  Bare local-wheel installs can omit the required PEP 610 hash, and plain
+  `npm pack` omits Pi's receipt-bound lockfile; neither bypasses the artifact gate.
+- Reject duplicate preflight candidates, incomplete or unauthenticated conflict
+  groups, and missing ambiguous/competing Contextual Logic roots before either
+  unsigned context emission or v2 receipt signing. Valid v2 wire contracts and
+  complete candidate sets remain unchanged.
+- Preserve a live broker socket when its connection probe times out, and retain
+  the original startup error when the dispatch thread has not started. Confirmed
+  stale sockets remain recoverable.
+- Return Grok's native top-level deny decision for guarded subagent requests,
+  including malformed input. Delegation remains blocked because delivery of
+  protected child context is unqualified; parent-side preflight success alone
+  cannot authorize it.
+- Select the fixture profile explicitly in operator CLI tests so a harness's
+  `ECHO_VEIL_PROFILE` cannot redirect backup, restoration, or migration checks
+  into a different empty profile.
+- Refresh reviewed host-source bindings without renewing historical installed
+  qualification: affected hosts are explicitly release-pending. Isolated
+  authority fixtures keep version/artifact rejection covered, and regression
+  checks prove matching artifacts cannot bypass the required-current gate.
+
 ## [0.8.0] - 2026-08-20
 
 ### Changed

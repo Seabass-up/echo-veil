@@ -11,6 +11,11 @@ plugins from its `plugins` directory. Install the matching Echo Veil Python
 distribution so `echo-veil-agent` is available, and install
 `qwen3-embedding:latest` in loopback-only Ollama.
 
+Copy the complete `.opencode` tree, including `lib/echo-veil-contracts.js`.
+Only the plugin initializer is exported from the discovered plugin file:
+OpenCode treats each exported function there as an initializer. Contract
+validators live outside that discovery directory and retain strict validation.
+
 The plugin:
 
 - runs the canonical semantic doctor plus two-slot, non-inferential recall at

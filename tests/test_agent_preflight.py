@@ -113,6 +113,8 @@ def _recall(
 
 
 def _context() -> dict[str, Any]:
+    logic_root = _record("logic-root")
+    logic_root["memory_layer"] = "contextual_logic"
     return {
         "degraded": False,
         "semantic_available": True,
@@ -121,7 +123,14 @@ def _context() -> dict[str, Any]:
         "truncated": False,
         "ranking_ambiguous": False,
         "competing_memory_detected": False,
-        "logic_roots": [_record("logic-root")],
+        "logic_roots": [logic_root],
+        "root_expansion": [
+            {
+                "vine_id": "logic-root",
+                "expanded": True,
+                "status": "authenticated",
+            }
+        ],
         "evidence": [_record("evidence")],
         "context_edges": [
             {
@@ -363,6 +372,75 @@ def test_preflight_v2_omits_context_payloads_before_recall_payload(
     assert response["telemetry"]["contextual_logic_used"] is True
 
 
+def test_preflight_v2_signs_compacted_reachable_context(tmp_path: Path) -> None:
+    query = "Why was this protected decision made?"
+    context = _context()
+    context["evidence"] = [
+        _record(f"evidence-{index}")
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS)
+    ]
+    context["context_edges"] = [
+        *[
+            {
+                "from": "logic-root",
+                "to": f"missing-{index}",
+                "logic_kind": "decision",
+                "status": "missing",
+                "depth": 1,
+            }
+            for index in range(6)
+        ],
+        *[
+            {
+                "from": "logic-root",
+                "to": f"evidence-{index}",
+                "logic_kind": "decision",
+                "status": "included",
+                "depth": 1,
+            }
+            for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS)
+        ],
+    ]
+    context["queued_links_omitted"] = 2
+    authority = _receipt_authority(tmp_path)
+    bindings = _receipt_inputs()
+
+    response = agent_preflight.prepare_preflight_v2(
+        PreviewMemory(context=context),
+        query,
+        authority=authority,
+        host="pi",
+        profile="echo-universal-qwen3-v1",
+        scope="local-user",
+        **bindings,
+    )
+
+    evidence = response["evidence"]
+    assert isinstance(evidence, dict)
+    contextual = evidence["contextual_logic"]
+    assert contextual["context_edges_omitted"] == 1
+    assert contextual["queued_links_omitted"] == 3
+    assert contextual["truncated"] is True
+    receipt = response["receipt"]
+    assert isinstance(receipt, dict)
+    verifier = PreflightReceiptVerifier.from_public_key_b64(
+        str(receipt["public_key_b64"]),
+        expected_authority_id=authority.authority_id,
+    )
+    claims = verifier.verify_and_consume(
+        receipt,
+        context=evidence,
+        query=query,
+        host="pi",
+        profile="echo-universal-qwen3-v1",
+        scope="local-user",
+        query_source="current_user_prompt",
+        embedding_model_digest=str(response["embedding_model_digest"]),
+        **bindings,
+    )
+    assert claims["context_digest"] == sha256_digest(canonical_json(evidence))
+
+
 @pytest.mark.parametrize(
     ("recall", "expected_flag"),
     (
@@ -388,6 +466,9 @@ def test_preflight_v2_preserves_two_only_for_ambiguity_or_conflict(
     recall: dict[str, Any],
     expected_flag: str,
 ) -> None:
+    recall = copy.deepcopy(recall)
+    if expected_flag == "conflict":
+        recall["competing_memory_groups"] = [_competing_group(["first", "second"])]
     response = agent_preflight.prepare_preflight_v2(
         PreviewMemory(recall=recall),
         "Which protected outcome applies?",
@@ -547,11 +628,328 @@ def test_preflight_adds_bounded_contextual_logic_for_causal_prompt() -> None:
             "query": "Why was this decision made?",
             "allow_inferential": False,
             "max_depth": 2,
-            "max_records": 8,
+            "max_records": agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS,
         }
     ]
     assert '"contextual_logic":{"competing_memory_detected":false' in result
     assert '"logic_kind":"decision"' in result
+
+
+def test_preflight_compacts_extra_edges_without_orphaning_evidence() -> None:
+    context = _context()
+    context["evidence"] = [
+        _record(f"evidence-{index}")
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS)
+    ]
+    included_edges = [
+        {
+            "from": "logic-root",
+            "to": f"evidence-{index}",
+            "logic_kind": "decision",
+            "status": "included",
+            "depth": 1,
+        }
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS)
+    ]
+    diagnostic_edges = [
+        {
+            "from": "logic-root",
+            "to": f"missing-{index}",
+            "logic_kind": "decision",
+            "status": "missing",
+            "depth": 1,
+        }
+        for index in range(6)
+    ]
+    context["context_edges"] = diagnostic_edges + included_edges
+    context["queued_links_omitted"] = 3
+
+    result = agent_preflight.prepare_preflight(
+        FakeMemory(context=context),
+        "Why was this decision made?",
+        host="openclaw",
+    )
+
+    evidence = json.loads(result.split("MEMORY_EVIDENCE_JSON=", 1)[1])
+    contextual = evidence["contextual_logic"]
+    assert len(contextual["context_edges"]) == 8
+    assert contextual["context_edges_omitted"] == 1
+    assert contextual["queued_links_omitted"] == 4
+    assert contextual["truncated"] is True
+    assert contextual["incomplete"] is True
+    linked = {
+        edge["to"]
+        for edge in contextual["context_edges"]
+        if edge["status"] == "included"
+    }
+    assert linked == {
+        f"evidence-{index}"
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS)
+    }
+
+
+def test_preflight_rejects_context_edges_above_memory_engine_limit() -> None:
+    context = _context()
+    context["context_edges"] = [
+        {
+            "from": "logic-root",
+            "to": f"evidence-{index}",
+            "logic_kind": "decision",
+            "status": "authenticated",
+            "depth": 1,
+        }
+        for index in range(agent_preflight.MAX_CONTEXT_EDGES + 1)
+    ]
+
+    with pytest.raises(ValueError, match="context edges are invalid"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+def test_preflight_rejects_context_evidence_unreachable_from_a_root() -> None:
+    context = _context()
+    context["context_edges"] = [
+        {
+            "from": "phantom-root",
+            "to": "evidence",
+            "logic_kind": "decision",
+            "status": "included",
+            "depth": 1,
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="not reachable from an authenticated root"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+def test_preflight_rejects_provider_context_above_requested_record_budget() -> None:
+    context = _context()
+    context["evidence"] = [
+        _record(f"evidence-{index}")
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS + 1)
+    ]
+    context["context_edges"] = [
+        {
+            "from": "logic-root",
+            "to": f"evidence-{index}",
+            "logic_kind": "decision",
+            "status": "included",
+            "depth": 1,
+        }
+        for index in range(agent_preflight.MAX_PREFLIGHT_CONTEXT_RECORDS + 1)
+    ]
+
+    with pytest.raises(ValueError, match="host preflight record budget"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+@pytest.mark.parametrize(
+    ("root_update", "message"),
+    (
+        ({"memory_layer": "long_term"}, "authenticated context logic root"),
+        ({"gated": True, "payload": None}, "authenticated context logic root"),
+    ),
+)
+def test_preflight_rejects_forged_authenticated_root_expansion(
+    root_update: dict[str, object],
+    message: str,
+) -> None:
+    context = _context()
+    context["logic_roots"][0].update(root_update)
+
+    with pytest.raises(RuntimeError, match=message):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+def test_signed_and_unsigned_preflight_reject_numeric_gated_flag(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    context["logic_roots"][0]["gated"] = 1
+    memory = PreviewMemory(context=context)
+    query = "Why was this decision made?"
+
+    with pytest.raises(ValueError, match="memory result gated"):
+        agent_preflight.prepare_preflight(memory, query, host="openclaw")
+    with pytest.raises(ValueError, match="memory result gated"):
+        agent_preflight.prepare_preflight_v2(
+            memory,
+            query,
+            authority=_receipt_authority(tmp_path),
+            host="pi",
+            profile="echo-universal-qwen3-v1",
+            scope="local-user",
+            **_receipt_inputs(),
+        )
+
+
+def test_signed_and_unsigned_preflight_reject_null_gated_flag(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    context["logic_roots"][0]["gated"] = None
+    memory = PreviewMemory(context=context)
+    query = "Why was this decision made?"
+
+    with pytest.raises(ValueError, match="memory result gated"):
+        agent_preflight.prepare_preflight(memory, query, host="openclaw")
+    with pytest.raises(ValueError, match="memory result gated"):
+        agent_preflight.prepare_preflight_v2(
+            memory,
+            query,
+            authority=_receipt_authority(tmp_path),
+            host="pi",
+            profile="echo-universal-qwen3-v1",
+            scope="local-user",
+            **_receipt_inputs(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "ambiguity_candidates_preserved",
+        "degraded",
+        "semantic_available",
+    ),
+)
+def test_preflight_rejects_null_optional_recall_boolean(field: str) -> None:
+    recall = _recall()
+    recall[field] = None
+
+    with pytest.raises(ValueError):
+        agent_preflight.build_preflight_context("openclaw", recall)
+
+
+def test_preflight_rejects_null_optional_record_conflict_flag() -> None:
+    record = _record()
+    record["possible_conflict"] = None
+
+    with pytest.raises(ValueError, match="possible conflict"):
+        agent_preflight.build_preflight_context(
+            "openclaw",
+            _recall(results=[record]),
+        )
+
+
+def test_preflight_reports_engine_queued_links_as_truncated() -> None:
+    context = _context()
+    context["queued_links_omitted"] = 2
+
+    result = agent_preflight.prepare_preflight(
+        FakeMemory(context=context),
+        "Why was this decision made?",
+        host="openclaw",
+    )
+
+    evidence = json.loads(result.split("MEMORY_EVIDENCE_JSON=", 1)[1])
+    contextual = evidence["contextual_logic"]
+    assert contextual["queued_links_omitted"] == 2
+    assert contextual["context_edges_omitted"] == 0
+    assert contextual["truncated"] is True
+    assert contextual["incomplete"] is True
+
+
+def test_signed_and_unsigned_preflight_report_unexpanded_root_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    context = _context()
+    context["logic_roots"][0]["gated"] = True
+    context["logic_roots"][0]["payload"] = None
+    context["root_expansion"] = [
+        {
+            "vine_id": "logic-root",
+            "expanded": False,
+            "status": "confidence_gated",
+        }
+    ]
+    context["evidence"] = []
+    context["context_edges"] = []
+    context["incomplete"] = False
+    context["truncated"] = False
+    query = "Why was this decision made?"
+
+    unsigned = agent_preflight.prepare_preflight(
+        FakeMemory(context=context),
+        query,
+        host="openclaw",
+    )
+    unsigned_evidence = json.loads(unsigned.split("MEMORY_EVIDENCE_JSON=", 1)[1])
+    assert unsigned_evidence["contextual_logic"]["incomplete"] is True
+    assert unsigned_evidence["contextual_logic"]["truncated"] is False
+
+    signed = agent_preflight.prepare_preflight_v2(
+        PreviewMemory(context=context),
+        query,
+        authority=_receipt_authority(tmp_path),
+        host="pi",
+        profile="echo-universal-qwen3-v1",
+        scope="local-user",
+        **_receipt_inputs(),
+    )
+    assert signed["evidence"]["contextual_logic"]["incomplete"] is True
+    assert signed["evidence"]["contextual_logic"]["truncated"] is False
+
+
+def test_preflight_rejects_evidence_that_reuses_a_logic_root_id() -> None:
+    context = _context()
+    duplicate = _record("logic-root")
+    context["evidence"] = [duplicate]
+    context["context_edges"] = []
+
+    with pytest.raises(RuntimeError, match="evidence duplicates a logic root"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+def test_preflight_rejects_duplicate_context_evidence_ids() -> None:
+    context = _context()
+    context["evidence"] = [_record("evidence"), _record("evidence")]
+
+    with pytest.raises(ValueError, match="evidence identifiers are not unique"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
+
+
+def test_preflight_rejects_authenticated_edge_without_returned_evidence() -> None:
+    context = _context()
+    context["context_edges"].append(
+        {
+            "from": "logic-root",
+            "to": "omitted-evidence",
+            "logic_kind": "decision",
+            "status": "included",
+            "depth": 1,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="edge target is missing from evidence"):
+        agent_preflight.prepare_preflight(
+            FakeMemory(context=context),
+            "Why was this decision made?",
+            host="openclaw",
+        )
 
 
 @pytest.mark.parametrize(
@@ -742,6 +1140,119 @@ def test_preflight_rejects_ambiguous_or_competing_candidate_loss() -> None:
         )
 
 
+def _competing_group(member_ids: list[str]) -> dict[str, Any]:
+    return {
+        "group_id": "protected-group",
+        "member_ids": member_ids,
+        "status": "possible_conflict",
+        "resolution_status": "unresolved",
+        "protected_topic_basis": True,
+    }
+
+
+@pytest.mark.parametrize("signed", (False, True))
+@pytest.mark.parametrize(
+    "case",
+    (
+        "duplicate_candidates",
+        "missing_conflict_candidate",
+        "missing_group_member",
+        "duplicate_group_member",
+        "unprotected_group",
+        "hidden_conflict_group",
+        "ambiguous_context_root_loss",
+        "competing_context_root_loss",
+    ),
+)
+def test_preflight_rejects_inconsistent_candidate_evidence(
+    tmp_path: Path, signed: bool, case: str
+) -> None:
+    recall = _recall(results=[_record("first"), _record("second")])
+    context = _context()
+    if case == "duplicate_candidates":
+        recall["results"][1]["vine_id"] = "first"
+        recall["ranking_ambiguous"] = True
+    elif case.endswith("context_root_loss"):
+        context["ranking_ambiguous"] = case.startswith("ambiguous")
+        context["competing_memory_detected"] = case.startswith("competing")
+        context["competing_pair_preserved"] = True
+        context["competing_memory_groups"] = (
+            [_competing_group(["logic-root", "missing-root"])]
+            if case.startswith("competing")
+            else []
+        )
+    else:
+        recall["competing_memory_detected"] = case != "hidden_conflict_group"
+        recall["competing_pair_preserved"] = True
+        group = _competing_group(["first", "second"])
+        recall["competing_memory_groups"] = [group]
+        if case == "missing_conflict_candidate":
+            recall["results"] = recall["results"][:1]
+        elif case == "missing_group_member":
+            group["member_ids"] = ["first", "missing"]
+        elif case == "duplicate_group_member":
+            group["member_ids"] = ["first", "first"]
+        elif case == "unprotected_group":
+            group["protected_topic_basis"] = False
+    memory = PreviewMemory(recall=recall, context=context)
+    with pytest.raises((ValueError, RuntimeError)):
+        if signed:
+            agent_preflight.prepare_preflight_v2(
+                memory,
+                "Why did this change?",
+                authority=_receipt_authority(tmp_path),
+                host="pi",
+                profile="echo-universal-qwen3-v1",
+                scope="local-user",
+                **_receipt_inputs(),
+            )
+        else:
+            agent_preflight.prepare_preflight(
+                memory, "Why did this change?", host="openclaw"
+            )
+
+
+def test_preflight_preserves_complete_competing_candidates() -> None:
+    recall = _recall(
+        results=[_record("first"), _record("second")],
+        competing_memory_detected=True,
+        competing_pair_preserved=True,
+    )
+    recall["competing_memory_groups"] = [_competing_group(["first", "second"])]
+    evidence = agent_preflight.build_preflight_evidence(
+        "pi", recall, adaptive_results=True
+    )
+    assert [record["vine_id"] for record in evidence["recall"]["results"]] == [
+        "first",
+        "second",
+    ]
+    assert (
+        evidence["recall"]["competing_memory_groups"]
+        == recall["competing_memory_groups"]
+    )
+
+
+def test_preflight_preserves_complete_competing_context_roots() -> None:
+    context = _context()
+    second = copy.deepcopy(context["logic_roots"][0])
+    second["vine_id"] = "second-root"
+    context["logic_roots"].append(second)
+    context["root_expansion"].append(
+        {"vine_id": "second-root", "expanded": True, "status": "authenticated"}
+    )
+    context["ranking_ambiguous"] = True
+    context["competing_memory_detected"] = True
+    context["competing_pair_preserved"] = True
+    context["competing_memory_groups"] = [
+        _competing_group(["logic-root", "second-root"])
+    ]
+    evidence = agent_preflight.build_preflight_evidence("pi", _recall(), context)
+    roots = evidence["contextual_logic"]["logic_roots"]
+    assert [root["vine_id"] for root in roots] == ["logic-root", "second-root"]
+    assert evidence["contextual_logic"]["ranking_ambiguous"] is True
+    assert evidence["contextual_logic"]["competing_memory_detected"] is True
+
+
 def test_hook_request_is_bounded_and_ignores_untrusted_path_fields() -> None:
     request = {
         "hook_event_name": "UserPromptSubmit",
@@ -796,6 +1307,78 @@ def test_grok_hook_accepts_camel_case_envelope_and_warns_instead_of_stopping() -
         "ECHO_VEIL_PREFLIGHT_UNAVAILABLE"
     )
     assert "continue" not in blocked
+
+
+def test_grok_agent_failure_uses_native_deny_decision() -> None:
+    output = agent_preflight.blocked_output("agent", host="grok-build")
+    assert output["decision"] == "deny"
+    assert isinstance(output["reason"], str)
+    assert "hookSpecificOutput" not in output
+
+
+@pytest.mark.parametrize("raw_request", (b"not-json", b"{}", b'{"toolInput": null}'))
+def test_grok_agent_malformed_request_still_returns_native_deny(
+    raw_request: bytes,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = agent_preflight.main(
+        ["--host", "grok-build", "--hook-mode", "agent"],
+        stream=BytesIO(raw_request),
+    )
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["decision"] == "deny"
+
+
+def test_grok_agent_success_cannot_allow_an_unrewritten_child() -> None:
+    request = agent_preflight.parse_hook_request(
+        json.dumps(
+            {
+                "hookEventName": "pre_tool_use",
+                "toolName": "spawn_subagent",
+                "toolInput": {"prompt": "Inspect the adapter."},
+            }
+        ).encode(),
+        mode="agent",
+        host="grok-build",
+    )
+    context = agent_preflight.build_preflight_context(
+        "grok-build", _recall(), query_source="subagent_task"
+    )
+    output = agent_preflight.success_output(request, context)
+    assert output["decision"] == "deny"
+    assert "context" in output["reason"]
+    assert "hookSpecificOutput" not in output
+
+
+@pytest.mark.parametrize("tool_name", ("spawn_subagent", "Task"))
+def test_grok_agent_hook_denies_before_opening_memory(
+    tool_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    opened: list[object] = []
+
+    def open_memory(args: object) -> FakeMemory:
+        opened.append(args)
+        return FakeMemory()
+
+    monkeypatch.setattr(agent_preflight, "_open_memory", open_memory)
+    result = agent_preflight.main(
+        ["--host", "grok-build", "--hook-mode", "agent"],
+        stream=BytesIO(
+            json.dumps(
+                {
+                    "hookEventName": "pre_tool_use",
+                    "toolName": tool_name,
+                    "toolInput": {"prompt": "Inspect the adapter."},
+                }
+            ).encode()
+        ),
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert output["decision"] == "deny"
+    assert opened == []
 
 
 @pytest.mark.parametrize(

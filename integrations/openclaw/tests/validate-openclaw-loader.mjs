@@ -68,7 +68,13 @@ function run(args) {
 }
 
 try {
-  const installed = run(["plugins", "install", "-l", pluginRoot]);
+  // Newer hosts require explicit trust for non-ClawHub sources. Opt in only
+  // after reviewing this package; --force is confined to this fresh temp state.
+  const confirmLocalSource = process.argv.includes("--confirm-local-source");
+  const installed = run([
+    "plugins", "install", "-l", pluginRoot,
+    ...(confirmLocalSource ? ["--force", "--accept-capabilities"] : []),
+  ]);
   if (installed.status !== 0) fail("isolated plugin install failed", installed);
 
   for (const setting of [
@@ -139,7 +145,11 @@ try {
   const doctor = run(["plugins", "doctor"]);
   if (
     doctor.status !== 0 ||
-    !doctor.stdout.includes("No plugin issues detected")
+    ![
+      "No plugin issues detected",
+      "No plugin issues detected.",
+      'Plugin discovery, module loading, compatibility, and configuration checks passed. Run "openclaw health" to check the running Gateway, including runtime quarantines and fallbacks.',
+    ].includes(doctor.stdout.trim())
   ) {
     fail("isolated plugin doctor failed", doctor);
   }

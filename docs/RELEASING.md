@@ -111,6 +111,19 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    repository-only, release-pending, blocked, or stale. A Pi or Codex boundary
    recorded as `runtime_release_stale` must not be promoted merely because the
    host executable version matches.
+   When reviewed source changes invalidate `integrations/authority-evidence.json`,
+   refresh the affected source digests only with an explicit evidence-state
+   review. A shared-source change invalidates every dependent host's prior
+   qualification: move formerly `qualified` or `conditional` records to
+   `release_pending` until their exact installed artifacts pass new healthy and
+   outage smokes. Preserve historical `tested_on`, `tested_version`, `checks`,
+   and `qualified_boundary` values until that requalification actually happens;
+   do not date an old smoke as a new test. Keep `repository_only`,
+   `external_unbound`, and `blocked` limitations intact.
+   The source-only CI command verifies reviewed repository bytes, not installed
+   readiness. Passing it must not be presented as passing `--require-current
+   HOST`. Unit tests exercise qualified-state version and artifact failures in
+   disposable fixtures so they cannot renew the real manifest's authority.
    For Pi, verify `integrations/pi/artifact-receipt.json` from both TypeScript
    and Python and pin that exact authority ID in the isolated launcher. For
    Codex, run the receipt-only mode with
@@ -120,6 +133,19 @@ If PyPI publishing is added, configure a PyPI Trusted Publisher bound to the
    out-of-band authority ID. One-byte drift in the host executable, wheel,
    entry points, plugin, hooks, MCP config, model/configuration, or broker
    authority must block startup.
+   Install retained local wheels with an explicit verified SHA-256 URL
+   fragment, for example `echo-veil @ file:///ABSOLUTE/WHEEL.whl#sha256=DIGEST`,
+   using `uv pip install --python QUALIFICATION_PYTHON --no-deps` after installing
+   the hash-locked runtime dependencies. A bare local-wheel path can leave
+   PEP 610 `archive_info` empty; that installation must fail the Codex artifact
+   gate rather than receiving a manually fabricated receipt.
+   Distribute Pi from the verified Echo source archive's `integrations/pi`
+   directory, retaining its lockfile and receipt. Do not use plain `npm pack`:
+   it omits `package-lock.json`, which is part of Pi's required integrity
+   contract. Verify the extracted directory with
+   `scripts/build_pi_artifact_receipt.py --directory DIRECTORY --check` before
+   and after locked dependency installation, then smoke-test that extracted
+   package through the isolated launcher.
    Use repeated `--require-current HOST` arguments for the installed boundaries
    the release claims. This digest and version check does not replace the live
    smokes. Run zero-model outage smokes for OpenClaw, Codex, Claude Code, Pi,

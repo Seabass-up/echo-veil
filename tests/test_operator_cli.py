@@ -14,6 +14,15 @@ from echo_veil import local_authority
 from echo_veil.agent_memory import AgentMemory, HashingTextEmbedder
 
 
+@pytest.fixture(autouse=True)
+def _ambient_profile_is_not_the_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real harnesses export this. Operator fixtures must select their own
+    # profile explicitly instead of exercising a different empty profile.
+    monkeypatch.setenv("ECHO_VEIL_PROFILE", "ambient-profile")
+
+
 def _profile_snapshot(root: Path) -> dict[str, tuple[bytes, int, int]]:
     return {
         path.relative_to(root).as_posix(): (
@@ -79,6 +88,48 @@ def _artifact_receipt() -> local_authority.VerifiedInstalledArtifact:
     )
 
 
+def test_ollama_operator_backup_uses_semantic_profile_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    _v3_profile(state)
+    destination = tmp_path / "backup"
+    monkeypatch.setattr(
+        agent_cli, "_build_embedder", lambda _args: HashingTextEmbedder()
+    )
+    arguments = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "ollama",
+        "--availability-layer",
+        "--destination",
+        str(destination),
+        "backup",
+        "create",
+    ]
+
+    assert agent_cli.main(arguments) == 0
+    assert destination.is_dir()
+    capsys.readouterr()
+
+    before = _profile_snapshot(state / "default")
+
+    def unavailable(_args: object) -> HashingTextEmbedder:
+        raise agent_cli.EmbeddingUnavailable("test outage")
+
+    monkeypatch.setattr(agent_cli, "_build_embedder", unavailable)
+    rejected_destination = tmp_path / "outage-backup"
+    arguments[arguments.index(str(destination))] = str(rejected_destination)
+    assert agent_cli.main(arguments) == 1
+    assert not rejected_destination.exists()
+    assert _profile_snapshot(state / "default") == before
+
+
 def test_doctor_is_observational_and_uses_offline_read_only_name(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -88,7 +139,9 @@ def test_doctor_is_observational_and_uses_offline_read_only_name(
     profile = state / "default"
     before = _profile_snapshot(profile)
 
-    result = agent_cli.main(["--state-dir", str(state), "doctor"])
+    result = agent_cli.main(
+        ["--state-dir", str(state), "--profile", "default", "doctor"]
+    )
 
     assert result == 0
     report = json.loads(capsys.readouterr().out)
@@ -141,6 +194,8 @@ def test_guided_setup_is_path_free_and_non_mutating(
         [
             "--state-dir",
             str(state),
+            "--profile",
+            "default",
             "--embedder",
             "ollama",
             "--destination",
@@ -183,6 +238,8 @@ def test_guided_setup_rejects_unconfigured_external_monotonic_authority(
         [
             "--state-dir",
             str(state),
+            "--profile",
+            "default",
             "--destination",
             str(tmp_path / "future-backup"),
             "--rollback-detection",
@@ -207,7 +264,14 @@ def test_backup_restore_operator_commands_round_trip(
     archive = tmp_path / "backup"
     target = tmp_path / "target"
     _v3_profile(state)
-    common = ["--state-dir", str(state), "--embedder", "hashing"]
+    common = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "hashing",
+    ]
 
     assert (
         agent_cli.main([*common, "--destination", str(archive), "backup", "create"])
@@ -258,7 +322,14 @@ def test_repair_migration_requires_and_consumes_a_verified_v2_backup(
 ) -> None:
     state = tmp_path / "state"
     archive = tmp_path / "pre-v3-backup"
-    common = ["--state-dir", str(state), "--embedder", "hashing"]
+    common = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "hashing",
+    ]
     with AgentMemory(state) as memory:
         memory.remember("operator migration", "Recovery must precede activation.")
 
@@ -309,7 +380,14 @@ def test_artifact_qualification_is_confirmed_path_free_and_reverified(
         "verify_current_echo_artifact",
         lambda: receipt,
     )
-    common = ["--state-dir", str(state), "--embedder", "hashing"]
+    common = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "hashing",
+    ]
 
     assert agent_cli.main([*common, "qualify", "artifact"]) == 1
     assert json.loads(capsys.readouterr().err)["error"] == "ValueError"
@@ -328,7 +406,14 @@ def test_storage_maintenance_requires_confirmation_and_is_payload_free(
 ) -> None:
     state = tmp_path / "state"
     _v3_profile(state)
-    common = ["--state-dir", str(state), "--embedder", "hashing"]
+    common = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "hashing",
+    ]
 
     assert agent_cli.main([*common, "maintain", "checkpoint"]) == 1
     error = json.loads(capsys.readouterr().err)

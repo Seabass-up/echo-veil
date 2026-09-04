@@ -64,6 +64,7 @@ include integrations/opencode/package-lock.json
 include integrations/opencode/README.md
 recursive-include integrations/opencode/.opencode/skills *.md
 recursive-include integrations/opencode/.opencode/plugins *.js
+recursive-include integrations/opencode/.opencode/lib *.js
 recursive-include integrations/opencode/tests *.mjs
 include integrations/pi/package.json
 include integrations/pi/package-lock.json

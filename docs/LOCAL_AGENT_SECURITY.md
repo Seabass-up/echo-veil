@@ -80,6 +80,18 @@ authority is qualified.
 
 ## Protected path
 
+Both preflight paths validate the actual candidate identities before emitting
+context or signing a receipt. Ambiguous results require distinct candidates;
+competing groups must have an authenticated topic basis and at least two unique
+members present in the returned set. Contextual Logic applies these checks to
+its roots too. An upstream preservation flag cannot excuse missing evidence.
+These checks do not change the preflight-v2 or runtime-status-v1 schemas.
+
+Broker startup removes an old socket only after a refused or missing-listener
+probe. A timeout is inconclusive and leaves the existing endpoint intact.
+Failures before the dispatcher starts preserve the original error and never
+attempt to join an unstarted thread.
+
 For a scoped-v2 profile, one ordinary remember operation follows this sequence:
 
 1. Validate and bound the topic, payload, identifiers, timestamps, and vectors.

@@ -70,9 +70,13 @@ Retirement additionally requires `--retire-source` and the exact
 logical unlink after verification, not a guarantee of physical secure erase.
 Never automate the review override or retirement confirmations.
 
-The installed Echo Veil distribution must match the supported `>=0.6.0,<0.8.0`
-range and be a pinned wheel, registry artifact, archive, or VCS revision.
-Editable and source-only imports fail the required-protection readiness gate.
+Algo's current source accepts `>=0.6.0,<0.9.0` only in optional mode. Required
+mode additionally binds Echo 0.8.0 to the exact VCS identity
+`271ebaa959aabd7a83cf338d30cd0fa1c7338488` and an Algo-owned source digest.
+A newer same-version wheel does not satisfy that existing identity gate.
+Requalify and release the Algo consumer against the new Echo identity before
+changing its installation; do not merely loosen the version range or refresh
+the digest. Editable and source-only imports remain disallowed.
 
 Algo CLI must preserve the complete four-layer contract:
 

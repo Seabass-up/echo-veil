@@ -320,7 +320,7 @@ Run `python scripts/verify_host_authority.py --installed` for the digest-bound
 host evidence matrix. It never treats adapter presence or a matching executable
 as proof of a live host gate. Use `--require-current HOST` only after reviewing
 the exact qualified boundary, and rerun the release smokes after any source or
-host-version drift. The source now binds Pi `0.84.2` and Codex `0.147.0`, but
+host-version drift. The source now binds Pi `0.84.2` and Codex `0.149.1`, but
 both remain release-pending until the final Echo wheel and integration artifacts
 are committed, built reproducibly, installed by exact hash, and requalified.
 
@@ -337,7 +337,7 @@ session state are not exposed. An `OPENAI_API_KEY` may supply auth when no
 Codex auth file exists. `--sandbox workspace-write` and `--allow-non-git` are
 explicit opt-ins. The launcher also supports an isolated interactive profile
 with `--codex-interactive`. Both modes require an out-of-band artifact authority
-ID produced by `--print-codex-artifact-receipt`; it binds Codex `0.147.0`, the
+ID produced by `--print-codex-artifact-receipt`; it binds Codex `0.149.1`, the
 wheel and entry points, plugin/hook/MCP files, model, configuration, and optional
 broker signing authority. One-byte drift blocks startup.
 

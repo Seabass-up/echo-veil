@@ -45,7 +45,7 @@ receipts fail closed. Required preflight failure returns from the input hook,
 so ordinary Pi input produces no agent start, provider request, or tool call.
 Every Echo tool is registered as sequential.
 
-The package and its pinned Pi `0.84.2` API are bound by
+The package and its pinned Pi `0.84.4` API are bound by
 `artifact-receipt.json`. Both the shielded Python launcher and the extension
 verify the exact source/package-lock hashes against an out-of-band
 `ECHO_VEIL_PI_ARTIFACT_AUTHORITY_ID` pin. One-byte drift blocks startup.
@@ -74,6 +74,14 @@ npm --prefix integrations/pi run check
 npm --prefix integrations/pi test
 pi install ./integrations/pi
 ```
+
+For a pinned distribution, use `integrations/pi` from the verified Echo Veil
+source archive and retain `package-lock.json` and `artifact-receipt.json`.
+Plain `npm pack` omits the lockfile and does not produce a valid receipt-bound
+Pi artifact. Verify the extracted directory before and after `npm ci` with
+`python scripts/build_pi_artifact_receipt.py --directory DIRECTORY --check`
+from the extracted Echo source root. Do not regenerate a receipt merely to
+accept an incomplete package.
 
 For the strongest supported Pi boundary, use the isolated one-turn launcher.
 It keeps the prompt off the process command line, disables sessions, ambient
@@ -105,7 +113,7 @@ the profile/model warm, and returns only payload-free transport timings. A
 missing or degraded broker blocks the required gate; it never turns the manual
 Always-Available reader into an authorized preflight.
 
-The `0.84.2` source and receipt are qualified, but these changes are not yet a
+The `0.84.4` source and receipt are candidate artifacts, not yet a
 released immutable installation. Host-authority reporting must keep the current
 installed Pi runtime release-stale until the exact artifact is committed,
 released, installed, and rechecked.
