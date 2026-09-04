@@ -261,7 +261,7 @@ working directories require the explicit `--sandbox workspace-write` and
 `--allow-non-git` opt-ins. It does not claim protected subagents because it
 prevents their creation.
 
-Codex `0.147.0` is checked before launch. First run the same command with
+Codex `0.149.1` is checked before launch. First run the same command with
 `--print-codex-artifact-receipt`, review the path-free receipt out of band, and
 pin its `artifact_authority_id` through
 `ECHO_VEIL_CODEX_ARTIFACT_AUTHORITY_ID` or
@@ -650,8 +650,9 @@ curated documents remain valid evidence when Echo has no answer; they are
 not deleted or silently written. OpenClaw installation still selects
 `plugins.slots.memory=echo-veil`. Skill-capable hosts share the same ritual,
 Goose receives it through the recipe or shielded launcher, Algo required
-mode enforces it in runtime code, and Grok Build injects protected context
-without claiming a singular pre-model stop.
+mode enforces it in runtime code, and Grok Build exposes protected MCP recall.
+Grok prompt-hook delivery remains unqualified; its native PreToolUse guard
+denies child spawns because protected child-context delivery is not verified.
 
 The shield boundary covers dynamic records sent through Echo Veil, including
 their semantic layer, provenance, promotion history, Contextual Logic links,

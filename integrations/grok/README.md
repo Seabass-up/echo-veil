@@ -6,10 +6,19 @@ and hooks that use the installed `echo-veil-preflight-hook` entry point with
 the shared `echo-universal-qwen3-v1` profile.
 
 Grok is not a singular fail-closed host. `UserPromptSubmit` is non-blocking,
-and hook failures fail open. The prompt hook injects protected context when
-preflight succeeds and a warning when it does not. `PreToolUse` on
-`spawn_subagent` / `Task` can deny an unpreflighted child. Wiki pages, source
-files, and other host evidence remain valid when Echo has no answer.
+and hook failures fail open. The prompt hook emits best-effort context or a
+warning, but consumption of that output by Grok has not been qualified. Use the
+Echo MCP tools and skill for protected recall in the current session.
+
+The `PreToolUse` guard returns Grok's native top-level
+`{"decision":"deny","reason":"..."}` response for `spawn_subagent` / `Task`,
+including malformed requests. Grok's documented decision contract does not
+provide a qualified path for delivering rewritten input to the child. These
+guarded spawns are therefore denied even when parent-side recall would succeed;
+the guard does not open memory or call an embedding provider first. Hook crashes,
+timeouts, missing binaries, and disabled plugins still follow Grok's fail-open
+behavior, so this guard is not a universal host isolation claim. Wiki pages,
+source files, and other host evidence remain valid when Echo has no answer.
 
 ```bash
 # From this repository

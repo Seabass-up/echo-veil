@@ -109,6 +109,85 @@ def _start_configured_server(
 
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
+def test_broker_startup_failure_preserves_active_server(broker_root: Path) -> None:
+    socket_path = broker_root / "echo.sock"
+    stop, thread = _start_server(socket_path, lambda *_args: {"value": 7})
+    identity = socket_path.stat().st_ino
+    try:
+        second = BrokerServer(socket_path, lambda *_args: {"value": 8})
+        with pytest.raises(BrokerError, match="already active"):
+            second.serve_forever()
+        assert socket_path.stat().st_ino == identity
+        assert BrokerClient(socket_path, caller="pi").call("doctor", {})["value"] == 7
+    finally:
+        _stop_server(stop, thread)
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
+def test_broker_probe_timeout_does_not_unlink_endpoint(
+    broker_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket_path = broker_root / "echo.sock"
+    stop, thread = _start_server(socket_path, lambda *_args: {"value": 7})
+    identity = socket_path.stat().st_ino
+    try:
+        second = BrokerServer(socket_path, lambda *_args: {"value": 8})
+
+        def congested_connect(_socket: socket.socket, _address: object) -> None:
+            raise TimeoutError("listener backlog is congested")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(socket.socket, "connect", congested_connect)
+            with pytest.raises(BrokerError, match="cannot be verified"):
+                second._remove_stale_socket()
+        assert socket_path.stat().st_ino == identity
+        assert BrokerClient(socket_path, caller="pi").call("doctor", {})["value"] == 7
+    finally:
+        _stop_server(stop, thread)
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
+def test_broker_reclaims_a_confirmed_stale_socket(broker_root: Path) -> None:
+    socket_path = broker_root / "echo.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+        stale.bind(os.fspath(socket_path))
+        socket_path.chmod(0o600)
+    stop, thread = _start_server(socket_path, lambda *_args: {"value": 7})
+    try:
+        assert BrokerClient(socket_path, caller="pi").call("doctor", {})["value"] == 7
+    finally:
+        _stop_server(stop, thread)
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
+@pytest.mark.parametrize("stage", ("writer", "connection"))
+def test_broker_thread_start_failure_cleans_up_without_masking_error(
+    broker_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    socket_path = broker_root / "echo.sock"
+    server = BrokerServer(socket_path, lambda *_args: {})
+    start = threading.Thread.start
+
+    def fail_start(thread: threading.Thread) -> None:
+        if thread.name == f"echo-veil-broker-{stage}":
+            raise RuntimeError("cannot start test worker")
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    connection, peer = socket.socketpair()
+    with connection, peer:
+        monkeypatch.setattr(socket.socket, "accept", lambda _sock: (connection, ""))
+        with pytest.raises(RuntimeError, match="cannot start test worker"):
+            server.serve_forever()
+        assert not socket_path.exists()
+        if stage == "connection":
+            assert connection.fileno() == -1
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix socket required")
 def test_owner_only_broker_round_trip_is_bound_and_payload_free(
     broker_root: Path,
 ) -> None:
