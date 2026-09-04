@@ -691,14 +691,14 @@ def test_pi_executable_version_is_exactly_qualified(
     monkeypatch.setattr(
         guarded_runner.subprocess,
         "run",
-        lambda *args, **kwargs: completed(b"0.84.2\n"),
+        lambda *args, **kwargs: completed(b"0.84.4\n"),
     )
     guarded_runner._verify_pi_version("/verified/pi")
 
     monkeypatch.setattr(
         guarded_runner.subprocess,
         "run",
-        lambda *args, **kwargs: completed(b"0.84.1\n"),
+        lambda *args, **kwargs: completed(b"0.84.2\n"),
     )
     with pytest.raises(RuntimeError, match="version is not qualified"):
         guarded_runner._verify_pi_version("/verified/pi")

@@ -1946,7 +1946,11 @@ def _run_operator_command(args: argparse.Namespace) -> int:
         return _run_local_production_init(args)
     if args.mode in {"repair", "maintain"}:
         return _run_explicit_maintenance(args)
-    with _open_memory(args) as memory:
+    # Operator recovery/migration needs the concrete semantic adapter. Never
+    # allow a read-only availability wrapper to authorize these operations.
+    operator_args = argparse.Namespace(**vars(args))
+    operator_args.availability_layer = False
+    with _open_memory(operator_args) as memory:
         if not isinstance(memory, AgentMemory):
             raise RuntimeError("operator command requires the semantic profile")
         if args.mode == "qualify":

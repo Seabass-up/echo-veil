@@ -45,7 +45,7 @@ receipts fail closed. Required preflight failure returns from the input hook,
 so ordinary Pi input produces no agent start, provider request, or tool call.
 Every Echo tool is registered as sequential.
 
-The package and its pinned Pi `0.84.2` API are bound by
+The package and its pinned Pi `0.84.4` API are bound by
 `artifact-receipt.json`. Both the shielded Python launcher and the extension
 verify the exact source/package-lock hashes against an out-of-band
 `ECHO_VEIL_PI_ARTIFACT_AUTHORITY_ID` pin. One-byte drift blocks startup.
@@ -113,7 +113,7 @@ the profile/model warm, and returns only payload-free transport timings. A
 missing or degraded broker blocks the required gate; it never turns the manual
 Always-Available reader into an authorized preflight.
 
-The `0.84.2` source and receipt are qualified, but these changes are not yet a
+The `0.84.4` source and receipt are candidate artifacts, not yet a
 released immutable installation. Host-authority reporting must keep the current
 installed Pi runtime release-stale until the exact artifact is committed,
 released, installed, and rechecked.

@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:d8e51b138cdea011853287746ac74eb950ffad14f3a7d38fb8f38c3384e6ee10",
+  "shared_source_digest": "sha256:ea409434519e43e85cd686df02b576a40903232c26a9994144f9516da33e51ae",
   "hosts": [
     {
       "id": "algo-cli",
@@ -34,7 +34,7 @@
       "tested_on": "2026-07-25",
       "tested_version": "0.18.0",
       "source_artifacts": ["integrations/algo-cli/README.md"],
-      "source_digest": "sha256:b2d02f582fe83053bc8d17daa2f8b6014f5e0625874aecc1e639ed489ec5d95c",
+      "source_digest": "sha256:99474c68a1ba6621f1035bd2861b7a46192c1da7f1cc148401946eb150aba7fc",
       "checks": [
         "Installed readiness and four-layer bridge suite",
         "Healthy ordinary-turn protected context",
@@ -46,7 +46,7 @@
       "remaining": [
         "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "The Algo implementation lives in a separate repository and must retain its own source and installed-wheel gates",
-        "Algo release governance is blocked by an unauthorized dirty hardening set and stale qualification source digest",
+        "The 2026-09-04 Algo checkout was clean, but its active interpreter had no Echo distribution and required-mode source pins still target an older Echo commit; requalify that consumer before installation",
         "Production enclave readiness is not asserted"
       ]
     },
@@ -106,7 +106,7 @@
         "integrations/openclaw/tests/validate-openclaw-loader.mjs",
         "scripts/verify_openclaw_deployment.py"
       ],
-      "source_digest": "sha256:2953ba885a59cc2c5edad964ad36df01cc4c619e89dd5c80c276a640f563c99a",
+      "source_digest": "sha256:4b9945ccae3ac11c51070011173c22cb5c3ffc4bf60982e1cb1ff550ee9db99e",
       "checks": [
         "Exclusive memory-slot selection",
         "Exact nine-tool main-agent allowlist",
@@ -141,7 +141,7 @@
         "tests/test_guarded_runner.py",
         "tests/test_hermes_plugin.py"
       ],
-      "source_digest": "sha256:6fee73f770f603b79601670ce26af68f008c76c153ae4400aa783fe186eec74b",
+      "source_digest": "sha256:1fb314e29c82b0e000aca08fc8de30d57d4439d1c4fca1521b9061cc4ecb77ca",
       "checks": [
         "Healthy local-provider preflight",
         "Exact session, task, turn, and nonce binding",
@@ -179,7 +179,7 @@
         "tests/test_codex_artifact.py",
         "tests/test_guarded_runner.py"
       ],
-      "source_digest": "sha256:36f36db73aa9054f86b862a8a973501e9d77be09280cdaa5e12cd36d0daa095a",
+      "source_digest": "sha256:afa7e1a410563bd1f747fa5fff13ef5dc756a5ca01ff54edabc46d86534815d8",
       "checks": [
         "Codex 0.146.0 executable and exact PEP 610 wheel verified from hashed bytes",
         "One receipt binds executable, wheel, entry points, plugin, hooks, MCP, model, configuration, state, and broker authority",
@@ -226,6 +226,7 @@
       "remaining": [
         "Shared Echo sources changed after the recorded smokes; rebuild, install, and requalify exact artifacts before promotion",
         "Installed spawn attempt completed protected root preflight but Claude Code was not authenticated",
+        "Excluded from the 2026-09-04 operational rollout at the operator's request; authenticated live testing is deferred",
         "Healthy and denied installed Agent spawns remain release gates",
         "Safe mode and bare mode disable the required hooks",
         "A separately configured duplicate MCP entry may still require user approval"
@@ -251,7 +252,7 @@
         "integrations/pi/tests/artifact.test.ts",
         "integrations/pi/tests/runner.test.ts"
       ],
-      "source_digest": "sha256:971e040f725ca0830ead43873e6697c0aefaa41bbcbbfb7525944aef10a51715",
+      "source_digest": "sha256:23a55e8a0f32e6a94cf50886539617007574ba37e356797fb99fb310a5323e7e",
       "checks": [
         "Compiled against pinned real Pi 0.84.1 types",
         "Artifact receipt binds source, package, lockfile, and extension authority",
@@ -283,10 +284,11 @@
       "source_artifacts": [
         "integrations/opencode/opencode.json",
         "integrations/opencode/.opencode/plugins/echo-veil-shield.js",
+        "integrations/opencode/.opencode/lib/echo-veil-contracts.js",
         "integrations/opencode/.opencode/skills/echo-veil-memory/SKILL.md",
         "integrations/opencode/tests/echo-veil-shield.test.mjs"
       ],
-      "source_digest": "sha256:3fccf0b3f47a03592ae06e03871de7182db90b571c324bbb16fb5923a927dcfd",
+      "source_digest": "sha256:a7f1f62d4cd4dc4370e222bf23b37159e7017d3310ed486584553e52699805a5",
       "checks": [
         "Installed root-turn protected marker",
         "Forced-outage zero-assistant-message, zero-token, and zero-cost result",
@@ -406,6 +408,7 @@
     }
   ],
   "limitations": [
+    "Additional 2026-09-04 candidate smokes and rollout blockers are recorded in docs/reviews/2026-09-04-harness-rollout.md; they do not renew the historical installed authority records.",
     "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
     "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
     "The 2026-09-04 source-binding refresh records reviewed repository bytes only; tested_on, tested_version, checks, and qualified_boundary remain historical evidence, not new installed qualification.",

@@ -83,6 +83,12 @@ into a disposable isolated OpenClaw state directory, selects its memory slot,
 loads the real runtime, verifies all nine tools, runs plugin doctor, and removes
 the temporary state.
 
+OpenClaw 2026.9.1 requires explicit source trust and capability acceptance for
+local plugins. After reviewing the package and its declared capabilities, use
+`npm run plugin:validate -- --confirm-local-source`.
+This acceptance applies only to the validator's freshly created temporary
+state; it does not overwrite or authorize the operator's live plugin install.
+
 For a copied or packaged install, install the artifact-bound
 `echo-veil-agent` console script. `projectPath` is development-only and is
 rejected by the deployment verifier. `stateDir` and `profile` select the encrypted local profile. Codex and

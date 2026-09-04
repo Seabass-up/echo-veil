@@ -88,6 +88,48 @@ def _artifact_receipt() -> local_authority.VerifiedInstalledArtifact:
     )
 
 
+def test_ollama_operator_backup_uses_semantic_profile_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    _v3_profile(state)
+    destination = tmp_path / "backup"
+    monkeypatch.setattr(
+        agent_cli, "_build_embedder", lambda _args: HashingTextEmbedder()
+    )
+    arguments = [
+        "--state-dir",
+        str(state),
+        "--profile",
+        "default",
+        "--embedder",
+        "ollama",
+        "--availability-layer",
+        "--destination",
+        str(destination),
+        "backup",
+        "create",
+    ]
+
+    assert agent_cli.main(arguments) == 0
+    assert destination.is_dir()
+    capsys.readouterr()
+
+    before = _profile_snapshot(state / "default")
+
+    def unavailable(_args: object) -> HashingTextEmbedder:
+        raise agent_cli.EmbeddingUnavailable("test outage")
+
+    monkeypatch.setattr(agent_cli, "_build_embedder", unavailable)
+    rejected_destination = tmp_path / "outage-backup"
+    arguments[arguments.index(str(destination))] = str(rejected_destination)
+    assert agent_cli.main(arguments) == 1
+    assert not rejected_destination.exists()
+    assert _profile_snapshot(state / "default") == before
+
+
 def test_doctor_is_observational_and_uses_offline_read_only_name(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
