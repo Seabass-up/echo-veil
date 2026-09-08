@@ -23,7 +23,7 @@
     "src/echo_veil/readiness_store.py",
     "src/echo_veil/record_envelope.py"
   ],
-  "shared_source_digest": "sha256:6807887200fee0ef2004518c368bbf31957b4784e71176bdbb7bba908afadbce",
+  "shared_source_digest": "sha256:9608bae8e13088ad637521d70ea515e404a7bb2c9ef0ecb1177376fe481b87d7",
   "hosts": [
     {
       "id": "algo-cli",
@@ -412,6 +412,7 @@
     }
   ],
   "limitations": [
+    "The shared source binding includes the MMR pair-reuse optimization; historical host smokes, artifact bindings, and release-pending states are unchanged and do not qualify this candidate.",
     "This report binds recorded evidence to repository files and exact installed host versions; it does not rerun provider or model-turn smokes.",
     "Matching source digests and versions do not prove plugin enablement, hook trust, authorization scope, or live external attestation.",
     "Pi and Codex remain release-pending and must report runtime_release_stale until exact immutable artifacts are committed, released, installed, and requalified.",

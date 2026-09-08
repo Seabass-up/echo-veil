@@ -7,6 +7,11 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ### Fixed
 
+- Reuse each eligible vector-pair comparison within one MMR ranking operation
+  instead of recomputing the selected prefix. The ranker preserves temporal
+  priority, relevance, diversity, topic exclusions, and stable tie ordering
+  while reducing pair comparisons from cubic to quadratic growth. No recall
+  decisions are cached across calls; host qualification remains separate.
 - Preserve SQLite writer locks during POSIX permission, identity, and profile
   health checks. Inspect existing files through pinned parent directories
   without opening and closing database or sidecar descriptors. See

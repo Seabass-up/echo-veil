@@ -8293,32 +8293,45 @@ def _predicate_query(query: str) -> str:
 
 
 def _mmr_rank(candidates: list[_RankedCandidate]) -> list[_RankedCandidate]:
-    remaining = list(candidates)
+    remaining = list(range(len(candidates)))
     selected: list[_RankedCandidate] = []
+    topics = [candidate.topic.casefold() for candidate in candidates]
+    similarities: list[float | None] = [None] * len(candidates)
+
+    def selection_key(index: int) -> tuple[int, float, float]:
+        candidate = candidates[index]
+        diversity = similarities[index]
+        mmr = MMR_RELEVANCE_WEIGHT * candidate.relevance_score - (
+            1.0 - MMR_RELEVANCE_WEIGHT
+        ) * max(0.0, 0.0 if diversity is None else diversity)
+        return (
+            1 if candidate.temporal_current else 0,
+            mmr,
+            candidate.effective_at,
+        )
+
     while remaining:
-
-        def selection_key(candidate: _RankedCandidate) -> tuple[int, float, float]:
-            diversity = 0.0
-            if candidate.best_vector is not None:
-                similarities = [
-                    cosine_similarity(candidate.best_vector, prior.best_vector)
-                    for prior in selected
-                    if prior.best_vector is not None
-                    and prior.topic.casefold() != candidate.topic.casefold()
-                ]
-                diversity = max(similarities, default=0.0)
-            mmr = MMR_RELEVANCE_WEIGHT * candidate.relevance_score - (
-                1.0 - MMR_RELEVANCE_WEIGHT
-            ) * max(0.0, diversity)
-            return (
-                1 if candidate.temporal_current else 0,
-                mmr,
-                candidate.effective_at,
-            )
-
-        winner = max(remaining, key=selection_key)
+        winner_index = max(remaining, key=selection_key)
+        winner = candidates[winner_index]
         selected.append(winner)
-        remaining.remove(winner)
+        remaining.remove(winner_index)
+        if winner.best_vector is None:
+            continue
+        # Only the newly selected vector can change a remaining candidate's
+        # maximum. Preserve the original first-value/max fold and tie order.
+        for index in remaining:
+            candidate = candidates[index]
+            if (
+                candidate.best_vector is not None
+                and topics[index] != topics[winner_index]
+            ):
+                similarity = cosine_similarity(
+                    candidate.best_vector, winner.best_vector
+                )
+                previous = similarities[index]
+                similarities[index] = (
+                    similarity if previous is None else max(previous, similarity)
+                )
     return selected
 
 
