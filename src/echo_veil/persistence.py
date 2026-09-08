@@ -31,8 +31,8 @@ import numpy as np
 
 from ._json import strict_json_loads
 from .agent_security import (
-    _posix_identity,
-    _posix_open_private_file,
+    _posix_prepare_private_sqlite_file,
+    _posix_stat_private_file,
     _secure_directory as _secure_profile_directory,
     _windows_create_private_staging,
     _windows_ensure_private_directory,
@@ -248,12 +248,9 @@ class SQLiteStore:
             return None
         _secure_profile_directory(path.parent)
         try:
-            with _posix_open_private_file(
-                path,
-                os.O_RDWR | os.O_CREAT,
-                label="SQLite database",
-            ) as descriptor:
-                return _posix_identity(os.fstat(descriptor))
+            return _posix_prepare_private_sqlite_file(
+                path, label="SQLite database"
+            ).identity
         except OSError as exc:
             raise ValueError(
                 "database file permissions, ownership, or identity are unsafe"
@@ -269,26 +266,17 @@ class SQLiteStore:
             SQLiteStore._secure_database_file(database_path)
             return
         try:
-            with _posix_open_private_file(
-                path,
-                os.O_RDWR,
-                label="SQLite database",
-            ) as descriptor:
-                current_identity = _posix_identity(os.fstat(descriptor))
-                if (
-                    expected_identity is not None
-                    and current_identity != expected_identity
-                ):
-                    raise OSError("SQLite database identity changed during open")
+            current_identity = _posix_stat_private_file(
+                path, label="SQLite database"
+            ).identity
+            if expected_identity is not None and current_identity != expected_identity:
+                raise OSError("SQLite database identity changed during open")
             for suffix in ("-wal", "-shm"):
                 sidecar = Path(f"{database_path}{suffix}")
                 try:
-                    with _posix_open_private_file(
-                        sidecar,
-                        os.O_RDWR,
-                        label=f"SQLite {suffix[1:]} sidecar",
-                    ):
-                        pass
+                    _posix_stat_private_file(
+                        sidecar, label=f"SQLite {suffix[1:]} sidecar"
+                    )
                 except FileNotFoundError:
                     continue
         except OSError as exc:

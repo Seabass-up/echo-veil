@@ -54,8 +54,9 @@ from .agent_security import (
     ScopedAesGcmShield,
     ScopedProtectedBlob,
     ScopedProtectedVector,
-    _posix_open_private_file,
     _posix_pinned_directory_chain,
+    _posix_prepare_private_sqlite_file,
+    _posix_stat_private_file,
     _read_private_file_bytes,
     _secure_directory as _secure_profile_directory,
     _write_new_key,
@@ -8828,12 +8829,7 @@ def _profile_access_is_owner_only(profile_dir: Path) -> bool:
                 with _posix_pinned_directory_chain(candidate):
                     pass
             else:
-                with _posix_open_private_file(
-                    candidate,
-                    os.O_RDONLY,
-                    label="profile state file",
-                ):
-                    pass
+                _posix_stat_private_file(candidate, label="profile state file")
         return True
     except (OSError, RuntimeError, ValueError):
         return False
@@ -8893,12 +8889,7 @@ def _secure_regular_file(path: Path) -> None:
         return
     _secure_directory(path.parent)
     try:
-        with _posix_open_private_file(
-            path,
-            os.O_RDWR | os.O_CREAT,
-            label=path.name,
-        ):
-            pass
+        _posix_prepare_private_sqlite_file(path, label=path.name)
     except OSError as exc:
         raise ValueError(f"{path.name} ownership or identity is unsafe") from exc
 
@@ -8931,8 +8922,7 @@ def _require_secure_regular_file(path: Path, label: str) -> None:
             raise RuntimeError(f"{label} Windows DACL or identity is unsafe") from exc
     else:
         try:
-            with _posix_open_private_file(path, os.O_RDONLY, label=label):
-                pass
+            _posix_stat_private_file(path, label=label)
         except OSError as exc:
             raise RuntimeError(
                 f"{label} permissions, ownership, or identity are unsafe"
@@ -8949,12 +8939,7 @@ def _verify_private_sqlite_files(path: Path, label: str) -> None:
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{path}{suffix}")
         try:
-            with _posix_open_private_file(
-                sidecar,
-                os.O_RDONLY,
-                label=f"{label} {suffix[1:]} sidecar",
-            ):
-                pass
+            _posix_stat_private_file(sidecar, label=f"{label} {suffix[1:]} sidecar")
         except FileNotFoundError:
             continue
         except OSError as exc:

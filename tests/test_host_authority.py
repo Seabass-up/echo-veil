@@ -19,10 +19,65 @@ from scripts.verify_host_authority import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PENDING_HOSTS = {
+    "algo-cli",
+    "aip",
+    "openclaw",
+    "hermes",
+    "codex",
+    "claude-code",
+    "pi",
+    "opencode",
+    "droid",
+    "goose",
+}
 
 
 def _manifest() -> dict[str, Any]:
     return load_manifest(DEFAULT_MANIFEST)
+
+
+@pytest.fixture
+def qualified_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    """Exercise qualified-state gates without promoting repository evidence."""
+
+    (tmp_path / "shared.txt").write_text("reviewed shared gate\n", encoding="utf-8")
+    (tmp_path / "adapter.txt").write_text("reviewed adapter\n", encoding="utf-8")
+    return tmp_path, {
+        "schema_version": 1,
+        "profile": "fixture-profile",
+        "scope": "fixture-scope",
+        "shared_source_artifacts": ["shared.txt"],
+        "shared_source_digest": artifact_digest(tmp_path, ["shared.txt"]),
+        "hosts": [
+            {
+                "id": "aip",
+                "display_name": "AIP fixture",
+                "adapter": "isolated test adapter",
+                "evidence_state": "qualified",
+                "qualified_boundary": "fixture only",
+                "tested_on": "2026-09-04",
+                "tested_version": "1.2.3",
+                "source_artifacts": ["adapter.txt"],
+                "source_digest": artifact_digest(tmp_path, ["adapter.txt"]),
+                "artifact_binding": {
+                    "kind": "pep610-wheel-sha256-v1",
+                    "distribution": "fixture-host",
+                    "version": "1.2.3",
+                    "sha256": "a" * 64,
+                    "receipt_schema": 1,
+                    "memory_contract": "echo-veil-singular-authority-v1",
+                    "profile": "fixture-profile",
+                    "scope": "fixture-scope",
+                    "caller": "aip",
+                    "plaintext_fallback": False,
+                },
+                "checks": ["fixture evidence only"],
+                "remaining": ["not installed-host qualification"],
+            }
+        ],
+        "limitations": ["isolated unit-test fixture"],
+    }
 
 
 def _matching_probe(manifest: dict[str, Any]):
@@ -89,17 +144,16 @@ def test_authority_manifest_is_source_bound_and_truthful() -> None:
         == normalized["shared_source_digest"]
     )
     assert report["shared_source_evidence_current"] is True
+    assert all(host["source_evidence_current"] for host in report["hosts"])
     assert report["all_hosts_singular_authority"] is False
+    assert report["current_boundaries"] == []
     assert report["blocked_hosts"] == ["mercury"]
-    assert report["not_current_hosts"] == ["codex", "pi", "grok-build"]
+    assert set(report["not_current_hosts"]) == PENDING_HOSTS | {"grok-build"}
     statuses = {host["id"]: host["authority_status"] for host in report["hosts"]}
-    assert statuses["algo-cli"] == "qualified_boundary_current"
-    assert statuses["hermes"] == "qualified_boundary_current"
-    assert statuses["droid"] == "qualified_boundary_current"
-    assert statuses["codex"] == "runtime_release_stale"
-    assert statuses["pi"] == "runtime_release_stale"
+    for host_id in PENDING_HOSTS:
+        assert statuses[host_id] == "runtime_release_stale"
+    assert statuses["grok-build"] == "repository_only"
     assert statuses["mercury"] == "blocked"
-    assert statuses["aip"] == "qualified_boundary_current"
 
 
 def test_authority_report_never_promotes_presence_or_a_new_version() -> None:
@@ -119,8 +173,9 @@ def test_authority_report_never_promotes_presence_or_a_new_version() -> None:
     )
     statuses = {host["id"]: host["authority_status"] for host in report["hosts"]}
 
-    assert statuses["codex"] == "runtime_release_stale"
-    assert statuses["pi"] == "runtime_release_stale"
+    for host_id in PENDING_HOSTS:
+        assert statuses[host_id] == "runtime_release_stale"
+    assert statuses["grok-build"] == "repository_only"
     assert statuses["mercury"] == "blocked"
 
 
@@ -143,8 +198,10 @@ def test_aip_artifact_receipt_must_match_the_reviewed_wheel() -> None:
     }
 
 
-def test_aip_artifact_mismatch_prevents_current_authority() -> None:
-    manifest = _manifest()
+def test_aip_artifact_mismatch_prevents_current_authority(
+    qualified_fixture: tuple[Path, dict[str, Any]],
+) -> None:
+    root, manifest = qualified_fixture
     matching = _matching_artifact_probe(manifest)
 
     def mismatching_probe(host_id: str) -> dict[str, object]:
@@ -157,7 +214,7 @@ def test_aip_artifact_mismatch_prevents_current_authority() -> None:
         }
 
     report = audit_authority(
-        ROOT,
+        root,
         manifest,
         installed=True,
         version_probe=_matching_probe(manifest),
@@ -171,6 +228,113 @@ def test_aip_artifact_mismatch_prevents_current_authority() -> None:
         "verified": False,
     }
     assert "aip" in report["not_current_hosts"]
+
+
+@pytest.mark.parametrize("state", ["qualified", "conditional"])
+def test_current_fixture_requires_source_version_and_artifact_evidence(
+    qualified_fixture: tuple[Path, dict[str, Any]], state: str
+) -> None:
+    root, manifest = qualified_fixture
+    manifest["hosts"][0]["evidence_state"] = state
+
+    report = audit_authority(
+        root,
+        manifest,
+        installed=True,
+        version_probe=_matching_probe(manifest),
+        artifact_probe=_matching_artifact_probe(manifest),
+    )
+
+    assert report["hosts"][0]["authority_status"] == f"{state}_boundary_current"
+    assert report["current_boundaries"] == ["aip"]
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expected"),
+    [
+        ({"status": "present", "version": "999.0.0"}, "runtime_version_stale"),
+        ({"status": "missing", "version": None}, "runtime_unavailable"),
+        ({"status": "unrecognized", "version": None}, "runtime_unavailable"),
+    ],
+)
+def test_qualified_fixture_rejects_unreviewed_runtime(
+    qualified_fixture: tuple[Path, dict[str, Any]],
+    runtime: dict[str, object],
+    expected: str,
+) -> None:
+    root, manifest = qualified_fixture
+
+    report = audit_authority(
+        root,
+        manifest,
+        installed=True,
+        version_probe=lambda _host: runtime,
+        artifact_probe=_matching_artifact_probe(manifest),
+    )
+
+    assert report["hosts"][0]["authority_status"] == expected
+    assert report["current_boundaries"] == []
+
+
+@pytest.mark.parametrize("state", ["qualified", "release_pending"])
+@pytest.mark.parametrize("source", ["shared.txt", "adapter.txt"])
+def test_source_drift_still_blocks_qualified_and_pending_evidence(
+    qualified_fixture: tuple[Path, dict[str, Any]], state: str, source: str
+) -> None:
+    root, manifest = qualified_fixture
+    manifest["hosts"][0]["evidence_state"] = state
+    (root / source).write_text("unreviewed change\n", encoding="utf-8")
+
+    report = audit_authority(
+        root,
+        manifest,
+        installed=True,
+        version_probe=_matching_probe(manifest),
+        artifact_probe=_matching_artifact_probe(manifest),
+    )
+
+    assert report["hosts"][0]["authority_status"] == "source_evidence_stale"
+    assert report["hosts"][0]["source_evidence_current"] is False
+    assert report["current_boundaries"] == []
+
+
+@pytest.mark.parametrize("state", ["release_pending", "repository_only", "blocked"])
+def test_require_current_rejects_unqualified_evidence_with_matching_artifacts(
+    qualified_fixture: tuple[Path, dict[str, Any]],
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, manifest = qualified_fixture
+    manifest["hosts"][0]["evidence_state"] = state
+    manifest_path = root / "authority.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(verify_host_authority, "ROOT", root)
+
+    def matching_audit(root, manifest, *, installed=False):
+        return audit_authority(
+            root,
+            manifest,
+            installed=installed,
+            version_probe=_matching_probe(manifest),
+            artifact_probe=_matching_artifact_probe(manifest),
+        )
+
+    monkeypatch.setattr(verify_host_authority, "audit_authority", matching_audit)
+
+    # Repository freshness is not an installed-host promotion gate.
+    assert verify_host_authority.main(["--manifest", str(manifest_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["current_boundaries"] == []
+    result = verify_host_authority.main(
+        ["--manifest", str(manifest_path), "--require-current", "aip"]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 2
+    assert report["shared_source_evidence_current"] is True
+    assert report["current_boundaries"] == []
+    expected = "runtime_release_stale" if state == "release_pending" else state
+    assert report["gate_failures"] == [f"aip: {expected}"]
 
 
 def test_authority_report_marks_changed_source_stale(tmp_path: Path) -> None:

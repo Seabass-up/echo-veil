@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import numpy as np
@@ -88,6 +89,7 @@ _CUSTODY_REF_RE = re.compile(r"evkc-[0-9a-f]{32}\Z")
 _PROCESS_INSTANCE_RE = re.compile(r"[0-9a-f]{32}\Z")
 _CUSTODY_ACTIVATION_SCHEMA = "echo-veil-custody-activation-v1"
 _PROCESS_INSTANCE_ID = secrets.token_hex(16)
+_POSIX_SQLITE_CREATE_LOCK = RLock()
 
 
 class KeyUnavailable(RuntimeError):
@@ -441,6 +443,52 @@ def _posix_open_private_file(
                 raise OSError(f"{label} POSIX identity changed while open")
         finally:
             os.close(descriptor)
+
+
+def _posix_stat_private_file(path: Path, *, label: str) -> _PosixFileState:
+    """Observe private metadata without closing a descriptor on a live SQLite inode."""
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    with _posix_pinned_directory_chain(absolute.parent) as parent_descriptor:
+        observed: _PosixFileState | None = None
+        for _ in range(2):
+            information = os.stat(
+                absolute.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(information.st_mode)
+                or int(information.st_uid) != _posix_current_uid()
+                or int(information.st_nlink) != 1
+                or stat.S_IMODE(information.st_mode) & 0o077
+            ):
+                raise PermissionError(f"{label} POSIX ownership or identity is unsafe")
+            current = _PosixFileState(
+                identity=_posix_identity(information),
+                uid=int(information.st_uid),
+                mode=stat.S_IMODE(information.st_mode),
+            )
+            if observed is not None and current != observed:
+                raise OSError(f"{label} POSIX identity changed during inspection")
+            observed = current
+    assert observed is not None
+    return observed
+
+
+def _posix_prepare_private_sqlite_file(path: Path, *, label: str) -> _PosixFileState:
+    """Create exclusively or inspect an existing database without opening it."""
+
+    # Even a read-only open/close cancels the process's POSIX SQLite locks.
+    # Serialize creation so another local initializer cannot open a new database
+    # before its creating descriptor has closed.
+    with _POSIX_SQLITE_CREATE_LOCK:
+        try:
+            with _posix_open_private_file(
+                path, os.O_RDWR | os.O_CREAT | os.O_EXCL, label=label
+            ):
+                pass
+        except FileExistsError:
+            pass
+        return _posix_stat_private_file(path, label=label)
 
 
 def _secure_directory(path: Path) -> Path:

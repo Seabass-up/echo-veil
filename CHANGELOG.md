@@ -5,6 +5,13 @@ All notable changes to Echo Veil are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve SQLite writer locks during POSIX permission, identity, and profile
+  health checks. Inspect existing files through pinned parent directories
+  without opening and closing database or sidecar descriptors. See
+  `docs/SQLITE-LOCK-SAFETY.md`; installed-host promotion remains separate.
+
 ## [0.8.0] - 2026-08-20
 
 ### Changed

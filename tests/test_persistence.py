@@ -509,7 +509,7 @@ def test_database_sidecar_hard_link_is_rejected(tmp_path: Path) -> None:
             with pytest.raises(ValueError, match="unsafe access"):
                 store._verify_database_files(
                     str(path),
-                    persistence_module._posix_identity(os.stat(path)),
+                    agent_security._posix_identity(os.stat(path)),
                 )
         finally:
             alias.unlink()
